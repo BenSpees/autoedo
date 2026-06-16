@@ -19,10 +19,21 @@ void PsolaPitchCorrector::prepare (double sampleRate, int numChannels, int maxBl
 {
     fs        = sampleRate > 0.0 ? sampleRate : 44100.0;
     channels  = std::max (1, numChannels);
-    frameSize = 2048;
-    hop       = 256;
+    maxBlock  = std::max (maxBlockSize, 16);
 
-    tauMax = std::min (frameSize / 2, static_cast<int> (std::ceil (fs / kMinFreq)));
+    // Frame must be large enough that frameSize/2 >= the longest period we want
+    // to detect (= fs / kMinFreq), so the lowest detectable pitch is independent
+    // of sample rate. Keep it a power of two for the analysis window.
+    const int longestPeriod = static_cast<int> (std::ceil (fs / kMinFreq));
+    frameSize = 2048;
+    while (frameSize < 2 * longestPeriod)
+        frameSize <<= 1;
+    frameSize = std::min (frameSize, 1 << 15);
+
+    // Detection hop ~5 ms (keeps detection rate bounded at high sample rates).
+    hop = std::max (128, static_cast<int> (fs * 0.005));
+
+    tauMax = std::min (frameSize / 2, longestPeriod);
     tauMax = std::max (tauMax, 64);
     tauMin = std::max (2, static_cast<int> (std::floor (fs / kMaxFreq)));
     tauMin = std::min (tauMin, tauMax - 1);
@@ -31,7 +42,7 @@ void PsolaPitchCorrector::prepare (double sampleRate, int numChannels, int maxBl
     // by already-placed grains (see header / design notes): 3 * longest period.
     latency = 3 * tauMax;
 
-    const int need = latency + maxBlockSize + 2 * tauMax + frameSize + 16;
+    const int need = latency + maxBlock + 2 * tauMax + frameSize + 16;
     bufSize = 1;
     while (bufSize < need)
         bufSize <<= 1;
@@ -42,6 +53,7 @@ void PsolaPitchCorrector::prepare (double sampleRate, int numChannels, int maxBl
     monoBuf.assign (static_cast<size_t> (bufSize), 0.0f);
     wetWin.assign  (static_cast<size_t> (bufSize), 0.0f);
     frame.assign   (static_cast<size_t> (frameSize), 0.0f);
+    chanPtrs.assign (static_cast<size_t> (channels), nullptr);
 
     detector.prepare (fs, frameSize, kMinFreq, kMaxFreq);
 
@@ -180,6 +192,22 @@ void PsolaPitchCorrector::process (float* const* channelData, int numChannels, i
     if (channels == 0 || numSamples <= 0)
         return;
 
+    // Sub-chunk so a block larger than the prepared maximum can never overflow
+    // the ring buffers (e.g. offline bounce, or hosts that ignore the hint).
+    int done = 0;
+    while (done < numSamples)
+    {
+        const int m = std::min (numSamples - done, maxBlock);
+        const int nch = std::min (numChannels, static_cast<int> (chanPtrs.size()));
+        for (int ch = 0; ch < nch; ++ch)
+            chanPtrs[static_cast<size_t> (ch)] = channelData[ch] + done;
+        processChunk (chanPtrs.data(), nch, m);
+        done += m;
+    }
+}
+
+void PsolaPitchCorrector::processChunk (float* const* channelData, int numChannels, int numSamples)
+{
     const int nch = std::min (numChannels, channels);
 
     for (int i = 0; i < numSamples; ++i)
@@ -197,6 +225,15 @@ void PsolaPitchCorrector::process (float* const* channelData, int numChannels, i
 
         monoBuf[w] = (nch > 0) ? mono / static_cast<float> (nch) : 0.0f;
         ++inWrite;
+
+        if (! primed)
+        {
+            // Hold the synthesis pointer at the input frontier until the first
+            // pitch primes the engine, so a long silent intro doesn't force the
+            // onset block to "catch up" a backlog of grains (CPU spike/dropout).
+            synthMark   = static_cast<double> (inWrite);
+            lastTouched = inWrite - 1;
+        }
 
         if (inWrite - lastDetectAt >= hop && inWrite >= frameSize)
             runDetection();

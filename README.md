@@ -59,8 +59,10 @@ input ─► YIN pitch detection ─► nearest EDO degree (re: C) ─► retune
 
 Detection and timing are shared across channels (the source is assumed
 monophonic), so a stereo signal stays phase-coherent. The plugin reports a
-constant latency (`3 × the longest analysed period`, ≈ 46 ms at 48 kHz) so the
-host can compensate.
+constant latency (`3 × the longest analysed period`, ≈ 46 ms — roughly constant
+across sample rates) so the host can compensate. The analysis frame scales with
+sample rate, so the lowest detectable pitch (~65 Hz) is the same at 44.1 k as at
+96/192 k.
 
 The DSP is plain C++ with **no JUCE dependency**, which is why it can be
 unit-tested on its own (see below).

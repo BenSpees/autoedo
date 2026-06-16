@@ -67,6 +67,7 @@ public:
 private:
     void runDetection();
     void placeGrain (long long centerOut);
+    void processChunk (float* const* channelData, int numChannels, int numSamples);
 
     // Configuration ---------------------------------------------------------
     double fs        = 44100.0;
@@ -76,6 +77,7 @@ private:
     int    tauMin    = 30;
     int    tauMax    = 1024;
     int    latency   = 0;
+    int    maxBlock  = 512;
 
     int    bufSize   = 1 << 15;
     int    bufMask   = (1 << 15) - 1;
@@ -86,6 +88,7 @@ private:
     std::vector<std::vector<float>> wetAcc;  // per-channel PSOLA accumulator
     std::vector<float>              wetWin;  // shared window-sum accumulator
     std::vector<float>              frame;   // scratch frame for detection
+    std::vector<float*>             chanPtrs; // scratch channel pointers for sub-chunking
 
     // Running state ---------------------------------------------------------
     YinPitchDetector detector;

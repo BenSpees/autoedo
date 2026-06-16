@@ -4,6 +4,8 @@
 #include "../Source/dsp/PsolaPitchCorrector.h"
 #include "../Source/dsp/Tuning.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -164,6 +166,128 @@ void testScale (double fs)
                  inHz, got, expected, corr.getDetectedHz(), corr.getTargetHz());
 }
 
+// Regression for bug #2: a block larger than the prepared maximum must not
+// corrupt the output (ring-buffer overflow).
+void testOversizedBlock (double fs)
+{
+    const int n = static_cast<int> (fs * 2.0);
+    std::vector<float> in (static_cast<size_t> (n)); // a chirp (non-stationary)
+    double ph = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double f = 200.0 + 300.0 * i / n;
+        ph += 2.0 * kPi * f / fs;
+        in[static_cast<size_t> (i)] = static_cast<float> (0.4 * std::sin (ph));
+    }
+
+    auto run = [&] (int block, int prepMax)
+    {
+        autoedo::PsolaPitchCorrector c;
+        c.prepare (fs, 1, prepMax);
+        c.setEdo (12);
+        c.setRetuneMs (0.0);
+        std::vector<float> out (static_cast<size_t> (n)), s (static_cast<size_t> (block));
+        for (int pos = 0; pos < n; pos += block)
+        {
+            const int m = std::min (block, n - pos);
+            for (int i = 0; i < m; ++i) s[static_cast<size_t> (i)] = in[static_cast<size_t> (pos + i)];
+            float* ch[1] = { s.data() };
+            c.process (ch, 1, m);
+            for (int i = 0; i < m; ++i) out[static_cast<size_t> (pos + i)] = s[static_cast<size_t> (i)];
+        }
+        return out;
+    };
+
+    const auto ref = run (256, 256);     // block == prepared max (reference)
+    const auto big = run (16384, 256);   // block >> prepared max (was the bug)
+
+    double diff = 0.0; int cnt = 0;
+    for (int i = n / 4; i < n * 3 / 4; ++i)
+    {
+        diff += std::fabs (big[static_cast<size_t> (i)] - ref[static_cast<size_t> (i)]);
+        ++cnt;
+    }
+    const double mad = diff / cnt;
+    check (mad < 1.0e-4, "oversized block matches reference (no ring corruption)");
+    std::printf ("    oversized-block mean-abs-diff vs reference = %.6f\n", mad);
+}
+
+// Regression for bug #3: low pitch must be detectable at high sample rates.
+void testHighSampleRate()
+{
+    const double fs = 96000.0;
+    const int    n  = static_cast<int> (fs * 1.5);
+    const double inHz = 70.0; // below the old ~94 Hz floor at 96 kHz
+    const auto in = makeTone (inHz, fs, n);
+
+    autoedo::PsolaPitchCorrector c;
+    const int block = 256;
+    c.prepare (fs, 1, block);
+    c.setEdo (12);
+    c.setRetuneMs (0.0);
+
+    std::vector<float> s (static_cast<size_t> (block));
+    for (int pos = 0; pos < n; pos += block)
+    {
+        const int m = std::min (block, n - pos);
+        for (int i = 0; i < m; ++i) s[static_cast<size_t> (i)] = in[pos + static_cast<size_t> (i)];
+        float* ch[1] = { s.data() };
+        c.process (ch, 1, m);
+    }
+
+    check (c.isVoicedNow(), "96 kHz: 70 Hz is detected (voiced)");
+    check (std::fabs (centsBetween (c.getDetectedHz(), inHz)) < 35.0,
+           "96 kHz: detected pitch ~ 70 Hz");
+    std::printf ("    high-SR: fs=96k in=70 Hz detected=%.2f voiced=%d\n",
+                 c.getDetectedHz(), static_cast<int> (c.isVoicedNow()));
+}
+
+// Regression for bug #1: onset cost must not scale with idle time before it.
+void testPrimingNoStorm (double fs)
+{
+    const int block = 256;
+
+    auto worstOnsetMs = [&] (double silenceSec)
+    {
+        autoedo::PsolaPitchCorrector c;
+        c.prepare (fs, 1, block);
+        c.setEdo (12);
+        c.setRetuneMs (0.0);
+
+        std::vector<float> z (static_cast<size_t> (block), 0.0f);
+        const int sil = static_cast<int> (fs * silenceSec);
+        for (int pos = 0; pos < sil; pos += block)
+        {
+            float* ch[1] = { z.data() };
+            c.process (ch, 1, block);
+        }
+
+        double worst = 0.0;
+        for (int b = 0; b < 10; ++b)
+        {
+            std::vector<float> s (static_cast<size_t> (block));
+            for (int i = 0; i < block; ++i)
+                s[static_cast<size_t> (i)] = static_cast<float> (0.4 * std::sin (2.0 * kPi * 300.0 * i / fs));
+            float* ch[1] = { s.data() };
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            c.process (ch, 1, block);
+            const auto t1 = std::chrono::high_resolution_clock::now();
+            worst = std::max (worst, std::chrono::duration<double, std::milli> (t1 - t0).count());
+        }
+        return worst;
+    };
+
+    const double shortSilence = worstOnsetMs (0.5);
+    const double longSilence  = worstOnsetMs (60.0);
+
+    // With the fix the onset cost is independent of idle time (generous slack
+    // for timing noise). The bug made the 60 s case ~40x heavier.
+    check (longSilence < shortSilence * 10.0 + 3.0,
+           "no priming storm: onset cost independent of idle time");
+    std::printf ("    priming: onset after 0.5 s = %.3f ms, after 60 s = %.3f ms\n",
+                 shortSilence, longSilence);
+}
+
 } // namespace
 
 int main()
@@ -190,7 +314,14 @@ int main()
 
         // Degree selection + live read-out.
         testScale (fs);
+
+        // Bug-fix regressions.
+        testOversizedBlock (fs);
+        testPrimingNoStorm (fs);
     }
+
+    // High-sample-rate low-pitch detection (bug #3).
+    testHighSampleRate();
 
     if (failures == 0)
         std::printf ("  all DSP tests passed\n");

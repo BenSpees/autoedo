@@ -17,6 +17,9 @@ const juce::Colour kInk      { 0xff10141c };
 // Nearest 12-TET note name + cents, as a familiar reference for the read-out.
 juce::String note12TET (double hz)
 {
+    if (! (hz > 0.0)) // also rejects NaN
+        return "--";
+
     static const char* names[] = { "C", "C#", "D", "D#", "E", "F",
                                    "F#", "G", "G#", "A", "A#", "B" };
     const double value = 69.0 + 12.0 * std::log2 (hz / 440.0);
@@ -33,6 +36,9 @@ juce::String note12TET (double hz)
 // Target pitch described by its EDO degree and octave (relative to C0).
 juce::String degreeInfo (double hz, int edo)
 {
+    if (! (hz > 0.0) || edo < 1)
+        return "--";
+
     const long j   = std::lround (static_cast<double> (edo) * std::log2 (hz / autoedo::kReferenceC0Hz));
     const int  deg = static_cast<int> (((j % edo) + edo) % edo);
     const long oct = (j - deg) / edo;
@@ -130,11 +136,12 @@ void AutoEdoAudioProcessorEditor::setAllDegrees (bool enabled, int edo)
 
 void AutoEdoAudioProcessorEditor::updateReadout()
 {
-    if (processorRef.isVoicedNow())
+    const double det = processorRef.getDetectedHz();
+    const double tgt = processorRef.getTargetHz();
+
+    if (processorRef.isVoicedNow() && det > 0.0 && tgt > 0.0)
     {
-        const double det = processorRef.getDetectedHz();
-        const double tgt = processorRef.getTargetHz();
-        const int    edo = static_cast<int> (edoSlider.getValue());
+        const int edo = static_cast<int> (edoSlider.getValue());
 
         inReadout.setText ("In    " + juce::String (det, 1) + " Hz    " + note12TET (det),
                            juce::dontSendNotification);
