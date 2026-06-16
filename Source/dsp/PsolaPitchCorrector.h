@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <vector>
 #include "YinPitchDetector.h"
+#include "Tuning.h"
 
 namespace autoedo
 {
@@ -44,8 +47,22 @@ public:
     void setEdo (int edoValue) noexcept           { edo = edoValue; }
     void setRetuneMs (double ms) noexcept         { retuneMs = ms < 0.0 ? 0.0 : ms; }
 
+    /** Set which scale degrees (0..count-1, 0 == C) the corrector may tune to.
+        Degrees not covered by @c count are left enabled. */
+    void setEnabledDegrees (const bool* mask, int count) noexcept
+    {
+        const int n = std::min (count, static_cast<int> (enabledDeg.size()));
+        for (int i = 0; i < n; ++i)
+            enabledDeg[static_cast<size_t> (i)] = mask[i];
+    }
+
     /** Reported processing latency in samples (constant after prepare). */
     int  getLatencySamples() const noexcept       { return latency; }
+
+    // --- Live read-out for the UI (lock-free; written on the audio thread) --
+    float getDetectedHz() const noexcept { return detectedHzOut.load (std::memory_order_relaxed); }
+    float getTargetHz()   const noexcept { return targetHzOut.load   (std::memory_order_relaxed); }
+    bool  isVoicedNow()   const noexcept { return voicedOut.load     (std::memory_order_relaxed); }
 
 private:
     void runDetection();
@@ -89,6 +106,12 @@ private:
     // Parameters ------------------------------------------------------------
     int    edo      = 12;
     double retuneMs = 20.0;
+    std::array<bool, kMaxEdo> enabledDeg {}; // initialised all-true in reset()
+
+    // Live read-out (audio thread -> UI) ------------------------------------
+    std::atomic<float> detectedHzOut { 0.0f };
+    std::atomic<float> targetHzOut   { 0.0f };
+    std::atomic<bool>  voicedOut     { false };
 };
 
 } // namespace autoedo

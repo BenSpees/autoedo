@@ -123,6 +123,47 @@ void testCorrection (double fs, double inputHz, int edo, double tolCents)
     std::printf ("    %s\n", msg.c_str());
 }
 
+// Degree-mask test: with only C and G enabled, an E should be retuned to G,
+// and the live read-out should report the detected/target pitches.
+void testScale (double fs)
+{
+    const int n = static_cast<int> (fs * 1.5);
+    const double inHz = 330.0; // ~E4
+    const auto in = makeTone (inHz, fs, n);
+
+    bool mask[12] = { false };
+    mask[0] = true; mask[7] = true; // C and G only
+
+    autoedo::PsolaPitchCorrector corr;
+    const int block = 256;
+    corr.prepare (fs, 1, block);
+    corr.setEdo (12);
+    corr.setRetuneMs (0.0);
+    corr.setEnabledDegrees (mask, 12);
+
+    std::vector<float> out (in.size()), scratch (static_cast<size_t> (block));
+    for (size_t pos = 0; pos < in.size(); pos += static_cast<size_t> (block))
+    {
+        const int m = static_cast<int> (std::min<size_t> (block, in.size() - pos));
+        for (int i = 0; i < m; ++i) scratch[static_cast<size_t> (i)] = in[pos + static_cast<size_t> (i)];
+        float* ch[1] = { scratch.data() };
+        corr.process (ch, 1, m);
+        for (int i = 0; i < m; ++i) out[pos + static_cast<size_t> (i)] = scratch[static_cast<size_t> (i)];
+    }
+
+    const double expected = autoedo::quantizeToEdoScale (inHz, 12, mask).targetHz;
+    const double got      = estimateFreq (out.data(), n, fs);
+
+    check (std::fabs (centsBetween (got, expected)) < 35.0,
+           "scale snap: E with {C,G} enabled retunes toward G");
+    check (corr.isVoicedNow(), "read-out reports voiced");
+    check (std::fabs (centsBetween (corr.getDetectedHz(), inHz)) < 35.0,
+           "read-out detected pitch ~ input");
+
+    std::printf ("    scale: in=%.1f Hz got=%.2f expected=%.2f (G) | readout det=%.2f tgt=%.2f\n",
+                 inHz, got, expected, corr.getDetectedHz(), corr.getTargetHz());
+}
+
 } // namespace
 
 int main()
@@ -146,6 +187,9 @@ int main()
 
         // 19-EDO: an arbitrary detuned tone snaps to its nearest 19-EDO degree.
         testCorrection (fs, 330.0, 19, 25.0);
+
+        // Degree selection + live read-out.
+        testScale (fs);
     }
 
     if (failures == 0)

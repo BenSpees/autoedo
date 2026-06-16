@@ -95,6 +95,37 @@ int main()
         }
     }
 
+    // --- Scale-degree snapping (direct degree selection) --------------------
+    {
+        // 12-EDO with only C (deg 0) and G (deg 7) enabled.
+        bool mask[12] = { false };
+        mask[0] = true; mask[7] = true;
+        // E4 (deg 4) is closer to G (3 steps) than C (4 steps) -> snaps to G.
+        const double e4 = kReferenceC0Hz * std::pow (2.0, 4.0 + 4.0 / 12.0);
+        const auto   r  = quantizeToEdoScale (e4, 12, mask);
+        check ((((r.degree % 12) + 12) % 12) == 7, "E snaps to nearest enabled degree (G)");
+    }
+    {
+        // A degree just above an enabled one snaps down to it.
+        bool mask[12] = { false };
+        mask[0] = true; // only C enabled
+        const double cSharp = kReferenceC0Hz * std::pow (2.0, 4.0 + 1.0 / 12.0); // C#4
+        const auto   r      = quantizeToEdoScale (cSharp, 12, mask);
+        check ((((r.degree % 12) + 12) % 12) == 0, "C# with only C enabled snaps to C");
+    }
+    {
+        // Disabling every degree falls back to the nearest of all degrees.
+        bool none[12] = { false };
+        const auto r = quantizeToEdoScale (440.0, 12, none);
+        checkClose (r.targetHz, 440.0, 1.0e-6, "empty scale falls back to nearest of all");
+    }
+    {
+        // A null mask is identical to the full-chromatic helper.
+        const auto a = quantizeToEdoScale (453.0, 12, nullptr);
+        const auto b = quantizeToEdo (453.0, 12);
+        checkClose (a.targetHz, b.targetHz, 1.0e-9, "null mask == quantizeToEdo");
+    }
+
     // --- Guards --------------------------------------------------------------
     check (! quantizeToEdo (-1.0, 12).valid, "negative freq is invalid");
     check (! quantizeToEdo (440.0, 0).valid, "zero edo is invalid");

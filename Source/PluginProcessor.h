@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "dsp/PsolaPitchCorrector.h"
+#include "dsp/Tuning.h"
 
 /**
     AutoEDO — a pitch corrector that tunes to arbitrary equal divisions of the
@@ -40,6 +42,17 @@ public:
     static constexpr const char* kParamEdo    = "edo";
     static constexpr const char* kParamRetune = "retune";
 
+    /** Number of per-degree enable parameters (covers the largest EDO). */
+    static constexpr int kNumDegrees = autoedo::kMaxEdo;
+
+    /** Parameter ID for the enable toggle of scale degree @c index (0 == C). */
+    static juce::String degreeParamID (int index);
+
+    // Live read-out for the editor (lock-free).
+    float getDetectedHz() const { return corrector.getDetectedHz(); }
+    float getTargetHz()   const { return corrector.getTargetHz(); }
+    bool  isVoicedNow()   const { return corrector.isVoicedNow(); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -49,6 +62,7 @@ private:
 
     std::atomic<float>* edoParam    = nullptr;
     std::atomic<float>* retuneParam = nullptr;
+    std::array<std::atomic<float>*, kNumDegrees> degParams {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AutoEdoAudioProcessor)
 };

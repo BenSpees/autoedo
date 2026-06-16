@@ -20,6 +20,11 @@ Built with [JUCE](https://juce.com) so a single codebase targets **AAX**
 |---|---|---|
 | **EDO** (Divisions / Octave) | 10 – 72 | Number of equal steps the octave is divided into. `12` = standard tuning. |
 | **Retune Speed** | 0 – 500 ms | How quickly the output glides to the target pitch. `0` = hard/instant snap (robotic); higher = natural slide. |
+| **Scale degrees** | per-degree toggles | One on/off button per degree of the current EDO (degree `0` = C, the reference). Correction only snaps to *enabled* degrees, so you build any scale directly — no preset keys. `All` / `None` toggle them in bulk. (Disabling every degree falls back to full-chromatic snapping.) |
+
+A **live read-out** shows the detected input pitch (with its nearest 12-TET name
+for orientation) and the output target pitch (with its EDO degree), updating as
+you play.
 
 ## How the tuning works
 
@@ -33,8 +38,8 @@ where `C_anchor` is C0 at its standard-tuning frequency
 (`16.3515978… Hz`, derived from A4 = 440 Hz). Because every octave of C is an
 exact power-of-two multiple of the anchor, **all C's stay at their
 standard-tuning frequencies for any N**. A detected fundamental is converted to
-a continuous position on this grid, rounded to the nearest degree, and the audio
-is resynthesised at that pitch.
+a continuous position on this grid, rounded to the nearest *enabled* degree
+(see **Scale degrees** above), and the audio is resynthesised at that pitch.
 
 See [`Source/dsp/Tuning.h`](Source/dsp/Tuning.h) for the (tiny, well-commented)
 core math.
@@ -114,16 +119,17 @@ For local development you only need steps 1–2; the signing/partner steps
 
 ## Status & roadmap
 
-Phase 1 (this version): fixed C reference, EDO 10–72, retune speed, working
-detection + correction, verified by unit tests.
+Phase 1 (this version): fixed C reference, EDO 10–72, retune speed, direct
+per-degree scale selection, a live pitch/target read-out, and working
+detection + correction — all verified by unit tests.
 
 Possible next steps:
 - Glottal-epoch-synchronous PSOLA marks for higher vocal quality (the current
   engine uses an epoch-free uniform grid — robust, but a true epoch detector
   would reduce phasiness).
-- Selectable reference note / root and custom non-equal scales.
-- Scale-degree snapping (only correct to chosen degrees), key/scale input.
-- A live pitch / target read-out in the UI.
+- Selectable reference note / root, and custom non-equal (e.g. just-intonation)
+  scales.
+- Saving/recalling named degree presets.
 
 ## Licensing note
 

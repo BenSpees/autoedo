@@ -66,6 +66,11 @@ void PsolaPitchCorrector::reset()
     primed        = false;
     outCents      = 0.0;
     vGain         = 0.0;
+
+    enabledDeg.fill (true); // default: every degree usable (full chromatic EDO)
+    detectedHzOut.store (0.0f, std::memory_order_relaxed);
+    targetHzOut.store   (0.0f, std::memory_order_relaxed);
+    voicedOut.store     (false, std::memory_order_relaxed);
 }
 
 void PsolaPitchCorrector::runDetection()
@@ -94,8 +99,11 @@ void PsolaPitchCorrector::runDetection()
                                     static_cast<double> (tauMax));
 
         const double detectedCents = 1200.0 * std::log2 (res.frequencyHz / kReferenceC0Hz);
-        const auto   t             = quantizeToEdo (res.frequencyHz, edo);
+        const auto   t             = quantizeToEdoScale (res.frequencyHz, edo, enabledDeg.data());
         const double targetCents   = 1200.0 * std::log2 (t.targetHz / kReferenceC0Hz);
+
+        detectedHzOut.store (static_cast<float> (res.frequencyHz), std::memory_order_relaxed);
+        targetHzOut.store   (static_cast<float> (t.targetHz),      std::memory_order_relaxed);
 
         // On a fresh onset, start from the pitch actually sung so the correction
         // glides from there (retune speed) instead of jumping from a stale value.
@@ -118,6 +126,7 @@ void PsolaPitchCorrector::runDetection()
     }
 
     voiced = nowVoiced;
+    voicedOut.store (nowVoiced, std::memory_order_relaxed);
 }
 
 void PsolaPitchCorrector::placeGrain (long long centerOut)

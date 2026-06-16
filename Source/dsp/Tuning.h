@@ -41,32 +41,76 @@ struct TuningResult
     bool   valid    = false;
 };
 
-/** Quantise an input frequency to the nearest pitch on an N-EDO grid anchored at C.
+/** Quantise an input frequency to the nearest *enabled* pitch on an N-EDO grid
+    anchored at C.
 
     @param inputHz     detected fundamental frequency, in Hz (> 0)
     @param edo         number of equal divisions of the octave (>= 1)
+    @param enabled     optional mask of length >= @c edo; @c enabled[d] is true if
+                       scale degree @c d (0..edo-1, where 0 == C) may be tuned to.
+                       Pass @c nullptr to allow every degree. If the mask disables
+                       every degree, it is treated as "all enabled" (no snapping
+                       to an empty scale).
     @param referenceC  reference C frequency; defaults to standard-tuning C0
 */
-inline TuningResult quantizeToEdo (double inputHz, int edo,
-                                   double referenceC = kReferenceC0Hz)
+inline TuningResult quantizeToEdoScale (double inputHz, int edo, const bool* enabled,
+                                        double referenceC = kReferenceC0Hz)
 {
     TuningResult r;
 
     if (inputHz <= 0.0 || edo < 1 || referenceC <= 0.0)
         return r;
 
-    // Continuous position of the input on the EDO grid, measured in steps from C.
+    // Continuous position of the input on the EDO grid, in steps from C.
     const double stepsFromC = static_cast<double> (edo) * std::log2 (inputHz / referenceC);
+    const long   nearest    = std::lround (stepsFromC);
 
-    // Nearest grid degree (round half away from zero is fine; ties are inaudible).
-    const int nearest = static_cast<int> (std::lround (stepsFromC));
+    auto degreeOf = [edo] (long j)
+    {
+        long d = j % edo;
+        if (d < 0) d += edo;
+        return static_cast<int> (d);
+    };
 
-    r.degree   = nearest;
-    r.targetHz = referenceC * std::pow (2.0, static_cast<double> (nearest)
+    bool anyEnabled = false;
+    if (enabled != nullptr)
+        for (int d = 0; d < edo; ++d)
+            if (enabled[d]) { anyEnabled = true; break; }
+
+    long best = nearest;
+    if (enabled != nullptr && anyEnabled)
+    {
+        // Search out to one octave each way for the closest enabled degree.
+        bool   found    = false;
+        double bestDist = 0.0;
+        for (long j = nearest - edo; j <= nearest + edo; ++j)
+        {
+            if (! enabled[degreeOf (j)])
+                continue;
+
+            const double dist = std::abs (stepsFromC - static_cast<double> (j));
+            if (! found || dist < bestDist)
+            {
+                found    = true;
+                bestDist = dist;
+                best     = j;
+            }
+        }
+    }
+
+    r.degree   = static_cast<int> (best);
+    r.targetHz = referenceC * std::pow (2.0, static_cast<double> (best)
                                               / static_cast<double> (edo));
     r.centsOff = 1200.0 * std::log2 (inputHz / r.targetHz);
     r.valid    = true;
     return r;
+}
+
+/** Quantise to the nearest pitch using every degree (full chromatic EDO). */
+inline TuningResult quantizeToEdo (double inputHz, int edo,
+                                   double referenceC = kReferenceC0Hz)
+{
+    return quantizeToEdoScale (inputHz, edo, nullptr, referenceC);
 }
 
 /** Width of a single EDO step, in cents (1200 / N). Useful for UI / metering. */

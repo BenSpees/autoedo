@@ -2,6 +2,11 @@
 #include "PluginEditor.h"
 #include "dsp/Tuning.h"
 
+juce::String AutoEdoAudioProcessor::degreeParamID (int index)
+{
+    return "deg" + juce::String (index);
+}
+
 AutoEdoAudioProcessor::AutoEdoAudioProcessor()
     : juce::AudioProcessor (BusesProperties()
           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
@@ -10,6 +15,9 @@ AutoEdoAudioProcessor::AutoEdoAudioProcessor()
 {
     edoParam    = apvts.getRawParameterValue (kParamEdo);
     retuneParam = apvts.getRawParameterValue (kParamRetune);
+
+    for (int i = 0; i < kNumDegrees; ++i)
+        degParams[static_cast<size_t> (i)] = apvts.getRawParameterValue (degreeParamID (i));
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout
@@ -34,6 +42,16 @@ AutoEdoAudioProcessor::createParameterLayout()
             {
                 return v < 1.0f ? String ("Hard") : String (v, 0) + " ms";
             })));
+
+    // One enable toggle per scale degree (degree 0 == C). All on by default, so
+    // the out-of-the-box behaviour is full-chromatic EDO. Only the first `EDO`
+    // toggles are shown in the UI; the rest stay valid for larger EDO values.
+    auto degreeGroup = std::make_unique<AudioProcessorParameterGroup> (
+        "degrees", "Scale Degrees", "|");
+    for (int i = 0; i < kNumDegrees; ++i)
+        degreeGroup->addChild (std::make_unique<AudioParameterBool> (
+            ParameterID { degreeParamID (i), 1 }, "Degree " + String (i), true));
+    layout.add (std::move (degreeGroup));
 
     return layout;
 }
@@ -68,6 +86,11 @@ void AutoEdoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     corrector.setEdo (static_cast<int> (edoParam->load()));
     corrector.setRetuneMs (static_cast<double> (retuneParam->load()));
+
+    bool degMask[kNumDegrees];
+    for (int i = 0; i < kNumDegrees; ++i)
+        degMask[i] = degParams[static_cast<size_t> (i)]->load() > 0.5f;
+    corrector.setEnabledDegrees (degMask, kNumDegrees);
 
     corrector.process (buffer.getArrayOfWritePointers(),
                        buffer.getNumChannels(),
