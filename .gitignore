@@ -1,0 +1,27 @@
+# Build output
+build/
+build_*/
+build-*/
+cmake-build-*/
+out/
+
+# JUCE fetched dependency (downloaded by CMake FetchContent)
+_deps/
+
+# IDE / editor
+.idea/
+.vscode/
+*.user
+.DS_Store
+
+# Compiled / local artefacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.vst3
+*.component
+*.aaxplugin
