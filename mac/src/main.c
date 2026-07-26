@@ -19,6 +19,7 @@
 #include "tuning.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -27,7 +28,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "web_index.h" /* generated: web_index_html[], web_index_html_len */
+#include "web_index.h"  /* generated: web_index_html[], web_index_html_len */
+#include "web_scales.h" /* generated: web_scales_json[], web_scales_json_len */
 
 #define DEFAULT_PORT 8017
 
@@ -41,6 +43,8 @@ typedef struct
     double          ref_a4;        /* reference A4, default 440.0 */
     double          stretch_cents; /* octave stretch, cents per octave */
     char            range_name[16];/* detection range preset */
+    char            scale_cat[64]; /* last-loaded catalog scale (cosmetic; */
+    char            scale_name[64];/* the mask itself is the real state)   */
     int             port;
     pthread_mutex_t lock;      /* guards engine + engine_cfg */
     AeAudioEngine  *engine;
@@ -118,6 +122,19 @@ static void config_defaults (App *app)
     app->ref_a4        = 440.0;
     app->stretch_cents = 0.0;
     snprintf (app->range_name, sizeof (app->range_name), "instrument");
+    app->scale_cat[0] = app->scale_name[0] = '\0';
+
+    c->params.harm_on   = false;
+    c->params.harm_lock = 1; /* Mask — the headline behavior */
+    for (int v = 0; v < 5; ++v)
+    {
+        c->params.harm_interval[v] = 0;
+        c->params.harm_ext[v]      = 0;
+        c->params.harm_gain_db[v]  = 0.0;
+        c->params.harm_pan[v]      = 0.0;
+    }
+    c->params.harm_mute = 0;
+    c->params.harm_solo = 0;
 }
 
 /* Derive the engine-facing reference/period/detection-range values from the
@@ -155,6 +172,10 @@ static void config_json (const App *app, char *out, size_t cap)
     ae_json_escape_append (out, cap, c->input_uid);
     strncat (out, "\",\"outputUid\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->output_uid);
+    strncat (out, "\",\"scaleCat\":\"", cap - strlen (out) - 1);
+    ae_json_escape_append (out, cap, app->scale_cat);
+    strncat (out, "\",\"scaleName\":\"", cap - strlen (out) - 1);
+    ae_json_escape_append (out, cap, app->scale_name);
     strncat (out, "\",\"degrees\":[", cap - strlen (out) - 1);
     for (int d = 0; d < AE_MAX_EDO; ++d)
     {
@@ -164,7 +185,40 @@ static void config_json (const App *app, char *out, size_t cap)
         snprintf (item, sizeof (item), "%s%d", d > 0 ? "," : "", on ? 1 : 0);
         strncat (out, item, cap - strlen (out) - 1);
     }
-    strncat (out, "]}", cap - strlen (out) - 1);
+    strncat (out, "]", cap - strlen (out) - 1);
+
+    /* Harmony (Xentar hm/hx field packing, plus gains/pans/mute/solo). */
+    char harm[512];
+    static const char *lock_names[] = { "off", "mask", "ji" };
+    snprintf (harm, sizeof (harm), ",\"harmOn\":%s,\"harmLock\":\"%s\"",
+              c->params.harm_on ? "true" : "false",
+              lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
+                           ? c->params.harm_lock : 0]);
+    strncat (out, harm, cap - strlen (out) - 1);
+    const char *keys[4] = { "hm", "hx", "hg", "hp" };
+    for (int k = 0; k < 4; ++k)
+    {
+        size_t n = 0;
+        n += (size_t) snprintf (harm + n, sizeof (harm) - n, ",\"%s\":[", keys[k]);
+        for (int v = 0; v < 5; ++v)
+        {
+            if (k == 0)      n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%d",  v ? "," : "", c->params.harm_interval[v]);
+            else if (k == 1) n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%d",  v ? "," : "", c->params.harm_ext[v]);
+            else if (k == 2) n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%.4g", v ? "," : "", c->params.harm_gain_db[v]);
+            else             n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%.4g", v ? "," : "", c->params.harm_pan[v]);
+        }
+        snprintf (harm + n, sizeof (harm) - n, "]");
+        strncat (out, harm, cap - strlen (out) - 1);
+    }
+    snprintf (harm, sizeof (harm),
+              ",\"hMute\":[%d,%d,%d,%d,%d],\"hSolo\":[%d,%d,%d,%d,%d]}",
+              (c->params.harm_mute >> 0) & 1, (c->params.harm_mute >> 1) & 1,
+              (c->params.harm_mute >> 2) & 1, (c->params.harm_mute >> 3) & 1,
+              (c->params.harm_mute >> 4) & 1,
+              (c->params.harm_solo >> 0) & 1, (c->params.harm_solo >> 1) & 1,
+              (c->params.harm_solo >> 2) & 1, (c->params.harm_solo >> 3) & 1,
+              (c->params.harm_solo >> 4) & 1);
+    strncat (out, harm, cap - strlen (out) - 1);
 }
 
 static void config_save (const App *app)
@@ -238,6 +292,46 @@ static bool config_apply_json (App *app, const char *json)
         c->params.bypass = b;
     if (ae_json_get_number (json, "outputGainDb", &num))
         c->params.output_gain_db = num_clamp (num, -60.0, 12.0);
+
+    /* Harmony. */
+    if (ae_json_get_bool (json, "harmOn", &b))
+        c->params.harm_on = b;
+    if (ae_json_get_string (json, "harmLock", str, sizeof (str)))
+        c->params.harm_lock = strcmp (str, "mask") == 0 ? 1
+                            : strcmp (str, "ji") == 0 ? 2 : 0;
+    double arr[5];
+    int n5;
+    if ((n5 = ae_json_get_num_array (json, "hm", arr, 5)) >= 0)
+        for (int v = 0; v < n5; ++v)
+            c->params.harm_interval[v] =
+                (int) num_clamp (arr[v], -(double) AE_MAX_EDO, (double) AE_MAX_EDO);
+    if ((n5 = ae_json_get_num_array (json, "hx", arr, 5)) >= 0)
+        for (int v = 0; v < n5; ++v)
+            c->params.harm_ext[v] = (int) num_clamp (arr[v], 0.0, 2.0);
+    if ((n5 = ae_json_get_num_array (json, "hg", arr, 5)) >= 0)
+        for (int v = 0; v < n5; ++v)
+            c->params.harm_gain_db[v] = num_clamp (arr[v], -60.0, 6.0);
+    if ((n5 = ae_json_get_num_array (json, "hp", arr, 5)) >= 0)
+        for (int v = 0; v < n5; ++v)
+            c->params.harm_pan[v] = num_clamp (arr[v], -1.0, 1.0);
+    if ((n5 = ae_json_get_num_array (json, "hMute", arr, 5)) >= 0)
+    {
+        uint32_t m = c->params.harm_mute;
+        for (int v = 0; v < n5; ++v)
+            m = arr[v] != 0.0 ? (m | (1u << v)) : (m & ~(1u << v));
+        c->params.harm_mute = m;
+    }
+    if ((n5 = ae_json_get_num_array (json, "hSolo", arr, 5)) >= 0)
+    {
+        uint32_t m = c->params.harm_solo;
+        for (int v = 0; v < n5; ++v)
+            m = arr[v] != 0.0 ? (m | (1u << v)) : (m & ~(1u << v));
+        c->params.harm_solo = m;
+    }
+    if (ae_json_get_string (json, "scaleCat", str, sizeof (str)))
+        snprintf (app->scale_cat, sizeof (app->scale_cat), "%.63s", str);
+    if (ae_json_get_string (json, "scaleName", str, sizeof (str)))
+        snprintf (app->scale_name, sizeof (app->scale_name), "%.63s", str);
 
     unsigned char flags[AE_MAX_EDO];
     const int n = ae_json_get_flag_array (json, "degrees", flags, AE_MAX_EDO);
@@ -338,17 +432,32 @@ static void status_refresh (App *app)
     const double lat_ms = st.output_rate > 0.0
                             ? 1000.0 * st.latency_samples / st.output_rate : 0.0;
 
+    /* live ghost degrees: JSON null when a voice is silent */
+    char hdeg[128];
+    size_t hn = 0;
+    hn += (size_t) snprintf (hdeg + hn, sizeof (hdeg) - hn, "[");
+    for (int v = 0; v < 5; ++v)
+    {
+        if (st.harm_deg[v] == INT_MIN || ! st.running)
+            hn += (size_t) snprintf (hdeg + hn, sizeof (hdeg) - hn, "%snull", v ? "," : "");
+        else
+            hn += (size_t) snprintf (hdeg + hn, sizeof (hdeg) - hn, "%s%d", v ? "," : "", st.harm_deg[v]);
+    }
+    snprintf (hdeg + hn, sizeof (hdeg) - hn, "]");
+
     snprintf (buf, sizeof (buf),
         "{\"running\":%s,\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,"
         "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"voiced\":%s,"
+        "\"harmDeg\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", err,
         st.input_rate, st.output_rate,
         st.latency_samples, lat_ms,
         (double) st.detected_hz, (double) st.target_hz, st.voiced ? "true" : "false",
+        hdeg,
         in_name, out_name,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
@@ -458,6 +567,13 @@ static void handle_request (void *user, const char *method, const char *path,
     if (strcmp (method, "GET") == 0 && strcmp (path, "/api/devices") == 0)
     {
         api_devices (app, resp);
+        return;
+    }
+    if (strcmp (method, "GET") == 0 && strcmp (path, "/api/scales") == 0)
+    {
+        resp->status       = 200;
+        resp->content_type = "application/json";
+        ae_http_resp_set (resp, web_scales_json, web_scales_json_len);
         return;
     }
     if (strcmp (method, "POST") == 0 && strcmp (path, "/api/config") == 0)

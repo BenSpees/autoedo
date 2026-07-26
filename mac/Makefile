@@ -31,7 +31,10 @@ $(BUILD):
 $(BUILD)/web_index.h: web/index.html scripts/embed.sh | $(BUILD)
 	sh scripts/embed.sh web_index_html web/index.html > $@
 
-$(BUILD)/%.o: src/%.c $(BUILD)/web_index.h | $(BUILD)
+$(BUILD)/web_scales.h: web/scales.json scripts/embed.sh | $(BUILD)
+	sh scripts/embed.sh web_scales_json web/scales.json > $@
+
+$(BUILD)/%.o: src/%.c $(BUILD)/web_index.h $(BUILD)/web_scales.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/autoedo: $(OBJ)

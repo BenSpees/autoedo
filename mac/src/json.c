@@ -173,6 +173,34 @@ int ae_json_get_flag_array (const char *json, const char *key, unsigned char *ou
     return n < max ? n : max;
 }
 
+int ae_json_get_num_array (const char *json, const char *key, double *out, int max)
+{
+    const char *v = find_key (json, key);
+    if (v == NULL || *v != '[')
+        return -1;
+
+    int n = 0;
+    const char *p = skip_ws (v + 1);
+    while (*p && *p != ']')
+    {
+        double num = 0.0;
+        if (strncmp (p, "true", 4) == 0)
+            num = 1.0;
+        else if (*p == '-' || *p == '+' || (*p >= '0' && *p <= '9'))
+            num = strtod (p, NULL);
+
+        if (n < max)
+            out[n] = num;
+        ++n;
+
+        p = skip_value (p);
+        p = skip_ws (p);
+        if (*p == ',')
+            p = skip_ws (p + 1);
+    }
+    return n < max ? n : max;
+}
+
 char *ae_json_escape_append (char *dst, size_t cap, const char *src)
 {
     size_t n = strlen (dst);

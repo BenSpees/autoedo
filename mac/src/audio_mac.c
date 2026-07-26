@@ -201,6 +201,8 @@ struct AeAudioEngine
     float *in_scratch; /* input callback capture buffer */
     float *proc;       /* mono processing block */
     float *dry;        /* latency-free dry copy for bypass */
+    float *harm_l;     /* harmony-voice mix, left / right */
+    float *harm_r;
 
     AePsola psola;
 
@@ -280,16 +282,25 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     bool  bypass = false;
     float gain   = 1.0f;
     ae_atomic_params_apply (&e->params, &e->psola, &bypass, &gain);
-    ae_psola_process (&e->psola, e->proc, (int) n);
+    ae_psola_process (&e->psola, e->proc, e->harm_l, e->harm_r, (int) n);
 
     const float *src = bypass ? e->dry : e->proc;
+    const bool   stereo = io->mNumberBuffers >= 2;
 
     for (UInt32 b = 0; b < io->mNumberBuffers; ++b)
     {
         float *dst = io->mBuffers[b].mData;
         const UInt32 cap = io->mBuffers[b].mDataByteSize / (UInt32) sizeof (float);
+        const float *harm = ! stereo ? NULL : (b == 0 ? e->harm_l : e->harm_r);
         for (UInt32 i = 0; i < n_frames && i < cap; ++i)
-            dst[i] = i < n ? src[i] * gain : 0.0f;
+        {
+            if (i >= n) { dst[i] = 0.0f; continue; }
+            float s = src[i];
+            if (! bypass)
+                s += harm != NULL ? harm[i]
+                                  : 0.5f * (e->harm_l[i] + e->harm_r[i]); /* mono out */
+            dst[i] = s * gain;
+        }
     }
     return noErr;
 }
@@ -348,6 +359,8 @@ static void engine_teardown (AeAudioEngine *e)
     free (e->in_scratch);
     free (e->proc);
     free (e->dry);
+    free (e->harm_l);
+    free (e->harm_r);
     ae_psola_free (&e->psola);
     free (e);
 }
@@ -370,6 +383,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->detected_hz     = ae_psola_detected_hz (&e->psola);
     out->target_hz       = ae_psola_target_hz (&e->psola);
     out->voiced          = ae_psola_voiced (&e->psola);
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        out->harm_deg[v] = ae_psola_harm_degree (&e->psola, v);
     snprintf (out->input_name,  sizeof (out->input_name),  "%s", e->in_name);
     snprintf (out->output_name, sizeof (out->output_name), "%s", e->out_name);
 }
@@ -440,7 +455,10 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     e->in_scratch = calloc (MAX_FRAMES, sizeof (float));
     e->proc       = calloc (MAX_FRAMES, sizeof (float));
     e->dry        = calloc (MAX_FRAMES, sizeof (float));
-    if (e->in_scratch == NULL || e->proc == NULL || e->dry == NULL)
+    e->harm_l     = calloc (MAX_FRAMES, sizeof (float));
+    e->harm_r     = calloc (MAX_FRAMES, sizeof (float));
+    if (e->in_scratch == NULL || e->proc == NULL || e->dry == NULL
+        || e->harm_l == NULL || e->harm_r == NULL)
     {
         snprintf (err, err_len, "out of memory");
         engine_teardown (e);

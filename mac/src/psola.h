@@ -17,11 +17,28 @@
 #ifndef AUTOEDO_PSOLA_H
 #define AUTOEDO_PSOLA_H
 
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 
 #include "tuning.h"
 #include "yin.h"
+
+/* Smart harmony (Xentar emulation): up to five independent ghost voices at
+   signed EDO-step intervals from the corrected source, optionally locked to
+   the lit-degree mask (walk-outward, up first) or to the JI landmark set. */
+#define AE_HARM_VOICES 5
+#define AE_HARM_DEG_OFF INT_MIN /* live-readout sentinel: voice silent */
+
+typedef struct
+{
+    int    interval; /* signed EDO steps, 0 = voice off */
+    int    ext_oct;  /* 0..2 extra octaves, stacking in the voice's direction */
+    double gain;     /* linear */
+    double pan;      /* -1 (L) .. +1 (R) */
+    bool   mute;
+    bool   solo;
+} AeHarmVoice;
 
 typedef struct
 {
@@ -66,6 +83,21 @@ typedef struct
     bool      in_transition; /* gliding between two different degrees */
     double    sustain_s;     /* seconds the current degree has been held */
 
+    /* Harmony voices -------------------------------------------------------- */
+    bool        harm_on;
+    int         harm_lock; /* 0 = off, 1 = mask, 2 = JI landmarks */
+    AeHarmVoice harm[AE_HARM_VOICES];
+
+    float    *h_acc[AE_HARM_VOICES]; /* per-voice PSOLA accumulator */
+    float    *h_win[AE_HARM_VOICES]; /* per-voice window-sum accumulator */
+    double    h_mark[AE_HARM_VOICES];
+    long long h_touched[AE_HARM_VOICES];
+    double    h_period[AE_HARM_VOICES];  /* synthesis period */
+    bool      h_active[AE_HARM_VOICES];
+    double    h_gl[AE_HARM_VOICES];      /* constant-power pan gains */
+    double    h_gr[AE_HARM_VOICES];
+    _Atomic int h_deg_out[AE_HARM_VOICES]; /* live ghost degree (UI) */
+
     /* Parameters (set from the audio thread between blocks) ---------------- */
     int    edo;
     double retune_ms;
@@ -96,8 +128,48 @@ void ae_psola_reset (AePsola *p);
 /* Release buffers allocated by ae_psola_prepare(). */
 void ae_psola_free (AePsola *p);
 
-/* Process num_samples of mono audio in place. */
-void ae_psola_process (AePsola *p, float *mono, int num_samples);
+/* Process num_samples of mono audio in place (the corrected voice), and —
+   when harm_l/harm_r are non-NULL — overwrite them with the latency-aligned
+   harmony-voice mix for the same block (constant-power panned, gated by the
+   same voiced crossfade). Pass NULL/NULL to skip harmony rendering. */
+void ae_psola_process (AePsola *p, float *mono, float *harm_l, float *harm_r,
+                       int num_samples);
+
+/* Configure the harmony voices (audio thread, between blocks). */
+void ae_psola_set_harmony (AePsola *p, bool on, int lock,
+                           const AeHarmVoice voices[AE_HARM_VOICES]);
+
+/* Live ghost degree of a voice (signed steps re root), AE_HARM_DEG_OFF when
+   the voice is silent. Lock-free; any thread. */
+static inline int ae_psola_harm_degree (const AePsola *p, int voice)
+{
+    return atomic_load_explicit (&((AePsola *) p)->h_deg_out[voice],
+                                 memory_order_relaxed);
+}
+
+/* Xentar Snap-to-Scale walk: nearest enabled degree to j, up checked first
+   at each distance. `enabled` indexes pitch classes 0..edo-1; a fully
+   disabled mask returns j unchanged. */
+static inline long long ae_walk_to_enabled (long long j, int edo, const bool *enabled)
+{
+    bool any = false;
+    for (int d = 0; d < edo; ++d)
+        if (enabled[d]) { any = true; break; }
+    if (! any)
+        return j;
+
+    const long long pc0 = ((j % edo) + edo) % edo;
+    if (enabled[pc0])
+        return j;
+    for (int d = 1; d <= edo; ++d)
+    {
+        if (enabled[(pc0 + d) % edo])
+            return j + d;
+        if (enabled[((pc0 - d) % edo + edo) % edo])
+            return j - d;
+    }
+    return j;
+}
 
 static inline double ae_psola_clamp01 (double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 

@@ -14,6 +14,38 @@ static double dclamp (double v, double lo, double hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/* JI landmark set (cents re root), mirroring the UI's JI lane. */
+static const struct { int a, b; } k_ji[] = {
+    {1,1},{9,8},{7,6},{6,5},{5,4},{4,3},{11,8},{3,2},{8,5},{5,3},{7,4},{9,5},{15,8}
+};
+#define K_JI_COUNT ((int) (sizeof (k_ji) / sizeof (k_ji[0])))
+
+/* Snap `cents` (re root) to the nearest JI landmark pitch class, keeping the
+   octave: circular nearest-PC distance, ties/half go up. */
+static double ji_snap_cents (double cents, double period)
+{
+    double pc = fmod (cents, period);
+    if (pc < 0.0)
+        pc += period;
+    double best_diff = 0.0, best_dist = 1e9;
+    for (int i = 0; i < K_JI_COUNT; ++i)
+    {
+        const double jc = 1200.0 * log2 ((double) k_ji[i].a / (double) k_ji[i].b);
+        if (jc > period + 1e-9)
+            continue;
+        double diff = jc - pc; /* signed move to reach the landmark */
+        while (diff > period / 2.0)  diff -= period;
+        while (diff < -period / 2.0) diff += period;
+        const double dist = fabs (diff);
+        if (dist < best_dist || (dist == best_dist && diff > best_diff))
+        {
+            best_dist = dist;
+            best_diff = diff;
+        }
+    }
+    return cents + best_diff;
+}
+
 void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size,
                        double min_hz, double max_hz)
 {
@@ -63,6 +95,13 @@ void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size,
     p->wet_acc = calloc ((size_t) p->buf_size, sizeof (float));
     p->wet_win = calloc ((size_t) p->buf_size, sizeof (float));
     p->frame   = calloc ((size_t) p->frame_size, sizeof (float));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        free (p->h_acc[v]);
+        free (p->h_win[v]);
+        p->h_acc[v] = calloc ((size_t) p->buf_size, sizeof (float));
+        p->h_win[v] = calloc ((size_t) p->buf_size, sizeof (float));
+    }
 
     ae_yin_prepare (&p->detector, p->fs, p->frame_size, min_hz, max_hz);
 
@@ -104,6 +143,19 @@ void ae_psola_reset (AePsola *p)
     for (int i = 0; i < AE_MAX_EDO; ++i)
         p->enabled_deg[i] = true; /* default: every degree usable */
 
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        if (p->h_acc[v] != NULL)
+            memset (p->h_acc[v], 0, (size_t) p->buf_size * sizeof (float));
+        if (p->h_win[v] != NULL)
+            memset (p->h_win[v], 0, (size_t) p->buf_size * sizeof (float));
+        p->h_mark[v]    = 0.0;
+        p->h_touched[v] = -1;
+        p->h_period[v]  = p->current_period;
+        p->h_active[v]  = false;
+        atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
+    }
+
     atomic_store_explicit (&p->detected_hz_out, 0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->target_hz_out,   0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->voiced_out,      false, memory_order_relaxed);
@@ -116,7 +168,34 @@ void ae_psola_free (AePsola *p)
     free (p->wet_win);
     free (p->frame);
     p->in_buf = p->wet_acc = p->wet_win = p->frame = NULL;
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        free (p->h_acc[v]);
+        free (p->h_win[v]);
+        p->h_acc[v] = p->h_win[v] = NULL;
+    }
     ae_yin_free (&p->detector);
+}
+
+void ae_psola_set_harmony (AePsola *p, bool on, int lock,
+                           const AeHarmVoice voices[AE_HARM_VOICES])
+{
+    p->harm_on   = on;
+    p->harm_lock = lock < 0 ? 0 : (lock > 2 ? 2 : lock);
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        AeHarmVoice hv = voices[v];
+        if (hv.ext_oct < 0) hv.ext_oct = 0;
+        if (hv.ext_oct > 2) hv.ext_oct = 2;
+        if (hv.pan < -1.0) hv.pan = -1.0;
+        if (hv.pan >  1.0) hv.pan =  1.0;
+        if (hv.gain < 0.0) hv.gain = 0.0;
+        p->harm[v] = hv;
+        /* constant-power pan */
+        const double a = (hv.pan + 1.0) * (AE_PI / 4.0);
+        p->h_gl[v] = hv.gain * cos (a);
+        p->h_gr[v] = hv.gain * sin (a);
+    }
 }
 
 static void run_detection (AePsola *p)
@@ -229,22 +308,88 @@ static void run_detection (AePsola *p)
         p->synth_period = p->current_period / beta;
 
         p->primed = true;
+
+        /* ---- harmony voices (Xentar emulation) --------------------------- */
+        /* Source = the corrected target degree; voices ride the same glide. */
+        bool any_solo = false;
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+            if (p->harm[v].solo && p->harm[v].interval != 0 && ! p->harm[v].mute)
+                any_solo = true;
+
+        double used_cents[AE_HARM_VOICES];
+        int    used_n = 0;
+
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+        {
+            const AeHarmVoice *hv = &p->harm[v];
+            p->h_active[v] = false;
+            int deg_out = AE_HARM_DEG_OFF;
+
+            if (p->harm_on && hv->interval != 0 && ! hv->mute
+                && ! (any_solo && ! hv->solo))
+            {
+                /* eff = interval + sign(interval) * extOct * equaveSteps */
+                const int eff = hv->interval
+                              + (hv->interval > 0 ? 1 : -1) * hv->ext_oct * p->edo;
+                long long gj = cand + eff;
+                if (p->harm_lock == 1)
+                    gj = ae_walk_to_enabled (gj, p->edo, p->enabled_deg);
+
+                double ghost_cents = (double) gj * period / (double) p->edo;
+                if (p->harm_lock == 2)
+                    ghost_cents = ji_snap_cents (ghost_cents, period);
+
+                deg_out = (int) lround (ghost_cents * (double) p->edo / period);
+
+                /* Dedupe: voices landing on one pitch must not double up.
+                   The deduped voice still reports its degree for the UI. */
+                bool dup = false;
+                for (int u = 0; u < used_n; ++u)
+                    if (fabs (ghost_cents - used_cents[u]) < 0.5)
+                        dup = true;
+
+                if (! dup)
+                {
+                    used_cents[used_n++] = ghost_cents;
+
+                    const double voice_cents = p->out_cents + (ghost_cents - target_cents);
+                    double hbeta = pow (2.0, (voice_cents - detected_cents) / 1200.0);
+                    /* keep the synthesis period coverable by the grain width */
+                    const double beta_min = p->current_period / (double) p->tau_max;
+                    hbeta = dclamp (hbeta, beta_min > 0.25 ? beta_min : 0.25, 4.0);
+                    p->h_period[v] = p->current_period / hbeta;
+                    p->h_active[v] = true;
+                }
+            }
+            atomic_store_explicit (&p->h_deg_out[v], deg_out, memory_order_relaxed);
+        }
     }
     else
     {
         p->synth_period = p->current_period; /* identity timeline; crossfade handles the rest */
         p->target_valid = false;
         p->sustain_s    = 0.0;
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+        {
+            p->h_active[v] = false;
+            atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
+        }
     }
 
     p->voiced = now_voiced;
     atomic_store_explicit (&p->voiced_out, now_voiced, memory_order_relaxed);
 }
 
-static void place_grain (AePsola *p, long long center_out)
+/* Place one Hann grain centred at `center_out` into an accumulator pair.
+   `synth_period` sizes the grain so slower (lower-pitched) streams still
+   fully overlap. `touched` tracks the highest cleared slot of that pair. */
+static void place_grain_into (AePsola *p, float *acc, float *win,
+                              long long *touched, long long center_out,
+                              double synth_period)
 {
     const double T0 = p->current_period;
-    int half = (int) llround (T0);
+    const double Tw = synth_period > T0 ? synth_period : T0;
+    int half = (int) llround (Tw);
     if (half < p->tau_min) half = p->tau_min;
     if (half > p->tau_max) half = p->tau_max;
 
@@ -256,14 +401,14 @@ static void place_grain (AePsola *p, long long center_out)
 
     /* Clear any output slots this grain newly reaches, before accumulating. */
     const long long top = center_out + half;
-    for (long long s = p->last_touched + 1; s <= top; ++s)
+    for (long long s = *touched + 1; s <= top; ++s)
     {
         const int k = (int) (s & p->buf_mask);
-        p->wet_win[k] = 0.0f;
-        p->wet_acc[k] = 0.0f;
+        win[k] = 0.0f;
+        acc[k] = 0.0f;
     }
-    if (top > p->last_touched)
-        p->last_touched = top;
+    if (top > *touched)
+        *touched = top;
 
     /* Hann-windowed overlap-add. */
     const double norm = 1.0 / (double) (2 * half);
@@ -276,16 +421,17 @@ static void place_grain (AePsola *p, long long center_out)
         const long long in_i  = a_center + j;
         const int       ok    = (int) (out_i & p->buf_mask);
 
-        p->wet_win[ok] += wv;
+        win[ok] += wv;
 
         float sample = 0.0f;
         if (in_i >= 0 && in_i > p->in_write - p->buf_size && in_i < p->in_write)
             sample = p->in_buf[in_i & p->buf_mask];
-        p->wet_acc[ok] += wv * sample;
+        acc[ok] += wv * sample;
     }
 }
 
-static void process_chunk (AePsola *p, float *mono, int num_samples)
+static void process_chunk (AePsola *p, float *mono, float *harm_l,
+                           float *harm_r, int num_samples)
 {
     for (int i = 0; i < num_samples; ++i)
     {
@@ -305,10 +451,34 @@ static void process_chunk (AePsola *p, float *mono, int num_samples)
         if (p->in_write - p->last_detect_at >= p->hop && p->in_write >= p->frame_size)
             run_detection (p);
 
-        while (p->primed && p->synth_mark <= (double) (p->in_write - 2 * p->tau_max))
+        const long long frontier = p->in_write - 2 * p->tau_max;
+        while (p->primed && p->synth_mark <= (double) frontier)
         {
-            place_grain (p, (long long) llround (p->synth_mark));
+            place_grain_into (p, p->wet_acc, p->wet_win, &p->last_touched,
+                              (long long) llround (p->synth_mark), p->synth_period);
             p->synth_mark += p->synth_period;
+        }
+
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+        {
+            if (p->h_active[v])
+            {
+                while (p->h_mark[v] <= (double) frontier)
+                {
+                    place_grain_into (p, p->h_acc[v], p->h_win[v], &p->h_touched[v],
+                                      (long long) llround (p->h_mark[v]), p->h_period[v]);
+                    p->h_mark[v] += p->h_period[v];
+                }
+            }
+            else
+            {
+                /* Idle voices track the frontier and scrub the slot they pass,
+                   so reactivation can never replay a stale lap of the ring. */
+                p->h_mark[v]    = (double) p->in_write;
+                p->h_touched[v] = p->in_write - 1;
+                p->h_win[v][w]  = 0.0f;
+                p->h_acc[v][w]  = 0.0f;
+            }
         }
     }
 
@@ -325,6 +495,7 @@ static void process_chunk (AePsola *p, float *mono, int num_samples)
         if (t_out < 0)
         {
             mono[i] = 0.0f;
+            if (harm_l != NULL) { harm_l[i] = 0.0f; harm_r[i] = 0.0f; }
             continue;
         }
 
@@ -333,13 +504,33 @@ static void process_chunk (AePsola *p, float *mono, int num_samples)
         const float dry = p->in_buf[idx];
         const float wet = (win > 1.0e-6f) ? (p->wet_acc[idx] / win) : dry;
         mono[i] = (float) (p->v_gain * wet + (1.0 - p->v_gain) * dry);
+
+        if (harm_l != NULL)
+        {
+            double hl = 0.0, hr = 0.0;
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+            {
+                const float hwv = p->h_win[v][idx];
+                if (hwv > 1.0e-6f)
+                {
+                    const double s = p->h_acc[v][idx] / hwv;
+                    hl += p->h_gl[v] * s;
+                    hr += p->h_gr[v] * s;
+                }
+            }
+            harm_l[i] = (float) (p->v_gain * hl);
+            harm_r[i] = (float) (p->v_gain * hr);
+        }
     }
 }
 
-void ae_psola_process (AePsola *p, float *mono, int num_samples)
+void ae_psola_process (AePsola *p, float *mono, float *harm_l, float *harm_r,
+                       int num_samples)
 {
     if (p->in_buf == NULL || num_samples <= 0)
         return;
+    if (harm_l == NULL || harm_r == NULL)
+        harm_l = harm_r = NULL;
 
     /* Sub-chunk so a block larger than the prepared maximum can never
        overflow the ring buffers. */
@@ -348,7 +539,9 @@ void ae_psola_process (AePsola *p, float *mono, int num_samples)
     {
         int m = num_samples - done;
         if (m > p->max_block) m = p->max_block;
-        process_chunk (p, mono + done, m);
+        process_chunk (p, mono + done,
+                       harm_l != NULL ? harm_l + done : NULL,
+                       harm_r != NULL ? harm_r + done : NULL, m);
         done += m;
     }
 }

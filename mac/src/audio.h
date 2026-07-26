@@ -46,6 +46,16 @@ typedef struct
     uint64_t degrees_hi;      /* degrees 64..71 in bits 0..7 */
     bool     bypass;          /* true = pass input through uncorrected */
     double   output_gain_db;  /* -60..+12 */
+
+    /* Smart harmony (Xentar emulation): five independent ghost voices. */
+    bool     harm_on;
+    int      harm_lock;              /* 0 off, 1 mask, 2 JI */
+    int      harm_interval[5];       /* signed EDO steps, 0 = voice off */
+    int      harm_ext[5];            /* 0..2 octave extension, voice-directed */
+    double   harm_gain_db[5];        /* -60..+6 */
+    double   harm_pan[5];            /* -1..1 */
+    uint32_t harm_mute;              /* bit v */
+    uint32_t harm_solo;              /* bit v */
 } AeLiveParams;
 
 /* Parameters that require an engine restart to change. */
@@ -68,6 +78,7 @@ typedef struct
     float  detected_hz;     /* live read-out from the corrector */
     float  target_hz;
     bool   voiced;
+    int    harm_deg[5];     /* live ghost degrees (signed, re root); INT_MIN = silent */
     char   input_name[AE_NAME_MAX];
     char   output_name[AE_NAME_MAX];
 } AeEngineStatus;

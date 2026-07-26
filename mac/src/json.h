@@ -21,6 +21,11 @@ bool ae_json_get_string (const char *json, const char *key, char *out, size_t ca
    array. */
 int ae_json_get_flag_array (const char *json, const char *key, unsigned char *out, int max);
 
+/* Reads an array of numbers into out (up to max entries; non-numeric
+   elements read as 0). Returns the element count, or -1 if key is
+   missing / not an array. */
+int ae_json_get_num_array (const char *json, const char *key, double *out, int max);
+
 /* Appends src to dst (a buffer of cap bytes, already NUL-terminated) with
    JSON string escaping applied. Returns dst. */
 char *ae_json_escape_append (char *dst, size_t cap, const char *src);

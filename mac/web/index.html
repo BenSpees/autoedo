@@ -14,6 +14,8 @@
     --amber: #ffb454; --gold: #c9a227; --gold-dim: #8a7020;
     --bone: #cfccc0; --teal: #4fd1c5; --danger: #e06060; --ok: #6fd08c;
     --keyw: #e6e3d8; --keyb: #23232b;
+    /* harmony voice colors (Xentar ghost convention; V1 pink is canonical) */
+    --v1: #f185a0; --v2: #b892ff; --v3: #64d8e8; --v4: #a6e05a; --v5: #7f9cf5;
   }
   * { box-sizing: border-box; }
   body {
@@ -130,7 +132,8 @@
   .popwrap { position: relative; display: inline-block; }
   .pop { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0;
          background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-         padding: 12px; min-width: 240px; box-shadow: 0 8px 30px #000a; display: none; }
+         padding: 12px; min-width: 240px; box-shadow: 0 8px 30px #000a; display: none;
+         max-height: 70vh; overflow-y: auto; }
   .pop.right { left: auto; right: 0; }
   .pop.show { display: block; }
   .pop .prow { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; flex-wrap: wrap; }
@@ -173,6 +176,42 @@
   /* offline honesty: dim the stage while the engine stream is down */
   .wrap { transition: opacity .3s; }
   body.offline .wrap { opacity: .5; }
+  /* ── harmony strip ──────────────────────────────────────────────────── */
+  #harmline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #harm-chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .hchip { padding: 2px 9px; border-radius: 10px; font-size: 12px;
+           font-variant-numeric: tabular-nums; border: 1px solid; background: none; }
+  #harm-pods { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .pod { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+         display: flex; flex-direction: column; gap: 6px; min-width: 128px;
+         background: var(--panel); }
+  .pod.sel { box-shadow: 0 0 0 1.5px var(--pc); }
+  .pod .phead { display: flex; align-items: center; gap: 6px; cursor: pointer;
+                font-size: 11px; letter-spacing: 1px; color: var(--pc);
+                font-weight: 700; }
+  .pod select { width: 100%; font-size: 12px; padding: 3px 6px; }
+  .pod .prow2 { display: flex; align-items: center; gap: 7px; }
+  .octdots { display: inline-flex; gap: 4px; }
+  .octdots span { width: 11px; height: 11px; border-radius: 50%;
+                  border: 1px solid var(--dim); cursor: pointer; }
+  .octdots span.fill { background: var(--pc); border-color: var(--pc); }
+  .mknob { width: 26px; height: 26px; border-radius: 50%; background: var(--panel2);
+           border: 1px solid var(--line); position: relative; cursor: ns-resize;
+           flex: none; }
+  .mknob .rot { position: absolute; inset: 0; }
+  .mknob .ind { position: absolute; left: calc(50% - 1px); top: 2px; width: 2px;
+                height: 9px; border-radius: 1px; background: var(--pc); }
+  .mklabel { font-size: 9px; color: var(--dim); }
+  .msbtn { padding: 1px 7px; font-size: 10px; border-radius: 5px; }
+  .msbtn.on { background: var(--pc); color: #17171c; border-color: var(--pc);
+              font-weight: 700; }
+  .podval { font-size: 10px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  /* ghost ticks on the ruler (per-voice colors, gold when on the root) */
+  .gtick { position: absolute; top: 1px; width: 8px; height: 8px; border-radius: 50%;
+           transform: translateX(-50%); pointer-events: none;
+           box-shadow: 0 0 6px 1px; }
+  body.perform #harmline > :not(#harm-chips):not(#harm-power) { display: none; }
+  body.perform #harm-pods { display: none !important; }
 </style>
 </head>
 <body>
@@ -286,6 +325,7 @@
       <div class="lane" id="lane-deg"></div>
       <div class="lane" id="lane-axis"></div>
       <div id="shade-layer" style="position:absolute;inset:0;pointer-events:none"></div>
+      <div id="ghost-layer" style="position:absolute;inset:0;pointer-events:none"></div>
       <div id="needle"></div>
     </div>
     <div id="rfooter">
@@ -319,6 +359,21 @@
 
   <!-- knob strip -->
   <div id="knobstrip" class="band"></div>
+
+  <!-- harmony strip (collapsed to one line by default) -->
+  <div id="harmstrip" class="band">
+    <div id="harmline">
+      <button id="harm-expand" class="ghost" title="show the voice pods">&#9656;</button>
+      <button id="harm-power" title="harmony on/off">&#9211; Harmony</button>
+      <span class="seg" id="harm-lock">
+        <button data-lock="off">Off</button><button data-lock="mask">Mask</button><button data-lock="ji">JI</button>
+      </span>
+      <span id="harm-chips"></span>
+      <span style="flex:1"></span>
+      <span class="meta" style="margin:0" id="harm-hint"></span>
+    </div>
+    <div id="harm-pods" hidden></div>
+  </div>
 
 </div>
 
@@ -577,7 +632,9 @@ function updateMaskMeta() {
     const gapC = maxGap * stepCents();
     gapTxt = ` · gap <span class="${gapC > 240 ? 'bad' : ''}">${gapC.toFixed(0)}¢${gapC > 240 ? ' ⚠' : ''}</span>`;
   }
-  $('maskmeta').innerHTML =
+  const scaleTag = cfg && cfg.scaleName
+    ? `<span style="color:var(--bone)">${cfg.scaleName}</span> · ` : '';
+  $('maskmeta').innerHTML = scaleTag +
     `${lit.length}/${edo} · step ${stepCents().toFixed(1)}¢${gapTxt}` +
     (lit.length === 0 ? ' · <span class="bad">empty = chromatic fallback</span>' : '');
 }
@@ -597,6 +654,14 @@ $('lane-deg').addEventListener('pointerdown', ev => {
   if (!cfg || ev.button === 2) return;
   const d = degFromEvent(ev);
   if (ev.altKey) { audition(d); return; }
+  if (ev.shiftKey && selPod >= 0) { // learn-from-ruler: lug -> pod interval
+    const hm = harmCfg().hm.slice();
+    hm[selPod] = d === 0 ? cfg.edo : d;
+    schedulePost({ hm });
+    syncHarm();
+    showToast(`Voice ${selPod + 1} interval set to ↑${hm[selPod]} from the ruler`);
+    return;
+  }
   painting = true;
   markDirty();
   paintTouched = new Set([d]);
@@ -647,7 +712,11 @@ $('ctx').addEventListener('click', ev => ev.stopPropagation());
 $('ctx-piano').onchange = e => { $('show-piano').checked = e.target.checked; buildRuler(); };
 $('ctx-ji').onchange = e => { $('show-ji').checked = e.target.checked; buildRuler(); };
 
-function postDegrees() { schedulePost({ degrees: degrees.slice(0, 72) }); }
+function postDegrees() {
+  // a hand-edited mask is no longer the named catalog scale
+  const clear = cfg && cfg.scaleName ? { scaleCat: '', scaleName: '' } : {};
+  schedulePost({ degrees: degrees.slice(0, 72), ...clear });
+}
 
 function audition(d) {
   try {
@@ -742,6 +811,11 @@ function rebuildPresetList() {
       for (let d = 0; d < p.edo; d++) if (p.degrees[d]) cents.push(d * 1200 / p.edo);
       maskFromCents(cents);
     });
+  if (typeof catalogSections === 'function' && SCALES) {
+    const hr = document.createElement('hr');
+    host.appendChild(hr);
+    catalogSections(host);
+  }
 }
 $('preset-save').onclick = () => {
   closePops();
@@ -860,6 +934,284 @@ function buildKnobs() {
 }
 buildKnobs();
 
+// ---- harmony strip ---------------------------------------------------------
+const VOICE_COLORS = ['var(--v1)', 'var(--v2)', 'var(--v3)', 'var(--v4)', 'var(--v5)'];
+let selPod = -1;      // pod selected for learn-from-ruler
+let podEls = [];
+
+function harmCfg() { // defaults until the first status lands
+  return cfg || { harmOn: false, harmLock: 'mask', hm: [0,0,0,0,0], hx: [0,0,0,0,0],
+                  hg: [0,0,0,0,0], hp: [0,0,0,0,0], hMute: [0,0,0,0,0], hSolo: [0,0,0,0,0] };
+}
+function voiceLabel(v, c) {
+  const iv = c.hm[v];
+  if (!iv) return 'None';
+  return `${iv > 0 ? '↑' : '↓'}${Math.abs(iv)}${c.hx[v] ? `+${c.hx[v]}8ve` : ''}`;
+}
+
+function miniKnob(host, color, opts) { // {min,max,get,fmt,onset}
+  const el = document.createElement('div');
+  el.className = 'mknob';
+  el.style.setProperty('--pc', color);
+  el.innerHTML = '<div class="rot"><div class="ind"></div></div>';
+  host.appendChild(el);
+  const draw = () => {
+    const n = (opts.get() - opts.min) / (opts.max - opts.min);
+    el.querySelector('.rot').style.transform = `rotate(${-135 + 270 * n}deg)`;
+  };
+  let y0 = null, v0 = null;
+  el.addEventListener('pointerdown', ev => {
+    y0 = ev.clientY; v0 = opts.get();
+    el.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+  el.addEventListener('pointermove', ev => {
+    if (y0 === null) return;
+    let v = v0 + (y0 - ev.clientY) / 120 * (opts.max - opts.min);
+    v = Math.max(opts.min, Math.min(opts.max, v));
+    opts.onset(v);
+    draw();
+  });
+  el.addEventListener('pointerup', () => { y0 = null; });
+  el.redraw = draw;
+  return el;
+}
+
+function rebuildIntervalOptions(sel) {
+  const edo = cfg ? cfg.edo : 12;
+  const cur = sel.value;
+  sel.innerHTML = '';
+  const add = (val, label) => {
+    const o = document.createElement('option');
+    o.value = val; o.textContent = label;
+    sel.appendChild(o);
+  };
+  add(0, 'None');
+  for (let n = 1; n <= edo; n++)
+    add(n, `↑${n}${n === edo ? ' (equave)' : ''} · ${(n * stepCents()).toFixed(0)}¢`);
+  for (let n = 1; n <= edo; n++)
+    add(-n, `↓${n}${n === edo ? ' (equave)' : ''} · −${(n * stepCents()).toFixed(0)}¢`);
+  sel.value = cur !== '' && Math.abs(+cur) <= edo ? cur : 0;
+}
+
+function buildHarmPods() {
+  const host = $('harm-pods');
+  host.innerHTML = '';
+  podEls = [];
+  for (let v = 0; v < 5; v++) {
+    const c = harmCfg();
+    const pod = document.createElement('div');
+    pod.className = 'pod';
+    pod.style.setProperty('--pc', VOICE_COLORS[v]);
+    const head = document.createElement('div');
+    head.className = 'phead';
+    head.innerHTML = `V${v + 1} <span class="podval" style="font-weight:400"></span>`;
+    head.title = 'select this pod, then shift-click a ruler lug to set its interval';
+    head.onclick = () => {
+      selPod = selPod === v ? -1 : v;
+      podEls.forEach((p, i) => p.pod.classList.toggle('sel', i === selPod));
+    };
+    pod.appendChild(head);
+
+    const sel = document.createElement('select');
+    rebuildIntervalOptions(sel);
+    sel.value = c.hm[v];
+    sel.onchange = () => { const hm = harmCfg().hm.slice(); hm[v] = +sel.value; schedulePost({ hm }); syncHarm(); };
+    pod.appendChild(sel);
+
+    const row = document.createElement('div');
+    row.className = 'prow2';
+    const dots = document.createElement('span');
+    dots.className = 'octdots';
+    dots.title = 'octave extension (stacks in the voice’s direction)';
+    for (let k = 0; k < 3; k++) {
+      const d = document.createElement('span');
+      d.onclick = () => { const hx = harmCfg().hx.slice(); hx[v] = k; schedulePost({ hx }); syncHarm(); };
+      dots.appendChild(d);
+    }
+    row.appendChild(dots);
+    const gain = miniKnob(row, VOICE_COLORS[v], {
+      min: -24, max: 6,
+      get: () => Math.max(-24, harmCfg().hg[v]),
+      onset: x => { const hg = harmCfg().hg.slice(); hg[v] = Math.round(x * 2) / 2; schedulePost({ hg }); updVal(); },
+    });
+    gain.title = 'voice gain (drag)';
+    const pan = miniKnob(row, VOICE_COLORS[v], {
+      min: -1, max: 1,
+      get: () => harmCfg().hp[v],
+      onset: x => { const hp = harmCfg().hp.slice(); hp[v] = Math.round(x * 20) / 20; schedulePost({ hp }); updVal(); },
+    });
+    pan.title = 'pan (drag)';
+    const mkbtn = (txt, key) => {
+      const b = document.createElement('button');
+      b.className = 'msbtn';
+      b.textContent = txt;
+      b.onclick = () => {
+        const a = harmCfg()[key].slice();
+        a[v] = a[v] ? 0 : 1;
+        schedulePost({ [key]: a });
+        syncHarm();
+      };
+      row.appendChild(b);
+      return b;
+    };
+    const mb = mkbtn('M', 'hMute');
+    const sb = mkbtn('S', 'hSolo');
+    pod.appendChild(row);
+
+    const val = document.createElement('div');
+    val.className = 'podval';
+    pod.appendChild(val);
+
+    const updVal = () => {
+      const cc = harmCfg();
+      val.textContent = `${cc.hg[v].toFixed(1)} dB · pan ${cc.hp[v] === 0 ? 'C'
+        : (cc.hp[v] < 0 ? 'L' : 'R') + Math.abs(Math.round(cc.hp[v] * 100))}`;
+    };
+    updVal();
+    host.appendChild(pod);
+    podEls.push({ pod, sel, dots, gain, pan, mb, sb, head, updVal });
+  }
+}
+buildHarmPods();
+
+function syncHarm() {
+  const c = harmCfg();
+  $('harm-power').classList.toggle('on', !!c.harmOn);
+  document.querySelectorAll('#harm-lock button').forEach(b =>
+    b.classList.toggle('on', b.dataset.lock === c.harmLock));
+  // collapsed chips: what the voices are, not just how many
+  const chips = $('harm-chips');
+  const key = JSON.stringify([c.harmOn, c.hm, c.hx, c.hMute]);
+  if (chips.dataset.key !== key) {
+    chips.dataset.key = key;
+    chips.innerHTML = '';
+    for (let v = 0; v < 5; v++) {
+      if (!c.hm[v]) continue;
+      const ch = document.createElement('span');
+      ch.className = 'hchip';
+      ch.style.color = VOICE_COLORS[v];
+      ch.style.borderColor = VOICE_COLORS[v];
+      ch.style.opacity = (c.harmOn && !c.hMute[v]) ? 1 : 0.35;
+      ch.textContent = voiceLabel(v, c);
+      chips.appendChild(ch);
+    }
+  }
+  podEls.forEach((p, v) => {
+    if (document.activeElement !== p.sel) p.sel.value = c.hm[v];
+    [...p.dots.children].forEach((d, k) => d.classList.toggle('fill', k <= c.hx[v] && c.hx[v] > 0 || (k === 0 && c.hx[v] === 0)));
+    p.mb.classList.toggle('on', !!c.hMute[v]);
+    p.sb.classList.toggle('on', !!c.hSolo[v]);
+    p.gain.redraw(); p.pan.redraw(); p.updVal();
+  });
+}
+
+$('harm-power').onclick = () => { schedulePost({ harmOn: !harmCfg().harmOn }); syncHarm(); };
+document.querySelectorAll('#harm-lock button').forEach(b => {
+  b.onclick = () => { schedulePost({ harmLock: b.dataset.lock }); syncHarm(); };
+});
+$('harm-expand').onclick = () => {
+  const open = $('harm-pods').hidden;
+  $('harm-pods').hidden = !open;
+  $('harm-expand').innerHTML = open ? '&#9662;' : '&#9656;';
+};
+
+// ghost ticks: the whole chord as a constellation of colored glows
+function updateGhosts(degs) {
+  const layer = $('ghost-layer');
+  const edo = cfg ? cfg.edo : 12;
+  const key = JSON.stringify([degs, edo]);
+  if (layer.dataset.key === key) return;
+  layer.dataset.key = key;
+  layer.innerHTML = '';
+  if (!degs) return;
+  const top = $('lane-deg').offsetTop + 2;
+  const seen = {};
+  for (let v = 0; v < 5; v++) {
+    if (degs[v] === null || degs[v] === undefined) continue;
+    const pc = ((degs[v] % edo) + edo) % edo;
+    const stack = seen[pc] || 0;   // deduped voices: stacked chips, not overlap
+    seen[pc] = stack + 1;
+    const g = document.createElement('div');
+    g.className = 'gtick';
+    const col = pc === 0 ? 'var(--gold)' : VOICE_COLORS[v]; // gold wins on root
+    g.style.left = `calc(${xPct(pc * stepCents())}% + ${stack * 9}px)`;
+    g.style.top = top + 'px';
+    g.style.background = col;
+    g.style.boxShadow = `0 0 6px 1px ${col === 'var(--gold)' ? '#c9a22790' : col}`;
+    layer.appendChild(g);
+  }
+}
+
+// ---- scale catalog (xentar-scales-dump) ------------------------------------
+let SCALES = null;
+async function loadScales() {
+  try {
+    SCALES = await (await fetch('/api/scales')).json();
+    rebuildPresetList();
+  } catch (e) {}
+}
+function quantized12Scales(edo, nativeSets) {
+  // steps = sort(dedupe(round(cents*EDO/1200) % EDO)); Chromatic = all;
+  // drop if identical to a native scale of this EDO
+  const out = {};
+  for (const [name, cents] of Object.entries(SCALES.reference12Cents)) {
+    let steps;
+    if (cents === null) steps = Array.from({ length: edo }, (_, i) => i);
+    else steps = [...new Set(cents.map(c => Math.round(c * edo / 1200) % edo))].sort((a, b) => a - b);
+    const k = steps.join(',');
+    if (nativeSets.has(k)) continue;
+    out[name] = { steps };
+  }
+  return out;
+}
+function applyCatalogScale(cat, name, entry) {
+  const edo = cfg.edo;
+  const set = new Set(entry.steps);
+  markDirty();
+  for (let d = 0; d < edo; d++) degrees[d] = set.has(d) ? 1 : 0;
+  updateRulerState();
+  schedulePost({ degrees: degrees.slice(0, 72), scaleCat: cat, scaleName: name });
+}
+function catalogSections(host) {
+  if (!SCALES || !cfg) return;
+  const edo = cfg.edo;
+  const packs = Object.entries(SCALES.edos)
+    .filter(([k, p]) => k !== 'bohlenpierce' && p.edo === edo);
+  const nativeSets = new Set();
+  for (const [, p] of packs)
+    for (const scales of Object.values(p.categories))
+      for (const s of Object.values(scales))
+        if (s.steps) nativeSets.add(s.steps.slice().sort((a, b) => a - b).join(','));
+
+  const addCat = (catName, scales) => {
+    const det = document.createElement('details');
+    const sum = document.createElement('summary');
+    sum.textContent = catName;
+    sum.style.cssText = 'cursor:pointer;color:var(--dim);font-size:12px;padding:4px 6px';
+    det.appendChild(sum);
+    for (const [name, entry] of Object.entries(scales)) {
+      const b = document.createElement('button');
+      b.className = 'menu-item';
+      const multi = !!entry.octaves;
+      b.innerHTML = name + (multi ? ' <span style="color:var(--teal)">&#8859;</span>' : '');
+      if (multi)
+        b.title = 'multi-octave scale — flattened to octave 0 here (the mask and harmony both use octave 0)';
+      else if (entry.description)
+        b.title = entry.description;
+      b.onclick = () => { applyCatalogScale(catName, name, entry); closePops(); };
+      det.appendChild(b);
+    }
+    host.appendChild(det);
+  };
+  for (const [, p] of packs)
+    for (const [catName, scales] of Object.entries(p.categories))
+      addCat(catName, scales);
+  const q12 = quantized12Scales(edo, nativeSets);
+  if (Object.keys(q12).length > 0)
+    addCat('12-EDO Reference (quantized)', q12);
+}
+
 // ---- tuning line -----------------------------------------------------------
 for (let i = 0; i < 12; i++) {
   const o = document.createElement('option');
@@ -924,7 +1276,12 @@ function commitEdo(v) {
     showToast(`Stickiness auto-raised to ${Math.round(sugg * 100)}% — ` +
               `${v}-EDO step (${(1200 / v).toFixed(1)}¢) is narrower than vibrato`);
   }
-  if (cfg && cfg.edo !== v) { cfg.edo = v; buildRuler(); }
+  if (cfg && cfg.edo !== v) {
+    cfg.edo = v;
+    buildRuler();
+    rebuildPresetList();                                 // catalog is per-EDO
+    podEls.forEach(p => rebuildIntervalOptions(p.sel));  // so is the interval pool
+  }
   rebuildChips();
   schedulePost(post);
 }
@@ -1055,6 +1412,8 @@ function updateReadout(s) {
   }
   $('big-sub').textContent = sub;
 
+  updateGhosts(s.harmDeg);
+
   // live needle at the detected pitch's cents position (folded into the octave)
   const needle = $('needle');
   if (det > 0) {
@@ -1098,9 +1457,16 @@ function applyStatus(s) {
     cfg = c;
     degrees = c.degrees.slice();
     setControls(c);
-    if (first) { loadDevices(); rebuildChips(); rebuildPresetList(); buildRuler(); }
-    else if (structural) { rebuildChips(); buildRuler(); }
+    if (first) {
+      loadDevices(); rebuildChips(); rebuildPresetList(); buildRuler();
+      podEls.forEach(p => rebuildIntervalOptions(p.sel));
+    }
+    else if (structural) {
+      rebuildChips(); buildRuler(); rebuildPresetList();
+      podEls.forEach(p => rebuildIntervalOptions(p.sel)); // pool follows the EDO
+    }
     else updateRulerState();
+    syncHarm();
   }
 }
 
@@ -1188,6 +1554,7 @@ function connectWs() {
 
 startPollFallback(); // covers the gap until the socket opens (and old browsers)
 connectWs();
+loadScales();
 </script>
 </body>
 </html>

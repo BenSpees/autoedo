@@ -105,6 +105,26 @@ strips the window to the ruler + a stage-readable readout.
   limit), output gain, lane toggles, restart, and any engine error.
 - **Header** — Bypass, A/B config slots with Copy A→B, Preset menu,
   Perform toggle.
+- **Harmony strip** (Xentar smart-harmonizer emulation) — a third surface,
+  collapsed to one line: master ⏻, a three-way **Lock** (`Off` = raw
+  parallel interval · `Mask` = snap each ghost to the lit-degree mask via
+  the walk-outward-up-first algorithm · `JI` = snap to the JI landmark
+  set), and colored chips showing the active voices. Expanded: five
+  independent voice pods (V1 pink · V2 violet · V3 cyan · V4 lime · V5
+  blue), each with the full interval pool (±1 … ±equave, labeled in
+  steps + cents), octave-extension dots (0–2, stacking in the voice's
+  direction), gain and pan mini-knobs, and mute/solo. Voices ride the
+  *corrected* pitch, dedupe when they land on one pitch, and render as
+  colored ghost ticks on the ruler (gold when a voice lands on the root).
+  **Learn-from-ruler**: select a pod, then shift-click a lug to set its
+  interval. Harmony state persists as `hm`/`hx`/`hg`/`hp` fields.
+- **Scale catalog** — the Preset menu carries the full Xentar scale dump
+  (31 EDO packs, 702 named scales incl. the world-music sets, served at
+  `/api/scales`) filtered to the current EDO, plus the familiar 12-EDO
+  reference scales auto-quantized into any EDO (deduped against native
+  scales). Loading a scale sets the mask and remembers the name until the
+  mask is edited by hand. Multi-octave scales load octave 0's steps and
+  carry a ⧉ badge (both display and engine flatten to octave 0).
 
 All settings apply live and persist to `~/.autoedo.json`. Not in this build
 (future work): the pitch-trace lane, MIDI target/out, per-degree gravity

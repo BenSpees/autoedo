@@ -77,8 +77,9 @@ static void *stub_thread (void *arg)
 
         bool  bypass = false;
         float gain   = 1.0f;
+        float harm_l[STUB_BLOCK], harm_r[STUB_BLOCK];
         ae_atomic_params_apply (&e->params, &e->psola, &bypass, &gain);
-        ae_psola_process (&e->psola, block, STUB_BLOCK);
+        ae_psola_process (&e->psola, block, harm_l, harm_r, STUB_BLOCK);
 
         struct timespec ts = { 0, (long) (1e9 * STUB_BLOCK / STUB_RATE) };
         nanosleep (&ts, NULL);
@@ -104,6 +105,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->detected_hz     = ae_psola_detected_hz (&e->psola);
     out->target_hz       = ae_psola_target_hz (&e->psola);
     out->voiced          = ae_psola_voiced (&e->psola);
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        out->harm_deg[v] = ae_psola_harm_degree (&e->psola, v);
     snprintf (out->input_name,  sizeof (out->input_name),  "Stub Test Tone (input)");
     snprintf (out->output_name, sizeof (out->output_name), "Stub Null Sink (output)");
 }

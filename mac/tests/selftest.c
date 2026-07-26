@@ -117,7 +117,7 @@ static void test_psola (void)
     for (int off = 0; off < total; off += 512)
     {
         const int n = total - off < 512 ? total - off : 512;
-        ae_psola_process (p, buf + off, n);
+        ae_psola_process (p, buf + off, NULL, NULL, n);
     }
 
     CHECK (ae_psola_voiced (p), "psola voiced after 1 s of tone");
@@ -153,6 +153,132 @@ static void test_psola (void)
     free (buf);
 }
 
+/* Goertzel power of frequency f in buf. */
+static double goertzel (const float *buf, int n, double f, double fs)
+{
+    const double w = 2.0 * M_PI * f / fs;
+    const double coeff = 2.0 * cos (w);
+    double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        s0 = buf[i] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    return s1 * s1 + s2 * s2 - coeff * s1 * s2;
+}
+
+static void test_walk (void)
+{
+    bool mask[AE_MAX_EDO] = { false };
+    mask[0] = mask[4] = mask[7] = true; /* C-major-ish triad in 12 */
+
+    CHECK (ae_walk_to_enabled (4, 12, mask) == 4, "walk: already lit");
+    CHECK (ae_walk_to_enabled (5, 12, mask) == 4, "walk: 5 -> 4 (down at d=1... up first?)");
+    /* Xentar: up checked first at each distance. 5+1=6 unlit, 5-1=4 lit -> 4.
+       6: 6+1=7 lit -> 7 (up wins at the same distance). */
+    CHECK (ae_walk_to_enabled (6, 12, mask) == 7, "walk: up wins ties, got %lld",
+           ae_walk_to_enabled (6, 12, mask));
+    CHECK (ae_walk_to_enabled (17, 12, mask) == 16, "walk: octave above, pc math");
+    /* -2 is pc 10: up d=2 reaches pc 0 before down d=3 reaches pc 7 -> 0. */
+    CHECK (ae_walk_to_enabled (-2, 12, mask) == 0, "walk: negative degrees, got %lld",
+           ae_walk_to_enabled (-2, 12, mask));
+
+    bool none[AE_MAX_EDO] = { false };
+    CHECK (ae_walk_to_enabled (5, 12, none) == 5, "walk: empty mask unchanged");
+}
+
+static void test_harmony (void)
+{
+    AePsola *p = calloc (1, sizeof (AePsola));
+    ae_psola_prepare (p, 48000.0, 512, 0.0, 0.0);
+    ae_psola_set_edo (p, 12);
+    ae_psola_set_retune_ms (p, 0.0);
+    ae_psola_set_transition_ms (p, 0.0);
+
+    /* Voice 1: +7 steps (P5 above), centered. Voice 2: same -> must dedupe.
+       Voice 3: +8 steps, mask-locked to a C-major-triad mask -> snaps to +7. */
+    bool mask[AE_MAX_EDO] = { false };
+    mask[0] = mask[4] = mask[7] = true;
+    ae_psola_set_enabled_degrees (p, mask, 12);
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    voices[1].interval = 7; /* duplicate: must not double the level */
+    voices[2].interval = 8; /* locks onto 7 via the mask -> deduped too */
+    ae_psola_set_harmony (p, true, 1, voices);
+
+    /* A3 at exactly 220 Hz (also degree 9+3*12 of the C grid is 220 with
+       default ref) so the corrected voice stays at 220 and the P5 ghost
+       lands at 220 * 2^(7/12) = 329.63 Hz. */
+    const int total = 48000;
+    float *in = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_psola_process (p, in + off, hl + off, hr + off, n);
+    }
+
+    CHECK (ae_psola_voiced (p), "harmony test voiced");
+    CHECK (ae_psola_harm_degree (p, 0) != AE_HARM_DEG_OFF, "voice 1 sounding");
+    /* Voices 2 and 3 still REPORT their degree (UI shows the chord) even
+       though their audio deduped into voice 1's. */
+    const int d0 = ae_psola_harm_degree (p, 0);
+    const int d2 = ae_psola_harm_degree (p, 2);
+    CHECK ((d0 % 12 + 12) % 12 == ((d2 % 12) + 12) % 12,
+           "mask lock: +8 snapped to the fifth (deg0 %d deg2 %d)", d0, d2);
+
+    /* Spectral check on the harmony bus: energy at 329.63, not at 220-only. */
+    const int tail = 24000;
+    const double p_fifth = goertzel (hl + total - tail, tail, 329.63, 48000.0);
+    const double p_root  = goertzel (hl + total - tail, tail, 220.0, 48000.0);
+    CHECK (p_fifth > 10.0 * p_root,
+           "harmony bus is the fifth (P5 %.3g vs root %.3g)", p_fifth, p_root);
+
+    /* Dedupe: re-run with ONLY voice 1 and compare harmony level (~equal). */
+    double rms3 = 0.0;
+    for (int i = total - tail; i < total; ++i) rms3 += (double) hl[i] * hl[i];
+
+    ae_psola_reset (p);
+    ae_psola_set_edo (p, 12);
+    ae_psola_set_retune_ms (p, 0.0);
+    ae_psola_set_transition_ms (p, 0.0);
+    ae_psola_set_enabled_degrees (p, mask, 12);
+    voices[1].interval = 0;
+    voices[2].interval = 0;
+    ae_psola_set_harmony (p, true, 1, voices);
+    phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_psola_process (p, in + off, hl + off, hr + off, n);
+    }
+    double rms1 = 0.0;
+    for (int i = total - tail; i < total; ++i) rms1 += (double) hl[i] * hl[i];
+    CHECK (rms3 < rms1 * 1.5 + 1e-9,
+           "dedupe: 3 coincident voices no louder than 1 (%.4g vs %.4g)", rms3, rms1);
+
+    ae_psola_free (p);
+    free (p);
+    free (in); free (hl); free (hr);
+}
+
 static void test_json (void)
 {
     const char *j = "{\"edo\":19, \"retuneMs\": 42.5, \"bypass\":true,"
@@ -176,6 +302,14 @@ static void test_json (void)
            "degrees values");
     CHECK (! ae_json_get_number (j, "missing", &d), "missing key");
 
+    const char *j2 = "{\"hm\":[7,-5,0,12,-24],\"hp\":[0,-0.5,1,0,0]}";
+    double nums[5];
+    CHECK (ae_json_get_num_array (j2, "hm", nums, 5) == 5, "num array count");
+    CHECK (nums[0] == 7 && nums[1] == -5 && nums[4] == -24, "num array values");
+    CHECK (ae_json_get_num_array (j2, "hp", nums, 5) == 5 && nums[1] == -0.5,
+           "num array floats");
+    CHECK (ae_json_get_num_array (j2, "nope", nums, 5) == -1, "num array missing");
+
     char esc[64] = "";
     ae_json_escape_append (esc, sizeof (esc), "a\"b\\c\nd");
     CHECK (strcmp (esc, "a\\\"b\\\\c\\u000ad") == 0, "escape: '%s'", esc);
@@ -186,6 +320,8 @@ int main (void)
     test_tuning();
     test_yin();
     test_psola();
+    test_walk();
+    test_harmony();
     test_json();
 
     if (failures == 0)
