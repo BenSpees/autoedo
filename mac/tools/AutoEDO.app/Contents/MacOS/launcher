@@ -1,0 +1,7 @@
+#!/bin/bash
+# Dock shim: everything real lives in tools/autoedo.command. The bundle sits
+# inside the repo, so the app directory is four directories up
+# (MacOS -> Contents -> AutoEDO.app -> tools -> mac).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../../../.." && pwd)"
+exec "$REPO/tools/autoedo.command" --headless "$@"

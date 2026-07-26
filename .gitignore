@@ -4,6 +4,7 @@ build_*/
 build-*/
 cmake-build-*/
 out/
+logs/
 
 # JUCE fetched dependency (downloaded by CMake FetchContent)
 _deps/

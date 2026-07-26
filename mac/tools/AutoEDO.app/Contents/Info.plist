@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundlePackageType</key>      <string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
+	<key>CFBundleName</key>             <string>AutoEDO</string>
+	<key>CFBundleDisplayName</key>      <string>AutoEDO</string>
+	<key>CFBundleIdentifier</key>       <string>com.autoedo.launcher</string>
+	<key>CFBundleShortVersionString</key> <string>1.0</string>
+	<key>CFBundleExecutable</key>       <string>launcher</string>
+	<key>CFBundleIconFile</key>         <string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>   <string>10.15</string>
+	<!-- A button, not an app: no bouncing Dock icon or menu bar while running. -->
+	<key>LSUIElement</key>              <true/>
+	<!-- Text of the one-time Automation permission prompt (tab focusing). -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>AutoEDO focuses your existing AutoEDO browser tab instead of opening a duplicate.</string>
+</dict>
+</plist>
