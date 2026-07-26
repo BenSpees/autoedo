@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AutoEDO Live</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%2316161c'/><text x='32' y='27' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='19' font-weight='700' fill='%23cfccc0' text-anchor='middle'>Auto</text><text x='32' y='52' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='19' font-weight='700' fill='%23ffb454' text-anchor='middle'>EDO</text></svg>">
 <style>
   :root {
     --bg: #101014; --panel: #1a1a22; --panel2: #22222c; --line: #2e2e3a;
@@ -169,6 +170,9 @@
   body.perform #tuneline, body.perform #rfooter, body.perform #knobstrip,
   body.perform #hintbar, body.perform .hdr-detail { display: none !important; }
   body.perform #bigreadout { display: block; }
+  /* offline honesty: dim the stage while the engine stream is down */
+  .wrap { transition: opacity .3s; }
+  body.offline .wrap { opacity: .5; }
 </style>
 </head>
 <body>
@@ -1082,7 +1086,8 @@ function applyStatus(s) {
 
   const first = cfg === null;
   const c = s.config;
-  if (first || Date.now() > dirtyUntil) {
+  // never fight the user's hand: a drag-paint in progress owns the mask
+  if (first || (Date.now() > dirtyUntil && !painting)) {
     const structural = !cfg || cfg.edo !== c.edo || cfg.rootNote !== c.rootNote
       || cfg.rootCents !== c.rootCents || cfg.stretchCents !== c.stretchCents
       || cfg.toleranceCents !== c.toleranceCents
@@ -1107,12 +1112,16 @@ function setControls(c) {
   if (document.activeElement !== $('a4')) $('a4').value = c.refA4;
   $('stretch').value = c.stretchCents;
   $('stretch-val').textContent = `${c.stretchCents >= 0 ? '+' : ''}${c.stretchCents.toFixed(1)} ¢/oct`;
-  knobSet(KNOBS[0], c.retuneMs, false);
-  knobSet(KNOBS[1], Math.round(c.amount * 100), false);
-  knobSet(KNOBS[2], c.toleranceCents, false);
-  knobSet(KNOBS[3], Math.round(c.stickiness * 100), false);
-  knobSet(KNOBS[4], c.transitionMs, false);
-  knobSet(KNOBS[5], Math.round(c.humanize * 100), false);
+  // echo-back guard: never overwrite a knob whose inline editor is open
+  const knobSync = (k, v) => {
+    if (!$(`kval-${k.id}`).querySelector('input')) knobSet(k, v, false);
+  };
+  knobSync(KNOBS[0], c.retuneMs);
+  knobSync(KNOBS[1], Math.round(c.amount * 100));
+  knobSync(KNOBS[2], c.toleranceCents);
+  knobSync(KNOBS[3], Math.round(c.stickiness * 100));
+  knobSync(KNOBS[4], c.transitionMs);
+  knobSync(KNOBS[5], Math.round(c.humanize * 100));
   $('range').value = c.range;
   $('gain').value = c.outputGainDb;
   $('gain-val').textContent = `${c.outputGainDb.toFixed(1)} dB`;
@@ -1122,19 +1131,63 @@ function setControls(c) {
   if ($('out-dev').value !== (c.outputUid || '')) $('out-dev').value = c.outputUid || '';
 }
 
-async function poll() {
-  try {
-    const r = await fetch('/api/status');
-    applyStatus(await r.json());
-  } catch (e) {
+// ---- status stream ---------------------------------------------------------
+// The clock lives in the server; the UI renders from its pushed frames and
+// polls nothing while the socket is up. A frozen display flagged offline is
+// a true reading; one animating off a dead engine would be a lie.
+let lastStatusAt = 0;
+let offline = false;
+let pollFallbackTimer = null;
+
+function noteAlive() { lastStatusAt = performance.now(); }
+
+function setOfflineState(off) {
+  if (off === offline) return;
+  offline = off;
+  document.body.classList.toggle('offline', off);
+  if (off) {
     $('dot').classList.remove('ok');
     $('lat').textContent = 'offline';
     $('lat').classList.add('bad');
+    $('needle').style.display = 'none';
+    showToast('Lost the engine — reconnecting');
   }
 }
+setInterval(() => setOfflineState(performance.now() - lastStatusAt > 1500), 400);
 
-poll();
-setInterval(poll, 150);
+function startPollFallback() { // only while the socket is down
+  if (pollFallbackTimer) return;
+  pollFallbackTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/status');
+      noteAlive();
+      applyStatus(await r.json());
+    } catch (e) {}
+  }, 500);
+}
+function stopPollFallback() {
+  clearInterval(pollFallbackTimer);
+  pollFallbackTimer = null;
+}
+
+function connectWs() {
+  let ws;
+  try { ws = new WebSocket(`ws://${location.host}/ws`); }
+  catch (e) { setTimeout(connectWs, 1000); return; }
+  ws.onopen = () => stopPollFallback();
+  ws.onmessage = ev => {
+    noteAlive();
+    try { applyStatus(JSON.parse(ev.data)); } catch (e) {}
+  };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  ws.onclose = () => {
+    startPollFallback();
+    setTimeout(connectWs, 1000);
+  };
+}
+
+startPollFallback(); // covers the gap until the socket opens (and old browsers)
+connectWs();
 </script>
 </body>
 </html>

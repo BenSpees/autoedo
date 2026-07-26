@@ -116,12 +116,15 @@ The UI is plain HTML/JS embedded into the binary at build time
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status`  | GET  | engine state, live pitch read-out, current config |
+| `/ws`          | WS   | status pushed ~10×/s — the UI renders from this stream and polls nothing |
+| `/api/status`  | GET  | same status JSON (serialized once per tick, shared by all consumers) |
 | `/api/devices` | GET  | audio device list |
 | `/api/config`  | POST | partial config update (restarts engine if devices/buffer changed) |
 | `/api/restart` | POST | force an engine restart |
 
-The server binds to `127.0.0.1` only.
+The server binds to `127.0.0.1` only. If the stream dies the UI dims and
+says so (no animating a dead engine), keeps reconnecting once a second,
+and falls back to slow polling until the socket is back.
 
 ## Building manually
 

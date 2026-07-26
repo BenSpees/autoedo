@@ -33,4 +33,9 @@ AeHttpServer *ae_http_start (int port, AeHttpHandler handler, void *user,
 
 void ae_http_stop (AeHttpServer *s);
 
+/* Push a WebSocket text frame to every client connected on GET /ws (the
+   server upgrades that path itself; the handler never sees it). Clients
+   whose sockets fail or stall are dropped. Callable from any thread. */
+void ae_http_ws_broadcast (AeHttpServer *s, const char *data, size_t len);
+
 #endif /* AUTOEDO_HTTPD_H */

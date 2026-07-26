@@ -45,6 +45,12 @@ typedef struct
     pthread_mutex_t lock;      /* guards engine + engine_cfg */
     AeAudioEngine  *engine;
     char            engine_err[256];
+
+    /* Status is serialized once per pump tick (or config change) and every
+       consumer — each WebSocket push and each /api/status GET — is handed
+       the same cached string. */
+    pthread_mutex_t status_lock;
+    char            status_json[8192];
 } App;
 
 /* Detection-range presets (min/max Hz of the tracking window). */
@@ -308,8 +314,12 @@ static void engine_restart_locked (App *app)
 
 /* --------------------------------------------------------------------- api */
 
-static void api_status (App *app, AeHttpResponse *resp)
+/* Serialize the full status once into the cache (Rule 2 of the smooth-UI
+   pattern: one serialization per tick, shared by all consumers). */
+static void status_refresh (App *app)
 {
+    char buf[8192];
+
     pthread_mutex_lock (&app->lock);
 
     AeEngineStatus st;
@@ -328,9 +338,7 @@ static void api_status (App *app, AeHttpResponse *resp)
     const double lat_ms = st.output_rate > 0.0
                             ? 1000.0 * st.latency_samples / st.output_rate : 0.0;
 
-    resp->status       = 200;
-    resp->content_type = "application/json";
-    ae_http_resp_printf (resp,
+    snprintf (buf, sizeof (buf),
         "{\"running\":%s,\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,"
@@ -348,6 +356,19 @@ static void api_status (App *app, AeHttpResponse *resp)
         cfg);
 
     pthread_mutex_unlock (&app->lock);
+
+    pthread_mutex_lock (&app->status_lock);
+    snprintf (app->status_json, sizeof (app->status_json), "%s", buf);
+    pthread_mutex_unlock (&app->status_lock);
+}
+
+static void api_status (App *app, AeHttpResponse *resp)
+{
+    resp->status       = 200;
+    resp->content_type = "application/json";
+    pthread_mutex_lock (&app->status_lock);
+    ae_http_resp_printf (resp, "%s", app->status_json);
+    pthread_mutex_unlock (&app->status_lock);
 }
 
 static void api_devices (App *app, AeHttpResponse *resp)
@@ -411,6 +432,7 @@ static void api_config_post (App *app, const char *body, AeHttpResponse *resp)
     config_save (app);
     pthread_mutex_unlock (&app->lock);
 
+    status_refresh (app); /* the POST echo must reflect the change now */
     api_status (app, resp);
 }
 
@@ -448,6 +470,7 @@ static void handle_request (void *user, const char *method, const char *path,
         pthread_mutex_lock (&app->lock);
         engine_restart_locked (app);
         pthread_mutex_unlock (&app->lock);
+        status_refresh (app);
         api_status (app, resp);
         return;
     }
@@ -463,6 +486,7 @@ int main (int argc, char **argv)
     App app;
     memset (&app, 0, sizeof (app));
     pthread_mutex_init (&app.lock, NULL);
+    pthread_mutex_init (&app.status_lock, NULL);
     app.port = DEFAULT_PORT;
     config_defaults (&app);
     config_load (&app);
@@ -488,6 +512,8 @@ int main (int argc, char **argv)
     /* An engine failure is not fatal: the web UI still comes up so the user
        can pick a working device. */
 
+    status_refresh (&app); /* the cache must exist before the first GET */
+
     char err[256];
     AeHttpServer *server = ae_http_start (app.port, handle_request, &app,
                                           err, sizeof (err));
@@ -504,8 +530,19 @@ int main (int argc, char **argv)
     printf ("AutoEDO Live — control UI at http://127.0.0.1:%d/\n", app.port);
     fflush (stdout);
 
+    /* Pump: rebuild the status string and push it to every WebSocket client
+       ~10x a second. The UI renders from this stream; it polls nothing. */
     while (! g_stop)
-        usleep (200 * 1000);
+    {
+        status_refresh (&app);
+        char frame[sizeof (app.status_json)];
+        pthread_mutex_lock (&app.status_lock);
+        const size_t n = strlen (app.status_json);
+        memcpy (frame, app.status_json, n + 1);
+        pthread_mutex_unlock (&app.status_lock);
+        ae_http_ws_broadcast (server, frame, n);
+        usleep (100 * 1000);
+    }
 
     printf ("autoedo: shutting down\n");
     ae_http_stop (server);
