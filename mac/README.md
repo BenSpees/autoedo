@@ -58,9 +58,19 @@ right-click → Open the bundle once.
 
 ## Web UI
 
-- **Tuning** — EDO quick-chips (12 · 17 · 19 · 22 · 24 · 31 · 53 · 72) plus a
-  numeric field (10–72); root note picker with a fine cents offset (degree 0
-  sits on the root); A4 reference; octave stretch (±¢/oct, period ≠ 1200).
+Layout (spec v1.1): the window has exactly two working surfaces — the pitch
+ruler and the correction knob strip. Everything else is a header line, a
+footer line, or lives inside a popover: the header carries the status dot +
+latency (click for the ⚙ engine popover), Bypass, A/B slots + Copy, the
+Preset menu (presets, Save, Scala import/export) and the Perform toggle; a
+single tuning line (`31-EDO ▾ · C ▾ +0¢ · A4 440`) sits above the ruler with
+the compact live readout right-aligned on the same line. **Perform mode**
+strips the window to the ruler + a stage-readable readout.
+
+- **Tuning line** — one EDO dropdown-button whose menu holds the quick-chips
+  (12 · 17 · 19 · 22 · 24 · 31 · 53 · 72), a numeric field (10–72) and the
+  octave-stretch slider; root note picker with a fine cents offset (degree 0
+  sits on the root); A4 reference.
 - **Pitch ruler** — the degree picker is a cents-proportional octave strip
   with stacked lanes: a slim 12-TET piano lane (true fractional key
   boundaries, never quantized to the EDO grid; clicking a key toggles the
@@ -71,24 +81,30 @@ right-click → Open the bundle once.
   gold; amber means exactly one thing: the degree being corrected to right
   now. Tolerance renders as a halo around each lug. Labels are adaptive
   (every lug ≤ 24 EDO, every 5th above), with a full-identity tooltip
-  (`deg 41 · 683.3¢ · G −16.7¢ · ≈3/2 −18.6¢`). Selection tools: All /
-  None / Invert / rotate mask / Near-12 / Near-JI filters, computed scale
-  presets (major, minor, chain-of-fifths diatonic & pentatonic — correct in
-  any EDO by construction), user preset save slots, and Scala `.scl`
-  import/export. The status line shows `n/N degrees · step · largest gap`
-  (red when a sparse mask makes jumps > ~240¢).
-- **Correction** — retune speed (within-note), amount (partial correction),
-  tolerance (dead zone that preserves vibrato), stickiness (hysteresis
-  before re-snapping — auto-raised above 41 EDO, where the step is smaller
-  than vibrato), transition (glide between *different* degrees), humanize
-  (relaxes retune on sustained notes), and a detection-range preset
-  (Bass … Soprano / Instrument / Wide; changing it restarts the engine and
-  changes latency, which follows the low limit).
-- **Audio device** — input/output device (may be different devices at
-  different rates; the app resamples and compensates drift) and buffer size.
-- **Output** — bypass and output gain. **Live pitch** — detected input pitch
-  vs. the amber target degree, with a cents meter.
-- **A/B** — two config slots with Copy A→B.
+  (`deg 41 · 683.3¢ · G −16.7¢ · ≈3/2 −18.6¢`). The live readout is drawn
+  on the ruler itself: an amber needle at the detected pitch drifting
+  against the glowing target lug. The footer line has All / None / Invert
+  plus a Select ▾ menu (Near-12 / Near-JI filters with a ±¢ threshold, mask
+  rotation) and the status text `n/N · step · gap` (⚠ red past ~240¢).
+  Lane visibility (12-EDO keys, JI lane) lives in the ruler's right-click
+  menu and the ⚙ popover; the how-to line is a dismissible first-run hint
+  and a `?` hover thereafter. Computed scale presets (major, minor,
+  chain-of-fifths diatonic & pentatonic — correct in any EDO by
+  construction), user preset save slots and Scala `.scl` import/export are
+  in the header's Preset menu.
+- **Correction knob strip** — six mini-knobs in one row (drag vertically,
+  double-click to type): Speed (within-note retune), Amount (partial
+  correction), Tol (dead zone that preserves vibrato), Stick (hysteresis
+  before re-snapping — auto-raised above 41 EDO with a toast saying so),
+  Trans (glide between *different* degrees), Human (relaxes retune on
+  sustained notes).
+- **⚙ engine popover** — input/output device (may be different devices at
+  different rates; the app resamples and compensates drift), buffer size,
+  detection-range preset (Bass … Soprano / Instrument / Wide; changing it
+  restarts the engine — announced by a toast — and latency follows the low
+  limit), output gain, lane toggles, restart, and any engine error.
+- **Header** — Bypass, A/B config slots with Copy A→B, Preset menu,
+  Perform toggle.
 
 All settings apply live and persist to `~/.autoedo.json`. Not in this build
 (future work): the pitch-trace lane, MIDI target/out, per-degree gravity

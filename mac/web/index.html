@@ -11,70 +11,69 @@
     /* Semantic map (spec §8): amber = live correction only; gold = root;
        bone = lit/quiet; darkened = unlit; teal = JI; red = problem. */
     --amber: #ffb454; --gold: #c9a227; --gold-dim: #8a7020;
-    --bone: #cfccc0; --teal: #4fd1c5; --danger: #e06060;
+    --bone: #cfccc0; --teal: #4fd1c5; --danger: #e06060; --ok: #6fd08c;
     --keyw: #e6e3d8; --keyb: #23232b;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 24px 16px 48px;
+    margin: 0; padding: 18px 16px 40px;
     background: var(--bg); color: var(--text);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  .wrap { max-width: 860px; margin: 0 auto; }
-  h1 { font-size: 22px; margin: 0 0 2px; letter-spacing: .3px; }
-  h1 .live { color: var(--amber); }
-  .sub { color: var(--dim); font-size: 13px; margin-bottom: 20px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-    padding: 16px 18px; margin-bottom: 16px;
-  }
-  .card h2 {
-    font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px;
-    color: var(--dim); margin: 0 0 12px; font-weight: 600;
-  }
-  .row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
-  .row:last-child { margin-bottom: 0; }
-  .row label { flex: 0 0 130px; color: var(--dim); font-size: 13px; }
-  .row .val { flex: 0 0 84px; text-align: right; font-variant-numeric: tabular-nums; }
-  select, input[type=text], input[type=number] {
-    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 7px 10px; font-size: 14px;
-  }
-  select { min-width: 100px; }
-  input[type=range] { flex: 1; accent-color: var(--bone); min-width: 100px; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  /* v1.1: no card chrome — sections separate by whitespace alone */
+  .band { margin-bottom: 14px; }
   button {
     background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+    border-radius: 8px; padding: 5px 12px; font-size: 13px; cursor: pointer;
   }
   button:hover { border-color: var(--bone); }
-  button.small { padding: 4px 10px; font-size: 12px; }
   button.on { background: var(--bone); color: #17171c; border-color: var(--bone); font-weight: 600; }
-  .num { width: 74px; text-align: center; font-variant-numeric: tabular-nums; }
-  .meta { color: var(--dim); font-size: 12px; margin-top: 8px; font-variant-numeric: tabular-nums; }
-  .meta .bad { color: var(--danger); font-weight: 600; }
-  .hintnote { color: var(--gold); font-size: 12px; }
-  /* status */
-  #statusline { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); flex: none; }
-  .dot.ok { background: #6fd08c; }
-  #err { color: var(--danger); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
-  /* tuning header */
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .chips button { padding: 5px 11px; font-variant-numeric: tabular-nums; }
-  .chips button.cur { background: var(--bone); color: #17171c; border-color: var(--bone); font-weight: 600; }
-  details { color: var(--dim); font-size: 13px; }
-  details .row { margin-top: 8px; }
-  /* ===== pitch ruler ===== */
+  button.ghost { background: none; border-color: transparent; color: var(--dim); }
+  button.ghost:hover { color: var(--text); border-color: var(--line); }
+  select, input[type=text], input[type=number] {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 4px 8px; font-size: 13px;
+  }
+  input[type=range] { accent-color: var(--bone); }
+  .num { text-align: center; font-variant-numeric: tabular-nums; }
+  .tab { font-variant-numeric: tabular-nums; }
+  .dimtxt { color: var(--dim); }
+  .bad { color: var(--danger); font-weight: 600; }
+  /* ── header ─────────────────────────────────────────────────────────── */
+  #header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  #header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; white-space: nowrap; }
+  #header h1 .live { color: var(--amber); }
+  #statusbtn { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex: none; }
+  .dot.ok { background: var(--ok); }
+  #header .spacer { flex: 1; }
+  .seg { display: inline-flex; }
+  .seg button { border-radius: 0; margin-left: -1px; }
+  .seg button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 8px 8px 0; }
+  /* ── tuning + live line ─────────────────────────────────────────────── */
+  #tuneline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  #tuneline .dotsep { color: var(--line); }
+  #root-cents, #a4 { width: 64px; }
+  #readout { margin-left: auto; font-size: 14px; white-space: nowrap; }
+  #readout .in  { color: var(--text); }
+  #readout .tgt { color: var(--amber); font-weight: 600; }
+  #readout.unvoiced { color: var(--dim); }
+  #readout.unvoiced .in, #readout.unvoiced .tgt { color: var(--dim); font-weight: 400; }
+  /* ── ruler ──────────────────────────────────────────────────────────── */
   #ruler {
     position: relative; user-select: none; -webkit-user-select: none;
     border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
-    background: #15151b; touch-action: none;
+    background: #15151b; touch-action: none; margin-top: 8px;
   }
   .lane { position: relative; width: 100%; }
-  #lane-piano { height: 34px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  #lane-piano { height: 32px; border-bottom: 1px solid var(--line); cursor: pointer; }
   #lane-ji    { height: 16px; border-bottom: 1px solid var(--line); }
-  #lane-deg   { height: 46px; cursor: pointer; }
-  #lane-axis  { height: 16px; border-top: 1px solid var(--line); }
+  #lane-deg   { height: 52px; cursor: pointer; }
+  #lane-axis  { height: 15px; border-top: 1px solid var(--line); }
+  body.perform #lane-deg { height: 84px; }
+  body.perform #lane-piano { height: 44px; }
   .pkey { position: absolute; top: 0; bottom: 0; border-right: 1px solid #00000055;
           font-size: 10px; color: #55524a; display: flex; align-items: flex-end;
           justify-content: center; padding-bottom: 1px; overflow: hidden; }
@@ -98,203 +97,232 @@
   .halo { position: absolute; top: 4px; bottom: 4px; border-radius: 4px;
           background: #cfccc01a; pointer-events: none; }
   .shade { position: absolute; top: 0; bottom: 0; background: #00000080;
-           pointer-events: none; }  /* darkened overlay for unlit columns */
+           pointer-events: none; }
   .shade.goldwash { background: #c9a22716; }
-  .axislabel { position: absolute; top: 1px; font-size: 9px; color: var(--dim);
+  .axislabel { position: absolute; top: 0; font-size: 9px; color: var(--dim);
                transform: translateX(-50%); font-variant-numeric: tabular-nums; }
-  .toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-  .toolbar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
-  .toolbar input.num { width: 52px; padding: 4px 6px; font-size: 12px; }
-  /* correction grid */
-  .knobs { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 28px; }
-  .knobs .row label { flex: 0 0 92px; }
-  .knobs .row .val { flex: 0 0 64px; }
-  @media (max-width: 640px) { .knobs { grid-template-columns: 1fr; } }
-  /* readout */
-  .readout { display: flex; align-items: center; justify-content: center; gap: 18px;
-             padding: 8px 0 4px; }
-  .pitchbox { text-align: center; min-width: 170px; }
-  .pitchbox .big { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .pitchbox .hz  { color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
-  #tgt-note { color: var(--amber); }
-  .arrow { color: var(--dim); font-size: 22px; }
-  .voice { font-size: 12px; color: var(--dim); text-align: center; margin-top: 6px; }
-  .voice b { color: var(--amber); }
-  #centsbarwrap { position: relative; height: 8px; background: var(--panel2);
-                  border-radius: 4px; margin: 14px 8px 2px; overflow: hidden; }
-  #centsbar { position: absolute; top: 0; bottom: 0; background: var(--amber); width: 0; }
-  #centsmid { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--dim); }
-  .centslabel { display: flex; justify-content: space-between; color: var(--dim);
-                font-size: 11px; margin: 2px 8px 0; font-variant-numeric: tabular-nums; }
-  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  /* the live needle: detected input pitch, drawn on the instrument itself */
+  #needle { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--amber);
+            box-shadow: 0 0 6px 1px #ffb45490; pointer-events: none;
+            transition: left 120ms linear; display: none; }
+  /* ── ruler footer ───────────────────────────────────────────────────── */
+  #rfooter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  #maskmeta { margin-left: auto; color: var(--dim); font-size: 12px;
+              font-variant-numeric: tabular-nums; }
+  #hintbar { display: flex; align-items: center; gap: 8px; margin-top: 6px;
+             color: var(--dim); font-size: 12px; }
+  /* ── knob strip ─────────────────────────────────────────────────────── */
+  #knobstrip { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap;
+               margin-top: 16px; }
+  .knob { display: flex; flex-direction: column; align-items: center; gap: 2px;
+          width: 64px; cursor: ns-resize; user-select: none; }
+  .dial { width: 44px; height: 44px; border-radius: 50%; background: var(--panel2);
+          border: 1px solid var(--line); position: relative; }
+  .dial:hover { border-color: var(--bone); }
+  .rot { position: absolute; inset: 0; }
+  .ind { position: absolute; left: calc(50% - 1.5px); top: 4px; width: 3px; height: 14px;
+         border-radius: 2px; background: var(--bone); }
+  .klabel { font-size: 10px; letter-spacing: 1px; color: var(--dim); margin-top: 3px; }
+  .kval { font-size: 11px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .kval input { width: 56px; font-size: 11px; padding: 1px 4px; }
+  /* ── popovers ───────────────────────────────────────────────────────── */
+  .popwrap { position: relative; display: inline-block; }
+  .pop { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0;
+         background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+         padding: 12px; min-width: 240px; box-shadow: 0 8px 30px #000a; display: none; }
+  .pop.right { left: auto; right: 0; }
+  .pop.show { display: block; }
+  .pop .prow { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; flex-wrap: wrap; }
+  .pop .prow:last-child { margin-bottom: 0; }
+  .pop label { flex: 0 0 92px; color: var(--dim); font-size: 12px; }
+  .pop select { flex: 1; min-width: 120px; }
+  .pop hr { border: none; border-top: 1px solid var(--line); margin: 9px 0; }
+  .menu-item { display: block; width: 100%; text-align: left; background: none;
+               border: none; padding: 6px 8px; border-radius: 6px; color: var(--text);
+               font-size: 13px; }
+  .menu-item:hover { background: var(--panel2); border: none; }
+  .chips { display: flex; gap: 5px; flex-wrap: wrap; }
+  .chips button { padding: 4px 9px; font-variant-numeric: tabular-nums; }
+  .chips button.cur { background: var(--bone); color: #17171c; border-color: var(--bone);
+                      font-weight: 600; }
+  .switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
             user-select: none; color: var(--dim); font-size: 13px; }
-  .switch input { accent-color: var(--bone); width: 16px; height: 16px; }
-  .bottombar { display: flex; gap: 8px; align-items: center; }
-  .bottombar .spacer { flex: 1; }
+  .switch input { accent-color: var(--bone); width: 15px; height: 15px; }
+  /* context menu */
+  #ctx { position: fixed; z-index: 60; background: var(--panel);
+         border: 1px solid var(--line); border-radius: 10px; padding: 8px;
+         box-shadow: 0 8px 30px #000a; display: none; }
+  /* toast */
+  #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+           background: var(--panel); border: 1px solid var(--line); color: var(--text);
+           border-radius: 10px; padding: 9px 16px; font-size: 13px; z-index: 80;
+           box-shadow: 0 8px 30px #000a; opacity: 0; transition: opacity .25s;
+           pointer-events: none; max-width: 80vw; }
+  #toast.show { opacity: 1; }
+  /* perform mode */
+  #bigreadout { display: none; text-align: center; margin: 18px 0 10px;
+                font-variant-numeric: tabular-nums; }
+  #bigreadout .in  { font-size: 44px; font-weight: 600; }
+  #bigreadout .tgt { font-size: 44px; font-weight: 700; color: var(--amber); }
+  #bigreadout .sub { color: var(--dim); font-size: 15px; margin-top: 2px; }
+  #bigreadout.unvoiced .in, #bigreadout.unvoiced .tgt { color: var(--dim); font-weight: 400; }
+  body.perform #tuneline, body.perform #rfooter, body.perform #knobstrip,
+  body.perform #hintbar, body.perform .hdr-detail { display: none !important; }
+  body.perform #bigreadout { display: block; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>AutoEDO <span class="live">Live</span></h1>
-  <div class="sub">Realtime microtonal (EDO) pitch correction — live input &rarr; live output</div>
 
-  <div class="card">
-    <div id="statusline"><span class="dot" id="dot"></span><span id="statustext">connecting…</span>
-      <span style="flex:1"></span>
-      <button class="small" id="restart">Restart engine</button>
-    </div>
-    <div id="err" hidden></div>
-  </div>
-
-  <div class="card">
-    <h2>Tuning</h2>
-    <div class="row">
-      <label>EDO</label>
-      <span class="chips" id="edo-chips"></span>
-      <input type="text" id="edo" class="num" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="12" style="width:58px">
-    </div>
-    <div class="row">
-      <label for="root">Root</label>
-      <select id="root"></select>
-      <input type="number" id="root-cents" class="num" step="0.1" min="-50" max="50" value="0">
-      <span class="val" style="flex:0 0 20px; text-align:left">¢</span>
-      <label for="a4" style="flex:0 0 auto">A4</label>
-      <input type="number" id="a4" class="num" step="0.1" min="400" max="480" value="440.0">
-      <span class="val" style="flex:0 0 24px; text-align:left">Hz</span>
-    </div>
-    <details>
-      <summary>Octave stretch</summary>
-      <div class="row">
-        <label for="stretch">Stretch</label>
-        <input type="range" id="stretch" min="-30" max="30" step="0.5" value="0">
-        <span class="val" id="stretch-val">+0.0 ¢/oct</span>
+  <!-- header: 1 line -->
+  <div id="header" class="band">
+    <h1>AutoEDO <span class="live">Live</span></h1>
+    <div class="popwrap">
+      <button id="statusbtn" class="ghost" title="engine status — click for audio settings">
+        <span class="dot" id="dot"></span><span id="lat" class="tab">…</span>
+        <span style="opacity:.8">&#9881;</span>
+      </button>
+      <div class="pop" id="pop-engine">
+        <div class="prow"><label>Input</label><select id="in-dev"></select></div>
+        <div class="prow"><label>Output</label><select id="out-dev"></select></div>
+        <div class="prow"><label>Buffer</label>
+          <select id="bufsize" style="flex:0 0 90px">
+            <option>64</option><option>128</option><option selected>256</option>
+            <option>512</option><option>1024</option>
+          </select>
+          <button class="ghost" id="refresh-dev">Refresh</button>
+        </div>
+        <div class="prow"><label>Detection range</label>
+          <select id="range">
+            <option value="bass">Bass (55–400 Hz)</option>
+            <option value="baritone">Baritone (65–450 Hz)</option>
+            <option value="tenor">Tenor (80–600 Hz)</option>
+            <option value="alto">Alto (100–800 Hz)</option>
+            <option value="soprano">Soprano (130–1200 Hz)</option>
+            <option value="instrument" selected>Instrument (65–1600 Hz)</option>
+            <option value="wide">Wide (40–2000 Hz)</option>
+          </select>
+        </div>
+        <div class="prow"><label>Output gain</label>
+          <input type="range" id="gain" min="-60" max="12" step="0.5" value="0" style="flex:1">
+          <span class="tab" id="gain-val" style="flex:0 0 56px;text-align:right">0.0 dB</span>
+        </div>
+        <hr>
+        <div class="prow">
+          <label class="switch" style="flex:0 0 auto"><input type="checkbox" id="show-piano" checked> 12-EDO keys</label>
+          <label class="switch" style="flex:0 0 auto"><input type="checkbox" id="show-ji"> JI lane</label>
+        </div>
+        <hr>
+        <div class="prow">
+          <span class="dimtxt" id="engine-detail" style="font-size:12px;flex:1">—</span>
+          <button class="ghost" id="restart">Restart engine</button>
+        </div>
+        <div class="prow" id="err-row" hidden><span class="bad" id="err" style="font-size:12px;white-space:pre-wrap"></span></div>
       </div>
-    </details>
+    </div>
+    <span class="spacer"></span>
+    <button id="bypass" class="hdr-detail" title="pass the dry input through">Bypass</button>
+    <span class="seg hdr-detail">
+      <button id="ab-a" class="on">A</button><button id="ab-b">B</button>
+    </span>
+    <button id="ab-copy" class="ghost hdr-detail" title="copy the current settings into both slots">A&rarr;B</button>
+    <div class="popwrap hdr-detail">
+      <button id="preset-btn">Preset &#9662;</button>
+      <div class="pop right" id="pop-preset">
+        <div id="preset-list"></div>
+        <hr>
+        <button class="menu-item" id="preset-save">Save&#8230;</button>
+        <button class="menu-item" id="scl-imp">Import .scl&#8230;</button>
+        <button class="menu-item" id="scl-exp">Export .scl&#8230;</button>
+        <input type="file" id="scl-file" accept=".scl,text/plain" hidden>
+      </div>
+    </div>
+    <button id="perform" title="Perform mode: just the ruler and a stage-readable readout">Perform</button>
   </div>
 
-  <div class="card">
-    <h2>Pitch ruler</h2>
-    <div class="toolbar">
-      <button class="small" id="deg-all">All</button>
-      <button class="small" id="deg-none">None</button>
-      <button class="small" id="deg-inv">Invert</button>
-      <button class="small" id="rot-l" title="Rotate mask left">&#9664;</button>
-      <button class="small" id="rot-r" title="Rotate mask right">&#9654;</button>
-      <span class="sep"></span>
-      <button class="small" id="near12">Near-12</button>
-      <button class="small" id="nearji">Near-JI</button>
-      <input type="text" id="near-tol" class="num" inputmode="decimal" value="15" title="Near-filter window, ± cents">
-      <span style="color:var(--dim);font-size:12px">±¢</span>
-      <span class="sep"></span>
-      <select id="preset"><option value="">Preset…</option></select>
-      <button class="small" id="preset-save">Save</button>
-      <button class="small" id="scl-imp" title="Import a Scala .scl scale">.scl &#8593;</button>
-      <button class="small" id="scl-exp" title="Export lit degrees as .scl">.scl &#8595;</button>
-      <input type="file" id="scl-file" accept=".scl,text/plain" hidden>
-      <span class="sep"></span>
-      <label class="switch"><input type="checkbox" id="show-piano" checked> 12-EDO keys</label>
-      <label class="switch"><input type="checkbox" id="show-ji"> JI lane</label>
+  <!-- tuning + live: 1 line -->
+  <div id="tuneline">
+    <div class="popwrap">
+      <button id="edo-btn" class="tab">12-EDO &#9662;</button>
+      <div class="pop" id="pop-edo">
+        <div class="prow"><div class="chips" id="edo-chips"></div></div>
+        <div class="prow"><label>Custom</label>
+          <input type="text" id="edo" class="num" inputmode="numeric" pattern="[0-9]*"
+                 maxlength="2" value="12" style="width:58px">
+          <span class="dimtxt" style="font-size:12px">10–72</span>
+        </div>
+        <hr>
+        <div class="prow"><label>Octave stretch</label>
+          <input type="range" id="stretch" min="-30" max="30" step="0.5" value="0" style="flex:1">
+          <span class="tab" id="stretch-val" style="flex:0 0 74px;text-align:right">+0.0 ¢/oct</span>
+        </div>
+      </div>
     </div>
+    <span class="dotsep">·</span>
+    <select id="root" title="root note (degree 0)"></select>
+    <input type="number" id="root-cents" class="num" step="0.1" min="-50" max="50" value="0" title="root fine offset, cents">
+    <span class="dimtxt">¢</span>
+    <span class="dotsep">·</span>
+    <span class="dimtxt">A4</span>
+    <input type="number" id="a4" class="num" step="0.1" min="400" max="480" value="440.0">
+    <span id="readout" class="tab unvoiced"><span class="in">—</span> <span class="dimtxt">&rarr;</span> <span class="tgt">—</span></span>
+  </div>
+
+  <!-- big readout (perform mode only) -->
+  <div id="bigreadout" class="unvoiced">
+    <div><span class="in">—</span> <span class="dimtxt" style="font-size:34px">&rarr;</span> <span class="tgt">—</span></div>
+    <div class="sub" id="big-sub">unvoiced</div>
+  </div>
+
+  <!-- the ruler -->
+  <div class="band">
     <div id="ruler">
       <div class="lane" id="lane-piano"></div>
       <div class="lane" id="lane-ji" hidden></div>
       <div class="lane" id="lane-deg"></div>
       <div class="lane" id="lane-axis"></div>
       <div id="shade-layer" style="position:absolute;inset:0;pointer-events:none"></div>
+      <div id="needle"></div>
     </div>
-    <div class="meta" id="maskmeta"></div>
-    <div class="meta" style="margin-top:2px">click / drag paints degrees on or off · alt-click auditions the pitch · click a piano key to toggle the nearest degree</div>
-  </div>
-
-  <div class="card">
-    <h2>Correction</h2>
-    <div class="knobs">
-      <div class="row"><label>Retune speed</label>
-        <input type="range" id="retune" min="0" max="400" step="1" value="20">
-        <span class="val" id="retune-val">20 ms</span></div>
-      <div class="row"><label>Amount</label>
-        <input type="range" id="amount" min="0" max="100" step="1" value="100">
-        <span class="val" id="amount-val">100 %</span></div>
-      <div class="row"><label>Tolerance</label>
-        <input type="range" id="tolerance" min="0" max="50" step="0.5" value="0">
-        <span class="val" id="tolerance-val">±0.0 ¢</span></div>
-      <div class="row"><label>Stickiness</label>
-        <input type="range" id="stickiness" min="0" max="100" step="1" value="0">
-        <span class="val" id="stickiness-val">0 %</span></div>
-      <div class="row"><label>Transition</label>
-        <input type="range" id="transition" min="0" max="200" step="1" value="50">
-        <span class="val" id="transition-val">50 ms</span></div>
-      <div class="row"><label>Humanize</label>
-        <input type="range" id="humanize" min="0" max="100" step="1" value="0">
-        <span class="val" id="humanize-val">0 %</span></div>
-    </div>
-    <div class="row" style="margin-top:10px">
-      <label for="range">Detection range</label>
-      <select id="range">
-        <option value="bass">Bass (55–400 Hz)</option>
-        <option value="baritone">Baritone (65–450 Hz)</option>
-        <option value="tenor">Tenor (80–600 Hz)</option>
-        <option value="alto">Alto (100–800 Hz)</option>
-        <option value="soprano">Soprano (130–1200 Hz)</option>
-        <option value="instrument" selected>Instrument (65–1600 Hz)</option>
-        <option value="wide">Wide (40–2000 Hz)</option>
-      </select>
-      <span class="meta" style="margin:0">changing range restarts the engine (latency follows the low limit)</span>
-    </div>
-    <div class="meta" id="stick-hint" hidden></div>
-  </div>
-
-  <div class="card">
-    <h2>Live pitch</h2>
-    <div class="readout">
-      <div class="pitchbox">
-        <div class="big" id="det-note">—</div>
-        <div class="hz" id="det-hz">input</div>
+    <div id="rfooter">
+      <button class="ghost" id="deg-all">All</button>
+      <button class="ghost" id="deg-none">None</button>
+      <button class="ghost" id="deg-inv">Invert</button>
+      <div class="popwrap">
+        <button class="ghost" id="select-btn">Select &#9662;</button>
+        <div class="pop" id="pop-select">
+          <div class="prow">
+            <button id="near12">Near-12</button>
+            <button id="nearji">Near-JI</button>
+            <input type="text" id="near-tol" class="num" inputmode="decimal" value="15"
+                   style="width:48px" title="filter window, ± cents">
+            <span class="dimtxt" style="font-size:12px">±¢</span>
+          </div>
+          <div class="prow"><label>Rotate mask</label>
+            <button id="rot-l">&#9664;</button><button id="rot-r">&#9654;</button>
+          </div>
+        </div>
       </div>
-      <div class="arrow">&rarr;</div>
-      <div class="pitchbox">
-        <div class="big" id="tgt-note">—</div>
-        <div class="hz" id="tgt-hz">target</div>
-      </div>
+      <button class="ghost" id="help"
+        title="click / drag paints degrees on or off&#10;alt-click auditions the pitch&#10;click a piano key to toggle the nearest degree&#10;right-click the ruler for lane options">?</button>
+      <span id="maskmeta"></span>
     </div>
-    <div id="centsbarwrap"><div id="centsbar"></div><div id="centsmid"></div></div>
-    <div class="centslabel"><span id="cents-lo">-50¢</span><span id="cents-off">—</span><span id="cents-hi">+50¢</span></div>
-    <div class="voice" id="voiced">unvoiced</div>
-  </div>
-
-  <div class="card">
-    <h2>Audio device</h2>
-    <div class="row"><label for="in-dev">Input</label><select id="in-dev" style="flex:1"></select></div>
-    <div class="row"><label for="out-dev">Output</label><select id="out-dev" style="flex:1"></select></div>
-    <div class="row"><label for="bufsize">Buffer size</label>
-      <select id="bufsize">
-        <option>64</option><option>128</option><option selected>256</option>
-        <option>512</option><option>1024</option>
-      </select>
-      <button class="small" id="refresh-dev">Refresh devices</button>
+    <div id="hintbar" hidden>
+      <span>click / drag paints degrees on or off · alt-click auditions · click a piano key to toggle the nearest degree · right-click for lanes</span>
+      <button class="ghost" id="hint-x">&#10005;</button>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Output</h2>
-    <div class="row">
-      <label class="switch" style="flex:0 0 auto"><input type="checkbox" id="bypass"> Bypass (dry input)</label>
-    </div>
-    <div class="row">
-      <label for="gain">Output gain</label>
-      <input type="range" id="gain" min="-60" max="12" step="0.5" value="0">
-      <span class="val" id="gain-val">0.0 dB</span>
-    </div>
-  </div>
+  <!-- knob strip -->
+  <div id="knobstrip" class="band"></div>
 
-  <div class="card bottombar">
-    <button class="small on" id="ab-a">A</button>
-    <button class="small" id="ab-b">B</button>
-    <button class="small" id="ab-copy">Copy A&rarr;B</button>
-    <span class="spacer"></span>
-    <span class="meta" style="margin:0">not in this build: pitch-trace lane · MIDI target/out · per-degree gravity (formants are preserved by TD-PSOLA itself)</span>
-  </div>
 </div>
+
+<div id="ctx">
+  <label class="switch" style="display:flex;margin-bottom:6px"><input type="checkbox" id="ctx-piano" checked> 12-EDO keys</label>
+  <label class="switch" style="display:flex"><input type="checkbox" id="ctx-ji"> JI lane</label>
+</div>
+<div id="toast"></div>
 
 <script>
 'use strict';
@@ -302,27 +330,26 @@ const $ = id => document.getElementById(id);
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const BLACK_PC = new Set([1,3,6,8,10]);
 const EDO_CHIPS = [12,17,19,22,24,31,53,72];
-const JI_SET = [ // [num, den, label]
+const JI_SET = [
   [9,8,'9/8'],[7,6,'7/6'],[6,5,'6/5'],[5,4,'5/4'],[4,3,'4/3'],[11,8,'11/8'],
   [3,2,'3/2'],[8,5,'8/5'],[5,3,'5/3'],[7,4,'7/4'],[9,5,'9/5'],[15,8,'15/8'],
 ];
 const jiCents = JI_SET.map(([a,b,l]) => [1200*Math.log2(a/b), l]);
 
-let cfg = null;          // last config from server
-let degrees = [];        // working copy of the degree flags (length 72)
-let dirtyUntil = 0;      // don't clobber controls the user is touching
+let cfg = null;
+let degrees = [];
+let dirtyUntil = 0;
 let postTimer = null;
 let pending = {};
-let activeDeg = -1;      // degree currently being corrected to (amber)
+let activeDeg = -1;
 let lugEls = [], shadeEls = [];
 let audioCtx = null;
+let lastRange = null;
 
 function markDirty() { dirtyUntil = Date.now() + 2500; }
 
 function schedulePost(partial) {
-  // keep the local config mirror current even while the dirty window is
-  // holding off server->control syncs (A/B snapshots read from cfg)
-  if (cfg) Object.assign(cfg, partial);
+  if (cfg) Object.assign(cfg, partial); // keep the local mirror current
   Object.assign(pending, partial);
   markDirty();
   if (postTimer) return;
@@ -332,19 +359,46 @@ function schedulePost(partial) {
     try {
       const r = await fetch('/api/config', { method: 'POST', body });
       applyStatus(await r.json());
-    } catch (e) { /* next poll will resync */ }
+    } catch (e) {}
   }, 120);
 }
+
+let toastTimer = null;
+function showToast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+// ---- popover plumbing ------------------------------------------------------
+const POPS = [['statusbtn','pop-engine'],['preset-btn','pop-preset'],
+              ['edo-btn','pop-edo'],['select-btn','pop-select']];
+for (const [b, p] of POPS) {
+  $(b).addEventListener('click', ev => {
+    ev.stopPropagation();
+    const pop = $(p), was = pop.classList.contains('show');
+    document.querySelectorAll('.pop.show').forEach(x => x.classList.remove('show'));
+    if (!was) pop.classList.add('show');
+  });
+}
+document.addEventListener('click', ev => {
+  if (!ev.target.closest('.pop') )
+    document.querySelectorAll('.pop.show').forEach(x => x.classList.remove('show'));
+  $('ctx').style.display = 'none';
+});
+function closePops() { document.querySelectorAll('.pop.show').forEach(x => x.classList.remove('show')); }
 
 // ---- tuning math (mirrors the engine) --------------------------------------
 function period() { return 1200 + (cfg ? cfg.stretchCents : 0); }
 function stepCents() { return period() / (cfg ? cfg.edo : 12); }
-function refHz() { // frequency of degree 0 (root, octave 0)
+function refHz() {
   const c = cfg || { refA4: 440, rootNote: 0, rootCents: 0 };
   return c.refA4 * Math.pow(2, (c.rootNote - 9) / 12) / 16
                * Math.pow(2, c.rootCents / 1200);
 }
-function noteName(hz) { // nearest 12-TET name at the configured A4
+function noteName(hz) {
   if (!hz || hz <= 0) return '—';
   const a4 = cfg ? cfg.refA4 : 440;
   const midi = 69 + 12 * Math.log2(hz / a4);
@@ -353,15 +407,15 @@ function noteName(hz) { // nearest 12-TET name at the configured A4
   const name = NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
   return name + (cents ? ` ${cents > 0 ? '+' : ''}${cents}¢` : '');
 }
-function hzToDegree(hz) { // absolute degree index j re root
+function hzToDegree(hz) {
   if (!hz || hz <= 0 || !cfg) return null;
   return Math.round(cfg.edo * 1200 * Math.log2(hz / refHz()) / period());
 }
-function degreeInfo(d) { // identity string for tooltips
+function degreeInfo(d) {
   const c = d * stepCents();
   const abs = c + (cfg ? cfg.rootCents : 0);
   const n12 = Math.round(abs / 100);
-  const pc12 = ((( (cfg ? cfg.rootNote : 0) + n12) % 12) + 12) % 12;
+  const pc12 = ((((cfg ? cfg.rootNote : 0) + n12) % 12) + 12) % 12;
   const d12 = abs - n12 * 100;
   let bestJi = null, bestDist = 1e9;
   for (const [jc, jl] of jiCents) {
@@ -375,23 +429,17 @@ function degreeInfo(d) { // identity string for tooltips
 }
 
 // ---- pitch ruler -----------------------------------------------------------
-// x mapping: cents 0..period() onto [pad, 100-pad] percent, pad = half a step
 function xPct(cents) {
   const edo = cfg ? cfg.edo : 12;
   const pad = 50 / edo;
   return pad + (cents / period()) * (100 - 2 * pad);
 }
-function lugWidthPct() {
-  const edo = cfg ? cfg.edo : 12;
-  return (100 - 100 / edo) / edo * (stepCents() * edo / period()); // = one step
-}
 
 function buildRuler() {
   if (!cfg) return;
   const edo = cfg.edo, root = cfg.rootNote, rc = cfg.rootCents;
-  const stepW = (100 - 100 / edo) / edo; // percent width of one step span
+  const stepW = (100 - 100 / edo) / edo;
 
-  // piano lane: keys s = 0..12 relative to root, centered at s*100 - rootCents
   const piano = $('lane-piano');
   piano.hidden = !$('show-piano').checked;
   piano.innerHTML = '';
@@ -412,7 +460,6 @@ function buildRuler() {
     }
   }
 
-  // JI lane
   const ji = $('lane-ji');
   ji.hidden = !$('show-ji').checked;
   ji.innerHTML = '';
@@ -432,7 +479,6 @@ function buildRuler() {
     }
   }
 
-  // degree lane: halos + lugs
   const lane = $('lane-deg');
   lane.innerHTML = '';
   lugEls = [];
@@ -446,7 +492,6 @@ function buildRuler() {
       const w = (2 * tol / period()) * (100 - 100 / edo);
       h.style.left = (center - w / 2) + '%';
       h.style.width = w + '%';
-      h.dataset.deg = d;
       lane.appendChild(h);
     }
     const lug = document.createElement('div');
@@ -460,7 +505,6 @@ function buildRuler() {
     lane.appendChild(lug);
   }
 
-  // gridlines dropped from the true 12-TET key boundaries
   if (!piano.hidden) {
     for (let s = 0; s <= 12; s++) {
       const x = xPct(s * 100 - 50 - rc);
@@ -472,7 +516,6 @@ function buildRuler() {
     }
   }
 
-  // cents axis
   const axis = $('lane-axis');
   axis.innerHTML = '';
   for (let c = 0; c <= period(); c += 300) {
@@ -483,7 +526,6 @@ function buildRuler() {
     axis.appendChild(a);
   }
 
-  // full-height darkened columns for unlit degrees (spec: out-of-scale wash)
   const shades = $('shade-layer');
   shades.innerHTML = '';
   shadeEls = [];
@@ -529,30 +571,30 @@ function updateMaskMeta() {
       maxGap = Math.max(maxGap, next - lit[i]);
     }
     const gapC = maxGap * stepCents();
-    gapTxt = ` · largest gap <span class="${gapC > 240 ? 'bad' : ''}">${gapC.toFixed(0)}¢</span>`;
+    gapTxt = ` · gap <span class="${gapC > 240 ? 'bad' : ''}">${gapC.toFixed(0)}¢${gapC > 240 ? ' ⚠' : ''}</span>`;
   }
   $('maskmeta').innerHTML =
-    `${lit.length}/${edo} degrees · step ${stepCents().toFixed(1)}¢${gapTxt}` +
-    (lit.length === 0 ? ' · <span class="bad">empty mask = full chromatic fallback</span>' : '');
+    `${lit.length}/${edo} · step ${stepCents().toFixed(1)}¢${gapTxt}` +
+    (lit.length === 0 ? ' · <span class="bad">empty = chromatic fallback</span>' : '');
 }
 
-// degree-lane pointer interaction: click toggles, drag paints, alt auditions
+// pointer interaction: click toggles, drag paints, alt auditions
 let painting = false, paintVal = 1, paintTouched = null;
 function degFromEvent(ev) {
   const lane = $('lane-deg');
   const rect = lane.getBoundingClientRect();
-  const frac = (ev.clientX - rect.left) / rect.width; // 0..1 incl padding
+  const frac = (ev.clientX - rect.left) / rect.width;
   const edo = cfg.edo, pad = 50 / edo / 100;
   const cents = (frac - pad) / (1 - 2 * pad) * period();
   let d = Math.round(cents / stepCents());
   return Math.max(0, Math.min(edo - 1, d));
 }
 $('lane-deg').addEventListener('pointerdown', ev => {
-  if (!cfg) return;
+  if (!cfg || ev.button === 2) return;
   const d = degFromEvent(ev);
   if (ev.altKey) { audition(d); return; }
   painting = true;
-  markDirty(); // a status poll mid-drag must not clobber the working mask
+  markDirty();
   paintTouched = new Set([d]);
   paintVal = degrees[d] ? 0 : 1;
   degrees[d] = paintVal;
@@ -587,13 +629,26 @@ $('lane-piano').addEventListener('click', ev => {
   updateRulerState();
   postDegrees();
 });
+// right-click: lane visibility
+$('ruler').addEventListener('contextmenu', ev => {
+  ev.preventDefault();
+  const m = $('ctx');
+  $('ctx-piano').checked = $('show-piano').checked;
+  $('ctx-ji').checked = $('show-ji').checked;
+  m.style.display = 'block';
+  m.style.left = Math.min(ev.clientX, window.innerWidth - 170) + 'px';
+  m.style.top = ev.clientY + 'px';
+});
+$('ctx').addEventListener('click', ev => ev.stopPropagation());
+$('ctx-piano').onchange = e => { $('show-piano').checked = e.target.checked; buildRuler(); };
+$('ctx-ji').onchange = e => { $('show-ji').checked = e.target.checked; buildRuler(); };
 
 function postDegrees() { schedulePost({ degrees: degrees.slice(0, 72) }); }
 
 function audition(d) {
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const f = refHz() * 16 * Math.pow(2, d * stepCents() / 1200); // octave 4-ish
+    const f = refHz() * 16 * Math.pow(2, d * stepCents() / 1200);
     const t = audioCtx.currentTime;
     const osc = audioCtx.createOscillator();
     const g = audioCtx.createGain();
@@ -607,8 +662,8 @@ function audition(d) {
   } catch (e) {}
 }
 
-// ---- selection power tools -------------------------------------------------
-function setDegreesBulk(fn) { // fn(d) -> 0/1
+// ---- selection tools -------------------------------------------------------
+function setDegreesBulk(fn) {
   const edo = cfg ? cfg.edo : 12;
   const old = degrees.slice();
   for (let d = 0; d < edo; d++) degrees[d] = fn(d, old);
@@ -623,7 +678,7 @@ function distJi(d) {
   const c = d * stepCents();
   let best = 1e9;
   for (const [jc] of jiCents) best = Math.min(best, Math.abs(c - jc));
-  return Math.min(best, c); // 1/1 at 0¢ counts too
+  return Math.min(best, c);
 }
 $('deg-all').onclick  = () => setDegreesBulk(() => 1);
 $('deg-none').onclick = () => setDegreesBulk(() => 0);
@@ -639,14 +694,14 @@ $('nearji').onclick   = () => {
   setDegreesBulk(d => distJi(d) <= n ? 1 : 0);
 };
 
-// presets: computed from the tuning itself, so they are correct in any EDO
+// presets (computed — correct in any EDO by construction)
 function nearestDegreeToCents(c) { return ((Math.round(c / stepCents()) % cfg.edo) + cfg.edo) % cfg.edo; }
 function maskFromCents(list) {
   const s = new Set(list.map(nearestDegreeToCents));
   setDegreesBulk(d => s.has(d) ? 1 : 0);
 }
 function fifthDegree() { return Math.round(701.955 / stepCents()); }
-function chainOfFifths(count) { // k = -1..count-2 fifths from root
+function chainOfFifths(count) {
   const f = fifthDegree(), out = [];
   for (let k = -1; k <= count - 2; k++)
     out.push((((k * f) % cfg.edo) + cfg.edo) % cfg.edo);
@@ -665,33 +720,27 @@ function userPresets() {
   catch (e) { return {}; }
 }
 function rebuildPresetList() {
-  const sel = $('preset');
-  sel.innerHTML = '<option value="">Preset…</option>';
-  for (const name of Object.keys(PRESETS)) {
-    const o = document.createElement('option');
-    o.value = 'b:' + name; o.textContent = name;
-    sel.appendChild(o);
-  }
+  const host = $('preset-list');
+  host.innerHTML = '';
+  const add = (label, fn) => {
+    const b = document.createElement('button');
+    b.className = 'menu-item';
+    b.textContent = label;
+    b.onclick = () => { fn(); closePops(); };
+    host.appendChild(b);
+  };
+  for (const name of Object.keys(PRESETS)) add(name, PRESETS[name]);
   const up = userPresets();
-  for (const name of Object.keys(up)) {
-    const o = document.createElement('option');
-    o.value = 'u:' + name; o.textContent = `${name} (saved, ${up[name].edo}-EDO)`;
-    sel.appendChild(o);
-  }
+  for (const name of Object.keys(up))
+    add(`${name} (saved, ${up[name].edo}-EDO)`, () => {
+      const p = userPresets()[name];
+      const cents = [];
+      for (let d = 0; d < p.edo; d++) if (p.degrees[d]) cents.push(d * 1200 / p.edo);
+      maskFromCents(cents);
+    });
 }
-$('preset').onchange = e => {
-  const v = e.target.value;
-  e.target.value = '';
-  if (!v) return;
-  if (v.startsWith('b:')) { PRESETS[v.slice(2)](); return; }
-  const p = userPresets()[v.slice(2)];
-  if (!p) return;
-  // map by cents so a mask saved in one EDO lands sensibly in another
-  const cents = [];
-  for (let d = 0; d < p.edo; d++) if (p.degrees[d]) cents.push(d * 1200 / p.edo);
-  maskFromCents(cents);
-};
 $('preset-save').onclick = () => {
+  closePops();
   const name = prompt('Preset name:');
   if (!name) return;
   const up = userPresets();
@@ -700,8 +749,9 @@ $('preset-save').onclick = () => {
   rebuildPresetList();
 };
 
-// Scala .scl import/export
+// Scala .scl
 $('scl-exp').onclick = () => {
+  closePops();
   const lit = [];
   for (let d = 1; d < cfg.edo; d++) if (degrees[d]) lit.push(d);
   let s = '! autoedo.scl\n!\n';
@@ -716,14 +766,13 @@ $('scl-exp').onclick = () => {
   a.click();
   URL.revokeObjectURL(a.href);
 };
-$('scl-imp').onclick = () => $('scl-file').click();
+$('scl-imp').onclick = () => { closePops(); $('scl-file').click(); };
 $('scl-file').onchange = async e => {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
   const text = await file.text();
   const lines = text.split(/\r?\n/).filter(l => !l.trim().startsWith('!'));
-  // line 0 = description, line 1 = count, then pitches (cents have a '.')
   const cents = [0];
   for (let i = 2; i < lines.length; i++) {
     const tok = lines[i].trim().split(/\s+/)[0];
@@ -739,42 +788,75 @@ $('scl-file').onchange = async e => {
   if (cents.length > 1) maskFromCents(cents);
 };
 
-// ---- generic control wiring ------------------------------------------------
-function bindSlider(id, key, fmt, scale = 1) {
-  $(id).oninput = e => {
-    const v = +e.target.value;
-    $(id + '-val').textContent = fmt(v);
-    schedulePost({ [key]: v * scale });
-    if (key === 'toleranceCents') { if (cfg) { cfg.toleranceCents = v; buildRuler(); } }
-  };
+// ---- knob strip ------------------------------------------------------------
+// Six mini-knobs: drag vertically, double-click to type. cfgKey/scale map to
+// the JSON config; fmt renders the value readout.
+const KNOBS = [
+  { id: 'speed', label: 'SPEED',  key: 'retuneMs',       min: 0, max: 400, step: 1,   scale: 1,    fmt: v => `${Math.round(v)} ms` },
+  { id: 'amt',   label: 'AMOUNT', key: 'amount',         min: 0, max: 100, step: 1,   scale: 0.01, fmt: v => `${Math.round(v)} %` },
+  { id: 'tol',   label: 'TOL',    key: 'toleranceCents', min: 0, max: 50,  step: 0.5, scale: 1,    fmt: v => `±${v.toFixed(1)} ¢` },
+  { id: 'stick', label: 'STICK',  key: 'stickiness',     min: 0, max: 100, step: 1,   scale: 0.01, fmt: v => `${Math.round(v)} %` },
+  { id: 'trans', label: 'TRANS',  key: 'transitionMs',   min: 0, max: 200, step: 1,   scale: 1,    fmt: v => `${Math.round(v)} ms` },
+  { id: 'human', label: 'HUMAN',  key: 'humanize',       min: 0, max: 100, step: 1,   scale: 0.01, fmt: v => `${Math.round(v)} %` },
+];
+const knobState = {};
+function knobSet(k, v, post) {
+  v = Math.max(k.min, Math.min(k.max, v));
+  v = Math.round(v / k.step) * k.step;
+  knobState[k.id] = v;
+  const norm = (v - k.min) / (k.max - k.min);
+  $(`rot-${k.id}`).style.transform = `rotate(${-135 + 270 * norm}deg)`;
+  $(`kval-${k.id}`).textContent = k.fmt(v);
+  if (post) {
+    schedulePost({ [k.key]: v * k.scale });
+    if (k.key === 'toleranceCents' && cfg) { cfg.toleranceCents = v; buildRuler(); }
+  }
 }
-bindSlider('retune', 'retuneMs', v => `${v} ms`);
-bindSlider('amount', 'amount', v => `${v} %`, 0.01);
-bindSlider('tolerance', 'toleranceCents', v => `±${v.toFixed(1)} ¢`);
-bindSlider('stickiness', 'stickiness', v => `${v} %`, 0.01);
-bindSlider('transition', 'transitionMs', v => `${v} ms`);
-bindSlider('humanize', 'humanize', v => `${v} %`, 0.01);
-bindSlider('gain', 'outputGainDb', v => `${v.toFixed(1)} dB`);
-bindSlider('stretch', 'stretchCents', v => `${v >= 0 ? '+' : ''}${v.toFixed(1)} ¢/oct`);
-$('stretch').addEventListener('input', () => {
-  if (cfg) { cfg.stretchCents = +$('stretch').value; buildRuler(); }
-});
-$('bypass').onchange = e => schedulePost({ bypass: e.target.checked });
-$('bufsize').onchange = e => schedulePost({ bufferFrames: +e.target.value });
-$('range').onchange = e => schedulePost({ range: e.target.value });
-$('in-dev').onchange = e => schedulePost({ inputUid: e.target.value });
-$('out-dev').onchange = e => schedulePost({ outputUid: e.target.value });
-$('refresh-dev').onclick = () => loadDevices();
-$('show-piano').onchange = buildRuler;
-$('show-ji').onchange = buildRuler;
-$('restart').onclick = async () => {
-  try {
-    const r = await fetch('/api/restart', { method: 'POST' });
-    applyStatus(await r.json());
-  } catch (e) {}
-};
+function buildKnobs() {
+  const host = $('knobstrip');
+  for (const k of KNOBS) {
+    const el = document.createElement('div');
+    el.className = 'knob';
+    el.id = `knob-${k.id}`;
+    el.title = 'drag up/down · double-click to type';
+    el.innerHTML =
+      `<div class="dial"><div class="rot" id="rot-${k.id}"><div class="ind"></div></div></div>` +
+      `<div class="klabel">${k.label}</div><div class="kval" id="kval-${k.id}">—</div>`;
+    host.appendChild(el);
+    knobState[k.id] = k.min;
 
-// root & reference
+    let dragY = null, dragV = null;
+    el.addEventListener('pointerdown', ev => {
+      if (ev.target.tagName === 'INPUT') return;
+      dragY = ev.clientY; dragV = knobState[k.id];
+      el.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    });
+    el.addEventListener('pointermove', ev => {
+      if (dragY === null) return;
+      const dv = (dragY - ev.clientY) / 150 * (k.max - k.min);
+      knobSet(k, dragV + dv, true);
+    });
+    el.addEventListener('pointerup', () => { dragY = null; });
+    el.addEventListener('dblclick', () => {
+      const kv = $(`kval-${k.id}`);
+      const cur = knobState[k.id];
+      kv.innerHTML = `<input type="text" class="num" value="${cur}">`;
+      const inp = kv.querySelector('input');
+      inp.focus(); inp.select();
+      const commit = () => {
+        const v = parseFloat(inp.value);
+        knobSet(k, isNaN(v) ? cur : v, !isNaN(v));
+        if (isNaN(v)) $(`kval-${k.id}`).textContent = k.fmt(cur);
+      };
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+      inp.addEventListener('blur', commit);
+    });
+  }
+}
+buildKnobs();
+
+// ---- tuning line -----------------------------------------------------------
 for (let i = 0; i < 12; i++) {
   const o = document.createElement('option');
   o.value = i; o.textContent = NOTE_NAMES[i];
@@ -782,36 +864,41 @@ for (let i = 0; i < 12; i++) {
 }
 $('root').onchange = e => {
   const v = +e.target.value;
-  if (cfg) { cfg.rootNote = v; buildRuler(); }
   schedulePost({ rootNote: v });
+  buildRuler();
 };
 $('root-cents').onchange = e => {
   const v = Math.max(-50, Math.min(50, +e.target.value || 0));
   e.target.value = v;
-  if (cfg) { cfg.rootCents = v; buildRuler(); }
   schedulePost({ rootCents: v });
+  buildRuler();
 };
 $('a4').onchange = e => {
   const v = Math.max(400, Math.min(480, +e.target.value || 440));
   e.target.value = v;
-  if (cfg) cfg.refA4 = v;
   schedulePost({ refA4: v });
 };
+$('stretch').oninput = e => {
+  const v = +e.target.value;
+  $('stretch-val').textContent = `${v >= 0 ? '+' : ''}${v.toFixed(1)} ¢/oct`;
+  schedulePost({ stretchCents: v });
+  buildRuler();
+};
 
-// EDO: chips + numeric text field
 function rebuildChips() {
   const host = $('edo-chips');
   host.innerHTML = '';
   for (const n of EDO_CHIPS) {
     const b = document.createElement('button');
-    b.className = 'small' + (cfg && cfg.edo === n ? ' cur' : '');
+    b.className = (cfg && cfg.edo === n ? 'cur' : '');
     b.textContent = n;
-    b.onclick = () => { $('edo').value = n; commitEdo(n); };
+    b.onclick = () => { $('edo').value = n; commitEdo(n); closePops(); };
     host.appendChild(b);
   }
+  $('edo-btn').innerHTML = `${cfg ? cfg.edo : 12}-EDO &#9662;`;
 }
 $('edo').oninput = e => {
-  e.target.value = e.target.value.replace(/[^0-9]/g, ''); // numeric only
+  e.target.value = e.target.value.replace(/[^0-9]/g, '');
   markDirty();
   const v = parseInt(e.target.value, 10);
   if (v >= 10 && v <= 72) commitEdo(v);
@@ -826,22 +913,29 @@ $('edo').onchange = e => {
 $('edo').onkeydown = e => { if (e.key === 'Enter') e.target.blur(); };
 function commitEdo(v) {
   const post = { edo: v };
-  // Spec: auto-raise stickiness as the EDO climbs (step < vibrato width),
-  // and say so. Only ever raises, never lowers a user's setting.
   const sugg = v > 41 ? Math.min(0.7, (v - 24) / 48) : 0;
   if (cfg && sugg > 0 && cfg.stickiness < sugg) {
     post.stickiness = sugg;
-    const hint = $('stick-hint');
-    hint.hidden = false;
-    hint.innerHTML = `<span class="hintnote">stickiness auto-raised to ` +
-      `${Math.round(sugg * 100)}% for ${v}-EDO (step ${ (1200 / v).toFixed(1) }¢ &lt; vibrato width)</span>`;
-    setTimeout(() => { hint.hidden = true; }, 6000);
+    knobSet(KNOBS[3], Math.round(sugg * 100), false);
+    showToast(`Stickiness auto-raised to ${Math.round(sugg * 100)}% — ` +
+              `${v}-EDO step (${(1200 / v).toFixed(1)}¢) is narrower than vibrato`);
   }
-  if (cfg && cfg.edo !== v) { cfg.edo = v; buildRuler(); rebuildChips(); }
+  if (cfg && cfg.edo !== v) { cfg.edo = v; buildRuler(); }
+  rebuildChips();
   schedulePost(post);
 }
 
-// ---- A/B config slots ------------------------------------------------------
+// ---- header controls -------------------------------------------------------
+$('bypass').onclick = () => {
+  const on = !$('bypass').classList.contains('on');
+  $('bypass').classList.toggle('on', on);
+  schedulePost({ bypass: on });
+};
+$('perform').onclick = () => {
+  document.body.classList.toggle('perform');
+  $('perform').classList.toggle('on', document.body.classList.contains('perform'));
+};
+
 let abSlot = 'A';
 function abStore() {
   try { return JSON.parse(localStorage.getItem('autoedoAB') || '{}'); }
@@ -854,7 +948,7 @@ function abSave(slot, config) {
 }
 async function abSwitch(to) {
   if (!cfg || to === abSlot) return;
-  abSave(abSlot, cfg);          // stash current settings in the old slot
+  abSave(abSlot, { ...cfg, degrees: degrees.slice(0, 72) });
   abSlot = to;
   $('ab-a').classList.toggle('on', to === 'A');
   $('ab-b').classList.toggle('on', to === 'B');
@@ -863,14 +957,46 @@ async function abSwitch(to) {
     markDirty();
     try {
       const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(stored) });
+      cfg = null; // full control resync from the response
       applyStatus(await r.json());
-      cfg = null; // force a full control resync from the response
     } catch (e) {}
   }
 }
 $('ab-a').onclick = () => abSwitch('A');
 $('ab-b').onclick = () => abSwitch('B');
-$('ab-copy').onclick = () => { if (cfg) { abSave('A', cfg); abSave('B', cfg); } };
+$('ab-copy').onclick = () => {
+  if (!cfg) return;
+  const snap = { ...cfg, degrees: degrees.slice(0, 72) };
+  abSave('A', snap); abSave('B', snap);
+  showToast('Copied current settings into both A and B');
+};
+
+// engine popover controls
+$('bufsize').onchange = e => schedulePost({ bufferFrames: +e.target.value });
+$('range').onchange = e => schedulePost({ range: e.target.value });
+$('in-dev').onchange = e => schedulePost({ inputUid: e.target.value });
+$('out-dev').onchange = e => schedulePost({ outputUid: e.target.value });
+$('refresh-dev').onclick = () => loadDevices();
+$('gain').oninput = e => {
+  $('gain-val').textContent = `${(+e.target.value).toFixed(1)} dB`;
+  schedulePost({ outputGainDb: +e.target.value });
+};
+$('show-piano').onchange = buildRuler;
+$('show-ji').onchange = buildRuler;
+$('restart').onclick = async () => {
+  try {
+    const r = await fetch('/api/restart', { method: 'POST' });
+    applyStatus(await r.json());
+    showToast('Engine restarted');
+  } catch (e) {}
+};
+
+// first-run hint
+if (!localStorage.getItem('autoedoHintSeen')) $('hintbar').hidden = false;
+$('hint-x').onclick = () => {
+  $('hintbar').hidden = true;
+  localStorage.setItem('autoedoHintSeen', '1');
+};
 
 // ---- devices ---------------------------------------------------------------
 function fillDeviceSelect(sel, devices, wantInput, currentUid) {
@@ -901,52 +1027,59 @@ async function loadDevices() {
 }
 
 // ---- status / poll ---------------------------------------------------------
+function updateReadout(s) {
+  const det = s.voiced ? s.detectedHz : 0;
+  const tgt = s.voiced ? s.targetHz : 0;
+  let inTxt = '—', tgtTxt = '—', sub = 'unvoiced';
+  if (det && tgt && cfg) {
+    const j = hzToDegree(tgt);
+    const deg = ((j % cfg.edo) + cfg.edo) % cfg.edo;
+    const oct = Math.floor(j / cfg.edo);
+    inTxt = noteName(det);
+    tgtTxt = `${deg}\\${cfg.edo}`;
+    sub = `${det.toFixed(1)} Hz → ${tgt.toFixed(1)} Hz · oct ${oct} · ` +
+          `${(1200 * Math.log2(det / tgt)).toFixed(1)}¢ off`;
+    if (deg !== activeDeg) { activeDeg = deg; updateRulerState(); }
+  } else if (activeDeg !== -1) {
+    activeDeg = -1; updateRulerState();
+  }
+  for (const [id, cls] of [['readout', 'unvoiced'], ['bigreadout', 'unvoiced']]) {
+    const el = $(id);
+    el.classList.toggle(cls, !s.voiced);
+    el.querySelector('.in').textContent = inTxt;
+    el.querySelector('.tgt').textContent = tgtTxt + (id === 'readout' && tgt ? ` · ${tgt.toFixed(1)} Hz` : '');
+  }
+  $('big-sub').textContent = sub;
+
+  // live needle at the detected pitch's cents position (folded into the octave)
+  const needle = $('needle');
+  if (det > 0) {
+    let c = 1200 * Math.log2(det / refHz());
+    c = ((c % period()) + period()) % period();
+    needle.style.left = xPct(c) + '%';
+    needle.style.display = 'block';
+  } else {
+    needle.style.display = 'none';
+  }
+}
+
 function applyStatus(s) {
   if (!s) return;
 
   $('dot').classList.toggle('ok', !!s.running);
-  $('statustext').textContent = s.running
-    ? `running · ${s.inputName} → ${s.outputName} · ` +
-      `${Math.round(s.inputRate)} → ${Math.round(s.outputRate)} Hz · ` +
-      `latency ≈ ${s.latencyMs.toFixed(0)} ms`
+  $('lat').textContent = s.running ? `${s.latencyMs.toFixed(0)} ms` : 'stopped';
+  $('lat').classList.toggle('bad', !s.running);
+  $('statusbtn').title = s.running
+    ? `${s.inputName} → ${s.outputName} · ${Math.round(s.inputRate)} → ${Math.round(s.outputRate)} Hz · latency ≈ ${s.latencyMs.toFixed(0)} ms — click for audio settings`
+    : 'engine stopped — click for audio settings';
+  $('engine-detail').textContent = s.running
+    ? `${s.inputName} → ${s.outputName} · ${Math.round(s.inputRate)} → ${Math.round(s.outputRate)} Hz`
     : 'engine stopped';
-  $('err').hidden = !s.error;
+  $('err-row').hidden = !s.error;
   $('err').textContent = s.error || '';
 
-  // live read-out + amber active lug
-  const det = s.voiced ? s.detectedHz : 0;
-  const tgt = s.voiced ? s.targetHz : 0;
-  $('det-note').textContent = noteName(det);
-  $('det-hz').textContent = det ? `${det.toFixed(1)} Hz · input (12-TET name)` : 'input';
-  if (s.voiced && cfg) {
-    const j = hzToDegree(tgt);
-    const deg = ((j % cfg.edo) + cfg.edo) % cfg.edo;
-    const oct = Math.floor(j / cfg.edo);
-    $('tgt-note').textContent = `${deg}\\${cfg.edo} · oct ${oct}`;
-    if (deg !== activeDeg) { activeDeg = deg; updateRulerState(); }
-  } else {
-    $('tgt-note').textContent = '—';
-    if (activeDeg !== -1) { activeDeg = -1; updateRulerState(); }
-  }
-  $('tgt-hz').textContent = tgt ? `${tgt.toFixed(1)} Hz · target` : 'target';
-  $('voiced').innerHTML = s.voiced ? '<b>voiced</b> — correcting' : 'unvoiced — dry passthrough';
+  updateReadout(s);
 
-  const half = Math.max(50, s.stepCents / 2);
-  $('cents-lo').textContent = `-${half.toFixed(0)}¢`;
-  $('cents-hi').textContent = `+${half.toFixed(0)}¢`;
-  if (det && tgt) {
-    const cents = 1200 * Math.log2(det / tgt);
-    const frac = Math.max(-1, Math.min(1, cents / half));
-    const bar = $('centsbar');
-    if (frac >= 0) { bar.style.left = '50%'; bar.style.width = `${frac * 50}%`; }
-    else { bar.style.left = `${50 + frac * 50}%`; bar.style.width = `${-frac * 50}%`; }
-    $('cents-off').textContent = `${cents >= 0 ? '+' : ''}${cents.toFixed(1)}¢`;
-  } else {
-    $('centsbar').style.width = '0';
-    $('cents-off').textContent = '—';
-  }
-
-  // controls (skip while the user is interacting)
   const first = cfg === null;
   const c = s.config;
   if (first || Date.now() > dirtyUntil) {
@@ -954,6 +1087,9 @@ function applyStatus(s) {
       || cfg.rootCents !== c.rootCents || cfg.stretchCents !== c.stretchCents
       || cfg.toleranceCents !== c.toleranceCents
       || JSON.stringify(cfg.degrees) !== JSON.stringify(c.degrees);
+    if (lastRange !== null && lastRange !== c.range)
+      showToast(`Engine restarted — detection range is now ${c.range}`);
+    lastRange = c.range;
     cfg = c;
     degrees = c.degrees.slice();
     setControls(c);
@@ -965,27 +1101,22 @@ function applyStatus(s) {
 
 function setControls(c) {
   if (document.activeElement !== $('edo')) $('edo').value = c.edo;
+  $('edo-btn').innerHTML = `${c.edo}-EDO &#9662;`;
   $('root').value = c.rootNote;
   if (document.activeElement !== $('root-cents')) $('root-cents').value = c.rootCents;
   if (document.activeElement !== $('a4')) $('a4').value = c.refA4;
   $('stretch').value = c.stretchCents;
   $('stretch-val').textContent = `${c.stretchCents >= 0 ? '+' : ''}${c.stretchCents.toFixed(1)} ¢/oct`;
-  $('retune').value = c.retuneMs;
-  $('retune-val').textContent = `${Math.round(c.retuneMs)} ms`;
-  $('amount').value = Math.round(c.amount * 100);
-  $('amount-val').textContent = `${Math.round(c.amount * 100)} %`;
-  $('tolerance').value = c.toleranceCents;
-  $('tolerance-val').textContent = `±${c.toleranceCents.toFixed(1)} ¢`;
-  $('stickiness').value = Math.round(c.stickiness * 100);
-  $('stickiness-val').textContent = `${Math.round(c.stickiness * 100)} %`;
-  $('transition').value = c.transitionMs;
-  $('transition-val').textContent = `${Math.round(c.transitionMs)} ms`;
-  $('humanize').value = Math.round(c.humanize * 100);
-  $('humanize-val').textContent = `${Math.round(c.humanize * 100)} %`;
+  knobSet(KNOBS[0], c.retuneMs, false);
+  knobSet(KNOBS[1], Math.round(c.amount * 100), false);
+  knobSet(KNOBS[2], c.toleranceCents, false);
+  knobSet(KNOBS[3], Math.round(c.stickiness * 100), false);
+  knobSet(KNOBS[4], c.transitionMs, false);
+  knobSet(KNOBS[5], Math.round(c.humanize * 100), false);
   $('range').value = c.range;
   $('gain').value = c.outputGainDb;
   $('gain-val').textContent = `${c.outputGainDb.toFixed(1)} dB`;
-  $('bypass').checked = c.bypass;
+  $('bypass').classList.toggle('on', c.bypass);
   $('bufsize').value = String(c.bufferFrames);
   if ($('in-dev').value !== (c.inputUid || '')) $('in-dev').value = c.inputUid || '';
   if ($('out-dev').value !== (c.outputUid || '')) $('out-dev').value = c.outputUid || '';
@@ -997,7 +1128,8 @@ async function poll() {
     applyStatus(await r.json());
   } catch (e) {
     $('dot').classList.remove('ok');
-    $('statustext').textContent = 'server unreachable';
+    $('lat').textContent = 'offline';
+    $('lat').classList.add('bad');
   }
 }
 
