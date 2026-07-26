@@ -33,12 +33,19 @@ int ae_audio_list_devices (AeDeviceInfo **out, int *count);
 /* Parameters that can change while the engine runs (applied lock-free). */
 typedef struct
 {
-    int      edo;            /* 10..72 */
-    double   retune_ms;      /* 0..500 */
-    uint64_t degrees_lo;     /* bit d set => scale degree d enabled (d 0..63) */
-    uint64_t degrees_hi;     /* degrees 64..71 in bits 0..7 */
-    bool     bypass;         /* true = pass input through uncorrected */
-    double   output_gain_db; /* -60..+12 */
+    int      edo;             /* 10..72 */
+    double   retune_ms;       /* 0..400: within-note retune speed */
+    double   transition_ms;   /* 0..200: glide between different degrees */
+    double   amount;          /* 0..1 partial correction */
+    double   tolerance_cents; /* 0..50 dead zone around lit degrees */
+    double   stickiness;      /* 0..1 hysteresis before re-snapping */
+    double   humanize;        /* 0..1 relaxes retune on sustained notes */
+    double   ref_hz;          /* frequency of degree 0 (root anchor) */
+    double   period_cents;    /* octave size (1200 = true octave) */
+    uint64_t degrees_lo;      /* bit d set => scale degree d enabled (d 0..63) */
+    uint64_t degrees_hi;      /* degrees 64..71 in bits 0..7 */
+    bool     bypass;          /* true = pass input through uncorrected */
+    double   output_gain_db;  /* -60..+12 */
 } AeLiveParams;
 
 /* Parameters that require an engine restart to change. */
@@ -47,6 +54,8 @@ typedef struct
     char         input_uid[AE_UID_MAX];  /* "" => system default input */
     char         output_uid[AE_UID_MAX]; /* "" => system default output */
     int          buffer_frames;          /* preferred device I/O block size */
+    double       det_min_hz;             /* detection range (0 = default) */
+    double       det_max_hz;
     AeLiveParams params;
 } AeEngineConfig;
 

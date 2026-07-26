@@ -30,20 +30,37 @@ typedef struct
     bool   valid;
 } AeTuningResult;
 
+/* Continuous position of a frequency on the EDO grid, in (fractional) steps
+   from the reference. `period_cents` is the size of the repeating interval
+   (1200 = a true octave; other values give stretched/compressed octaves). */
+static inline double ae_steps_from_ref (double input_hz, int edo,
+                                        double ref_hz, double period_cents)
+{
+    return (double) edo * (1200.0 * log2 (input_hz / ref_hz)) / period_cents;
+}
+
+/* Frequency of EDO degree j (signed, relative to the reference). */
+static inline double ae_degree_hz (long j, int edo, double ref_hz, double period_cents)
+{
+    return ref_hz * pow (2.0, (double) j * period_cents / (1200.0 * (double) edo));
+}
+
 /* Quantise an input frequency to the nearest *enabled* pitch on an N-EDO
-   grid anchored at C. `enabled` is a mask of length >= edo (degree 0 == C);
-   pass NULL to allow every degree. A mask that disables every degree is
-   treated as "all enabled" (no snapping to an empty scale). */
-static inline AeTuningResult ae_quantize_to_edo_scale (double input_hz, int edo,
-                                                       const bool *enabled)
+   grid anchored at `ref_hz` (degree 0 == the root). `enabled` is a mask of
+   length >= edo; pass NULL to allow every degree. A mask that disables every
+   degree is treated as "all enabled" (no snapping to an empty scale). */
+static inline AeTuningResult ae_quantize_to_edo_scale_ex (double input_hz, int edo,
+                                                          const bool *enabled,
+                                                          double ref_hz,
+                                                          double period_cents)
 {
     AeTuningResult r = { 0.0, 0, 0.0, false };
 
-    if (input_hz <= 0.0 || edo < 1)
+    if (input_hz <= 0.0 || edo < 1 || ref_hz <= 0.0 || period_cents <= 0.0)
         return r;
 
-    /* Continuous position of the input on the EDO grid, in steps from C. */
-    const double steps_from_c = (double) edo * log2 (input_hz / AE_REFERENCE_C0_HZ);
+    /* Continuous position of the input on the EDO grid, in steps from root. */
+    const double steps_from_c = ae_steps_from_ref (input_hz, edo, ref_hz, period_cents);
     const long   nearest      = lround (steps_from_c);
 
     bool any_enabled = false;
@@ -75,16 +92,29 @@ static inline AeTuningResult ae_quantize_to_edo_scale (double input_hz, int edo,
     }
 
     r.degree    = (int) best;
-    r.target_hz = AE_REFERENCE_C0_HZ * pow (2.0, (double) best / (double) edo);
+    r.target_hz = ae_degree_hz (best, edo, ref_hz, period_cents);
     r.cents_off = 1200.0 * log2 (input_hz / r.target_hz);
     r.valid     = true;
     return r;
 }
 
-/* Width of a single EDO step, in cents (1200 / N). */
+/* Convenience: standard C-anchored, true-octave grid. */
+static inline AeTuningResult ae_quantize_to_edo_scale (double input_hz, int edo,
+                                                       const bool *enabled)
+{
+    return ae_quantize_to_edo_scale_ex (input_hz, edo, enabled,
+                                        AE_REFERENCE_C0_HZ, 1200.0);
+}
+
+/* Width of a single EDO step, in cents (period / N). */
+static inline double ae_edo_step_cents_ex (int edo, double period_cents)
+{
+    return edo > 0 ? period_cents / (double) edo : 0.0;
+}
+
 static inline double ae_edo_step_cents (int edo)
 {
-    return edo > 0 ? 1200.0 / (double) edo : 0.0;
+    return ae_edo_step_cents_ex (edo, 1200.0);
 }
 
 #endif /* AUTOEDO_TUNING_H */

@@ -7,8 +7,12 @@
 <style>
   :root {
     --bg: #101014; --panel: #1a1a22; --panel2: #22222c; --line: #2e2e3a;
-    --text: #e8e8ee; --dim: #9a9aa8; --accent: #ffb454; --accent2: #6fd08c;
-    --danger: #e06060;
+    --text: #e8e8ee; --dim: #9a9aa8;
+    /* Semantic map (spec §8): amber = live correction only; gold = root;
+       bone = lit/quiet; darkened = unlit; teal = JI; red = problem. */
+    --amber: #ffb454; --gold: #c9a227; --gold-dim: #8a7020;
+    --bone: #cfccc0; --teal: #4fd1c5; --danger: #e06060;
+    --keyw: #e6e3d8; --keyb: #23232b;
   }
   * { box-sizing: border-box; }
   body {
@@ -16,9 +20,9 @@
     background: var(--bg); color: var(--text);
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  .wrap { max-width: 760px; margin: 0 auto; }
+  .wrap { max-width: 860px; margin: 0 auto; }
   h1 { font-size: 22px; margin: 0 0 2px; letter-spacing: .3px; }
-  h1 .live { color: var(--accent); }
+  h1 .live { color: var(--amber); }
   .sub { color: var(--dim); font-size: 13px; margin-bottom: 20px; }
   .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
@@ -32,64 +36,101 @@
   .row:last-child { margin-bottom: 0; }
   .row label { flex: 0 0 130px; color: var(--dim); font-size: 13px; }
   .row .val { flex: 0 0 84px; text-align: right; font-variant-numeric: tabular-nums; }
-  select, input[type=number], input[type=text] {
+  select, input[type=text], input[type=number] {
     background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 7px 10px; font-size: 14px; flex: 1; min-width: 120px;
+    border-radius: 8px; padding: 7px 10px; font-size: 14px;
   }
-  #edo { flex: 0 0 90px; min-width: 0; text-align: center;
-         font-variant-numeric: tabular-nums; }
-  .val.dim { color: var(--dim); font-size: 12px; text-align: left; }
-  input[type=range] { flex: 1; accent-color: var(--accent); min-width: 120px; }
+  select { min-width: 100px; }
+  input[type=range] { flex: 1; accent-color: var(--bone); min-width: 100px; }
   button {
     background: var(--panel2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
   }
-  button:hover { border-color: var(--accent); }
+  button:hover { border-color: var(--bone); }
   button.small { padding: 4px 10px; font-size: 12px; }
+  button.on { background: var(--bone); color: #17171c; border-color: var(--bone); font-weight: 600; }
+  .num { width: 74px; text-align: center; font-variant-numeric: tabular-nums; }
+  .meta { color: var(--dim); font-size: 12px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .meta .bad { color: var(--danger); font-weight: 600; }
+  .hintnote { color: var(--gold); font-size: 12px; }
   /* status */
-  #statusline { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  #statusline { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); flex: none; }
-  .dot.ok { background: var(--accent2); }
+  .dot.ok { background: #6fd08c; }
   #err { color: var(--danger); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
+  /* tuning header */
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .chips button { padding: 5px 11px; font-variant-numeric: tabular-nums; }
+  .chips button.cur { background: var(--bone); color: #17171c; border-color: var(--bone); font-weight: 600; }
+  details { color: var(--dim); font-size: 13px; }
+  details .row { margin-top: 8px; }
+  /* ===== pitch ruler ===== */
+  #ruler {
+    position: relative; user-select: none; -webkit-user-select: none;
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+    background: #15151b; touch-action: none;
+  }
+  .lane { position: relative; width: 100%; }
+  #lane-piano { height: 34px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  #lane-ji    { height: 16px; border-bottom: 1px solid var(--line); }
+  #lane-deg   { height: 46px; cursor: pointer; }
+  #lane-axis  { height: 16px; border-top: 1px solid var(--line); }
+  .pkey { position: absolute; top: 0; bottom: 0; border-right: 1px solid #00000055;
+          font-size: 10px; color: #55524a; display: flex; align-items: flex-end;
+          justify-content: center; padding-bottom: 1px; overflow: hidden; }
+  .pkey.black { background: var(--keyb); color: #8a8a96; }
+  .pkey.white { background: var(--keyw); }
+  .gridline { position: absolute; top: 0; bottom: 0; width: 1px;
+              background: #ffffff12; pointer-events: none; }
+  .jitick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--teal); }
+  .jilabel { position: absolute; top: 0; font-size: 9px; color: var(--teal);
+             transform: translateX(-50%); white-space: nowrap; }
+  .lug { position: absolute; top: 8px; bottom: 8px; border-radius: 4px;
+         background: var(--bone); border: 1px solid #00000040;
+         display: flex; align-items: center; justify-content: center;
+         font-size: 11px; color: #17171c; font-variant-numeric: tabular-nums;
+         overflow: visible; pointer-events: none; }
+  .lug.off  { background: #2c2c35; color: transparent; border-color: #00000030; }
+  .lug.root { background: var(--gold); color: #171204; font-weight: 700; }
+  .lug.root.off { background: var(--gold-dim); color: transparent; }
+  .lug.active { background: var(--amber); color: #201500;
+                box-shadow: 0 0 8px 2px #ffb45480; }
+  .halo { position: absolute; top: 4px; bottom: 4px; border-radius: 4px;
+          background: #cfccc01a; pointer-events: none; }
+  .shade { position: absolute; top: 0; bottom: 0; background: #00000080;
+           pointer-events: none; }  /* darkened overlay for unlit columns */
+  .shade.goldwash { background: #c9a22716; }
+  .axislabel { position: absolute; top: 1px; font-size: 9px; color: var(--dim);
+               transform: translateX(-50%); font-variant-numeric: tabular-nums; }
+  .toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .toolbar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+  .toolbar input.num { width: 52px; padding: 4px 6px; font-size: 12px; }
+  /* correction grid */
+  .knobs { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 28px; }
+  .knobs .row label { flex: 0 0 92px; }
+  .knobs .row .val { flex: 0 0 64px; }
+  @media (max-width: 640px) { .knobs { grid-template-columns: 1fr; } }
   /* readout */
   .readout { display: flex; align-items: center; justify-content: center; gap: 18px;
              padding: 8px 0 4px; }
   .pitchbox { text-align: center; min-width: 170px; }
   .pitchbox .big { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .pitchbox .hz  { color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+  #tgt-note { color: var(--amber); }
   .arrow { color: var(--dim); font-size: 22px; }
   .voice { font-size: 12px; color: var(--dim); text-align: center; margin-top: 6px; }
-  .voice b { color: var(--accent2); }
+  .voice b { color: var(--amber); }
   #centsbarwrap { position: relative; height: 8px; background: var(--panel2);
                   border-radius: 4px; margin: 14px 8px 2px; overflow: hidden; }
-  #centsbar { position: absolute; top: 0; bottom: 0; background: var(--accent); width: 0; }
+  #centsbar { position: absolute; top: 0; bottom: 0; background: var(--amber); width: 0; }
   #centsmid { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--dim); }
   .centslabel { display: flex; justify-content: space-between; color: var(--dim);
                 font-size: 11px; margin: 2px 8px 0; font-variant-numeric: tabular-nums; }
-  /* degrees: always a single row — buttons shrink to fit the EDO */
-  #degrees { display: flex; flex-wrap: nowrap; gap: 3px; }
-  #degrees button {
-    flex: 1 1 0; min-width: 0; height: 27px; padding: 0; border-radius: 6px;
-    font-variant-numeric: tabular-nums; overflow: hidden;
-    background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
-  }
-  #degrees button.on { background: var(--accent); color: #201500; border-color: var(--accent);
-                       font-weight: 600; }
-  /* tick-label ruler under the buttons (used when the buttons are too
-     narrow to carry their own numbers): labels overflow into the empty
-     cells beside them */
-  #degscale { display: flex; flex-wrap: nowrap; margin-top: 3px; }
-  #degscale div {
-    flex: 1 1 0; min-width: 0; overflow: visible; white-space: nowrap;
-    text-align: center; font-size: 9px; color: var(--dim);
-    font-variant-numeric: tabular-nums;
-  }
-  .deghead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-  .deghead .spacer { flex: 1; }
-  .deghead .hint { color: var(--dim); font-size: 12px; }
-  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
-  .switch input { accent-color: var(--accent); width: 18px; height: 18px; }
-  .meta { color: var(--dim); font-size: 12px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+            user-select: none; color: var(--dim); font-size: 13px; }
+  .switch input { accent-color: var(--bone); width: 16px; height: 16px; }
+  .bottombar { display: flex; gap: 8px; align-items: center; }
+  .bottombar .spacer { flex: 1; }
 </style>
 </head>
 <body>
@@ -103,6 +144,104 @@
       <button class="small" id="restart">Restart engine</button>
     </div>
     <div id="err" hidden></div>
+  </div>
+
+  <div class="card">
+    <h2>Tuning</h2>
+    <div class="row">
+      <label>EDO</label>
+      <span class="chips" id="edo-chips"></span>
+      <input type="text" id="edo" class="num" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="12" style="width:58px">
+    </div>
+    <div class="row">
+      <label for="root">Root</label>
+      <select id="root"></select>
+      <input type="number" id="root-cents" class="num" step="0.1" min="-50" max="50" value="0">
+      <span class="val" style="flex:0 0 20px; text-align:left">¢</span>
+      <label for="a4" style="flex:0 0 auto">A4</label>
+      <input type="number" id="a4" class="num" step="0.1" min="400" max="480" value="440.0">
+      <span class="val" style="flex:0 0 24px; text-align:left">Hz</span>
+    </div>
+    <details>
+      <summary>Octave stretch</summary>
+      <div class="row">
+        <label for="stretch">Stretch</label>
+        <input type="range" id="stretch" min="-30" max="30" step="0.5" value="0">
+        <span class="val" id="stretch-val">+0.0 ¢/oct</span>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Pitch ruler</h2>
+    <div class="toolbar">
+      <button class="small" id="deg-all">All</button>
+      <button class="small" id="deg-none">None</button>
+      <button class="small" id="deg-inv">Invert</button>
+      <button class="small" id="rot-l" title="Rotate mask left">&#9664;</button>
+      <button class="small" id="rot-r" title="Rotate mask right">&#9654;</button>
+      <span class="sep"></span>
+      <button class="small" id="near12">Near-12</button>
+      <button class="small" id="nearji">Near-JI</button>
+      <input type="text" id="near-tol" class="num" inputmode="decimal" value="15" title="Near-filter window, ± cents">
+      <span style="color:var(--dim);font-size:12px">±¢</span>
+      <span class="sep"></span>
+      <select id="preset"><option value="">Preset…</option></select>
+      <button class="small" id="preset-save">Save</button>
+      <button class="small" id="scl-imp" title="Import a Scala .scl scale">.scl &#8593;</button>
+      <button class="small" id="scl-exp" title="Export lit degrees as .scl">.scl &#8595;</button>
+      <input type="file" id="scl-file" accept=".scl,text/plain" hidden>
+      <span class="sep"></span>
+      <label class="switch"><input type="checkbox" id="show-piano" checked> 12-EDO keys</label>
+      <label class="switch"><input type="checkbox" id="show-ji"> JI lane</label>
+    </div>
+    <div id="ruler">
+      <div class="lane" id="lane-piano"></div>
+      <div class="lane" id="lane-ji" hidden></div>
+      <div class="lane" id="lane-deg"></div>
+      <div class="lane" id="lane-axis"></div>
+      <div id="shade-layer" style="position:absolute;inset:0;pointer-events:none"></div>
+    </div>
+    <div class="meta" id="maskmeta"></div>
+    <div class="meta" style="margin-top:2px">click / drag paints degrees on or off · alt-click auditions the pitch · click a piano key to toggle the nearest degree</div>
+  </div>
+
+  <div class="card">
+    <h2>Correction</h2>
+    <div class="knobs">
+      <div class="row"><label>Retune speed</label>
+        <input type="range" id="retune" min="0" max="400" step="1" value="20">
+        <span class="val" id="retune-val">20 ms</span></div>
+      <div class="row"><label>Amount</label>
+        <input type="range" id="amount" min="0" max="100" step="1" value="100">
+        <span class="val" id="amount-val">100 %</span></div>
+      <div class="row"><label>Tolerance</label>
+        <input type="range" id="tolerance" min="0" max="50" step="0.5" value="0">
+        <span class="val" id="tolerance-val">±0.0 ¢</span></div>
+      <div class="row"><label>Stickiness</label>
+        <input type="range" id="stickiness" min="0" max="100" step="1" value="0">
+        <span class="val" id="stickiness-val">0 %</span></div>
+      <div class="row"><label>Transition</label>
+        <input type="range" id="transition" min="0" max="200" step="1" value="50">
+        <span class="val" id="transition-val">50 ms</span></div>
+      <div class="row"><label>Humanize</label>
+        <input type="range" id="humanize" min="0" max="100" step="1" value="0">
+        <span class="val" id="humanize-val">0 %</span></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label for="range">Detection range</label>
+      <select id="range">
+        <option value="bass">Bass (55–400 Hz)</option>
+        <option value="baritone">Baritone (65–450 Hz)</option>
+        <option value="tenor">Tenor (80–600 Hz)</option>
+        <option value="alto">Alto (100–800 Hz)</option>
+        <option value="soprano">Soprano (130–1200 Hz)</option>
+        <option value="instrument" selected>Instrument (65–1600 Hz)</option>
+        <option value="wide">Wide (40–2000 Hz)</option>
+      </select>
+      <span class="meta" style="margin:0">changing range restarts the engine (latency follows the low limit)</span>
+    </div>
+    <div class="meta" id="stick-hint" hidden></div>
   </div>
 
   <div class="card">
@@ -125,8 +264,8 @@
 
   <div class="card">
     <h2>Audio device</h2>
-    <div class="row"><label for="in-dev">Input</label><select id="in-dev"></select></div>
-    <div class="row"><label for="out-dev">Output</label><select id="out-dev"></select></div>
+    <div class="row"><label for="in-dev">Input</label><select id="in-dev" style="flex:1"></select></div>
+    <div class="row"><label for="out-dev">Output</label><select id="out-dev" style="flex:1"></select></div>
     <div class="row"><label for="bufsize">Buffer size</label>
       <select id="bufsize">
         <option>64</option><option>128</option><option selected>256</option>
@@ -134,40 +273,12 @@
       </select>
       <button class="small" id="refresh-dev">Refresh devices</button>
     </div>
-    <div class="meta" id="devmeta"></div>
-  </div>
-
-  <div class="card">
-    <h2>Tuning</h2>
-    <div class="row">
-      <label for="edo">EDO (divisions/oct)</label>
-      <input type="text" id="edo" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="12">
-      <span class="val dim" id="edo-range">10–72</span>
-    </div>
-    <div class="row">
-      <label for="retune">Retune speed</label>
-      <input type="range" id="retune" min="0" max="500" step="1" value="20">
-      <span class="val" id="retune-val">20 ms</span>
-    </div>
-    <div class="meta" id="stepmeta">step = 100.0 ¢</div>
-  </div>
-
-  <div class="card">
-    <h2>Scale degrees</h2>
-    <div class="deghead">
-      <button class="small" id="deg-all">All</button>
-      <button class="small" id="deg-none">None</button>
-      <span class="spacer"></span>
-      <span class="hint">degree 0 = C · correction snaps only to lit degrees</span>
-    </div>
-    <div id="degrees"></div>
-    <div id="degscale"></div>
   </div>
 
   <div class="card">
     <h2>Output</h2>
     <div class="row">
-      <label class="switch"><input type="checkbox" id="bypass"> Bypass (dry input)</label>
+      <label class="switch" style="flex:0 0 auto"><input type="checkbox" id="bypass"> Bypass (dry input)</label>
     </div>
     <div class="row">
       <label for="gain">Output gain</label>
@@ -175,22 +286,43 @@
       <span class="val" id="gain-val">0.0 dB</span>
     </div>
   </div>
+
+  <div class="card bottombar">
+    <button class="small on" id="ab-a">A</button>
+    <button class="small" id="ab-b">B</button>
+    <button class="small" id="ab-copy">Copy A&rarr;B</button>
+    <span class="spacer"></span>
+    <span class="meta" style="margin:0">not in this build: pitch-trace lane · MIDI target/out · per-degree gravity (formants are preserved by TD-PSOLA itself)</span>
+  </div>
 </div>
 
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const BLACK_PC = new Set([1,3,6,8,10]);
+const EDO_CHIPS = [12,17,19,22,24,31,53,72];
+const JI_SET = [ // [num, den, label]
+  [9,8,'9/8'],[7,6,'7/6'],[6,5,'6/5'],[5,4,'5/4'],[4,3,'4/3'],[11,8,'11/8'],
+  [3,2,'3/2'],[8,5,'8/5'],[5,3,'5/3'],[7,4,'7/4'],[9,5,'9/5'],[15,8,'15/8'],
+];
+const jiCents = JI_SET.map(([a,b,l]) => [1200*Math.log2(a/b), l]);
 
 let cfg = null;          // last config from server
 let degrees = [];        // working copy of the degree flags (length 72)
 let dirtyUntil = 0;      // don't clobber controls the user is touching
 let postTimer = null;
 let pending = {};
+let activeDeg = -1;      // degree currently being corrected to (amber)
+let lugEls = [], shadeEls = [];
+let audioCtx = null;
 
 function markDirty() { dirtyUntil = Date.now() + 2500; }
 
 function schedulePost(partial) {
+  // keep the local config mirror current even while the dirty window is
+  // holding off server->control syncs (A/B snapshots read from cfg)
+  if (cfg) Object.assign(cfg, partial);
   Object.assign(pending, partial);
   markDirty();
   if (postTimer) return;
@@ -204,68 +336,543 @@ function schedulePost(partial) {
   }, 120);
 }
 
-function noteName(hz) {
+// ---- tuning math (mirrors the engine) --------------------------------------
+function period() { return 1200 + (cfg ? cfg.stretchCents : 0); }
+function stepCents() { return period() / (cfg ? cfg.edo : 12); }
+function refHz() { // frequency of degree 0 (root, octave 0)
+  const c = cfg || { refA4: 440, rootNote: 0, rootCents: 0 };
+  return c.refA4 * Math.pow(2, (c.rootNote - 9) / 12) / 16
+               * Math.pow(2, c.rootCents / 1200);
+}
+function noteName(hz) { // nearest 12-TET name at the configured A4
   if (!hz || hz <= 0) return '—';
-  const midi = 69 + 12 * Math.log2(hz / 440);
+  const a4 = cfg ? cfg.refA4 : 440;
+  const midi = 69 + 12 * Math.log2(hz / a4);
   const n = Math.round(midi);
   const cents = Math.round((midi - n) * 100);
   const name = NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
   return name + (cents ? ` ${cents > 0 ? '+' : ''}${cents}¢` : '');
 }
-
-function degreeName(hz, edo) {
-  if (!hz || hz <= 0) return '—';
-  const C0 = 16.351597831287414;
-  const steps = Math.round(edo * Math.log2(hz / C0));
-  const deg = ((steps % edo) + edo) % edo;
-  const oct = Math.floor(steps / edo);
-  return `${deg}\\${edo} · oct ${oct}`;
+function hzToDegree(hz) { // absolute degree index j re root
+  if (!hz || hz <= 0 || !cfg) return null;
+  return Math.round(cfg.edo * 1200 * Math.log2(hz / refHz()) / period());
+}
+function degreeInfo(d) { // identity string for tooltips
+  const c = d * stepCents();
+  const abs = c + (cfg ? cfg.rootCents : 0);
+  const n12 = Math.round(abs / 100);
+  const pc12 = ((( (cfg ? cfg.rootNote : 0) + n12) % 12) + 12) % 12;
+  const d12 = abs - n12 * 100;
+  let bestJi = null, bestDist = 1e9;
+  for (const [jc, jl] of jiCents) {
+    const dist = c - jc;
+    if (Math.abs(dist) < Math.abs(bestDist)) { bestDist = dist; bestJi = jl; }
+  }
+  let s = `deg ${d} · ${c.toFixed(1)}¢ · ${NOTE_NAMES[pc12]} ${d12 >= 0 ? '+' : '−'}${Math.abs(d12).toFixed(1)}¢`;
+  if (Math.abs(bestDist) < 40)
+    s += ` · ≈${bestJi} ${bestDist >= 0 ? '+' : '−'}${Math.abs(bestDist).toFixed(1)}¢`;
+  return s;
 }
 
-function renderDegrees() {
+// ---- pitch ruler -----------------------------------------------------------
+// x mapping: cents 0..period() onto [pad, 100-pad] percent, pad = half a step
+function xPct(cents) {
   const edo = cfg ? cfg.edo : 12;
-  const host = $('degrees');
-  host.innerHTML = '';
-  // Above 40 divisions the buttons are too narrow for two-digit labels, so
-  // the buttons carry only 'C' and a ruler underneath labels every 5th degree.
-  const sparse = edo > 40;
-  const fs = edo > 40 ? '9px' : edo > 24 ? '10px' : '13px';
-  const gap = edo > 24 ? '2px' : '3px';
-  host.style.gap = gap;
+  const pad = 50 / edo;
+  return pad + (cents / period()) * (100 - 2 * pad);
+}
+function lugWidthPct() {
+  const edo = cfg ? cfg.edo : 12;
+  return (100 - 100 / edo) / edo * (stepCents() * edo / period()); // = one step
+}
 
-  const scale = $('degscale');
-  scale.innerHTML = '';
-  scale.style.gap = gap;
-  if (sparse) {
-    for (let d = 0; d < edo; d++) {
-      const t = document.createElement('div');
-      if (d % 5 === 0 && d > 0 && d <= edo - 2) t.textContent = d;
-      scale.appendChild(t);
+function buildRuler() {
+  if (!cfg) return;
+  const edo = cfg.edo, root = cfg.rootNote, rc = cfg.rootCents;
+  const stepW = (100 - 100 / edo) / edo; // percent width of one step span
+
+  // piano lane: keys s = 0..12 relative to root, centered at s*100 - rootCents
+  const piano = $('lane-piano');
+  piano.hidden = !$('show-piano').checked;
+  piano.innerHTML = '';
+  if (!piano.hidden) {
+    for (let s = 0; s <= 12; s++) {
+      const cCenter = s * 100 - rc;
+      const l = xPct(cCenter - 50), r = xPct(cCenter + 50);
+      if (r < 0 || l > 100) continue;
+      const pc = ((root + s) % 12 + 12) % 12;
+      const k = document.createElement('div');
+      k.className = 'pkey ' + (BLACK_PC.has(pc) ? 'black' : 'white');
+      k.style.left = Math.max(0, l) + '%';
+      k.style.width = (Math.min(100, r) - Math.max(0, l)) + '%';
+      k.textContent = NOTE_NAMES[pc];
+      k.title = `${NOTE_NAMES[pc]} (12-TET) — click to toggle the nearest degree`;
+      k.dataset.s = s;
+      piano.appendChild(k);
     }
   }
 
+  // JI lane
+  const ji = $('lane-ji');
+  ji.hidden = !$('show-ji').checked;
+  ji.innerHTML = '';
+  if (!ji.hidden) {
+    for (const [c, label] of jiCents) {
+      if (c > period()) continue;
+      const t = document.createElement('div');
+      t.className = 'jitick';
+      t.style.left = xPct(c) + '%';
+      ji.appendChild(t);
+      const lb = document.createElement('div');
+      lb.className = 'jilabel';
+      lb.style.left = xPct(c) + '%';
+      lb.textContent = label;
+      lb.title = `${label} = ${c.toFixed(1)}¢`;
+      ji.appendChild(lb);
+    }
+  }
+
+  // degree lane: halos + lugs
+  const lane = $('lane-deg');
+  lane.innerHTML = '';
+  lugEls = [];
+  const tol = cfg.toleranceCents;
+  const labelEvery = edo <= 24 ? 1 : 5;
   for (let d = 0; d < edo; d++) {
+    const center = xPct(d * stepCents());
+    if (tol > 0) {
+      const h = document.createElement('div');
+      h.className = 'halo';
+      const w = (2 * tol / period()) * (100 - 100 / edo);
+      h.style.left = (center - w / 2) + '%';
+      h.style.width = w + '%';
+      h.dataset.deg = d;
+      lane.appendChild(h);
+    }
+    const lug = document.createElement('div');
+    lug.className = 'lug';
+    lug.style.left = (center - stepW * 0.42) + '%';
+    lug.style.width = (stepW * 0.84) + '%';
+    lug.textContent = d === 0 ? NOTE_NAMES[root]
+                    : (d % labelEvery === 0 ? d : '');
+    lug.title = degreeInfo(d);
+    lugEls.push(lug);
+    lane.appendChild(lug);
+  }
+
+  // gridlines dropped from the true 12-TET key boundaries
+  if (!piano.hidden) {
+    for (let s = 0; s <= 12; s++) {
+      const x = xPct(s * 100 - 50 - rc);
+      if (x < 0 || x > 100) continue;
+      const g = document.createElement('div');
+      g.className = 'gridline';
+      g.style.left = x + '%';
+      lane.appendChild(g);
+    }
+  }
+
+  // cents axis
+  const axis = $('lane-axis');
+  axis.innerHTML = '';
+  for (let c = 0; c <= period(); c += 300) {
+    const a = document.createElement('div');
+    a.className = 'axislabel';
+    a.style.left = xPct(c) + '%';
+    a.textContent = c;
+    axis.appendChild(a);
+  }
+
+  // full-height darkened columns for unlit degrees (spec: out-of-scale wash)
+  const shades = $('shade-layer');
+  shades.innerHTML = '';
+  shadeEls = [];
+  for (let d = 0; d < edo; d++) {
+    const s = document.createElement('div');
+    s.className = 'shade';
+    const center = xPct(d * stepCents());
+    s.style.left = (center - stepW / 2) + '%';
+    s.style.width = stepW + '%';
+    shadeEls.push(s);
+    shades.appendChild(s);
+  }
+
+  updateRulerState();
+}
+
+function updateRulerState() {
+  if (!cfg) return;
+  const edo = cfg.edo;
+  for (let d = 0; d < Math.min(edo, lugEls.length); d++) {
+    const lit = !!degrees[d];
+    const lug = lugEls[d];
+    lug.classList.toggle('off', !lit);
+    lug.classList.toggle('root', d === 0);
+    lug.classList.toggle('active', d === activeDeg);
+    if (shadeEls[d]) {
+      shadeEls[d].className = 'shade' + (d === 0 && lit ? ' goldwash' : '');
+      shadeEls[d].style.opacity = lit ? (d === 0 ? 1 : 0) : 1;
+    }
+  }
+  updateMaskMeta();
+}
+
+function updateMaskMeta() {
+  const edo = cfg ? cfg.edo : 12;
+  const lit = [];
+  for (let d = 0; d < edo; d++) if (degrees[d]) lit.push(d);
+  let gapTxt = '';
+  if (lit.length > 0 && lit.length < edo) {
+    let maxGap = 0;
+    for (let i = 0; i < lit.length; i++) {
+      const next = i + 1 < lit.length ? lit[i + 1] : lit[0] + edo;
+      maxGap = Math.max(maxGap, next - lit[i]);
+    }
+    const gapC = maxGap * stepCents();
+    gapTxt = ` · largest gap <span class="${gapC > 240 ? 'bad' : ''}">${gapC.toFixed(0)}¢</span>`;
+  }
+  $('maskmeta').innerHTML =
+    `${lit.length}/${edo} degrees · step ${stepCents().toFixed(1)}¢${gapTxt}` +
+    (lit.length === 0 ? ' · <span class="bad">empty mask = full chromatic fallback</span>' : '');
+}
+
+// degree-lane pointer interaction: click toggles, drag paints, alt auditions
+let painting = false, paintVal = 1, paintTouched = null;
+function degFromEvent(ev) {
+  const lane = $('lane-deg');
+  const rect = lane.getBoundingClientRect();
+  const frac = (ev.clientX - rect.left) / rect.width; // 0..1 incl padding
+  const edo = cfg.edo, pad = 50 / edo / 100;
+  const cents = (frac - pad) / (1 - 2 * pad) * period();
+  let d = Math.round(cents / stepCents());
+  return Math.max(0, Math.min(edo - 1, d));
+}
+$('lane-deg').addEventListener('pointerdown', ev => {
+  if (!cfg) return;
+  const d = degFromEvent(ev);
+  if (ev.altKey) { audition(d); return; }
+  painting = true;
+  markDirty(); // a status poll mid-drag must not clobber the working mask
+  paintTouched = new Set([d]);
+  paintVal = degrees[d] ? 0 : 1;
+  degrees[d] = paintVal;
+  $('lane-deg').setPointerCapture(ev.pointerId);
+  updateRulerState();
+});
+$('lane-deg').addEventListener('pointermove', ev => {
+  if (!painting) return;
+  const d = degFromEvent(ev);
+  if (!paintTouched.has(d)) {
+    markDirty();
+    paintTouched.add(d);
+    degrees[d] = paintVal;
+    updateRulerState();
+  }
+});
+window.addEventListener('pointerup', () => {
+  if (!painting) return;
+  painting = false;
+  postDegrees();
+});
+$('lane-piano').addEventListener('click', ev => {
+  if (!cfg) return;
+  const key = ev.target.closest('.pkey');
+  if (!key) return;
+  const s = +key.dataset.s;
+  const cents = s * 100 - cfg.rootCents;
+  let d = Math.round(cents / stepCents());
+  d = ((d % cfg.edo) + cfg.edo) % cfg.edo;
+  markDirty();
+  degrees[d] = degrees[d] ? 0 : 1;
+  updateRulerState();
+  postDegrees();
+});
+
+function postDegrees() { schedulePost({ degrees: degrees.slice(0, 72) }); }
+
+function audition(d) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const f = refHz() * 16 * Math.pow(2, d * stepCents() / 1200); // octave 4-ish
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = f;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.22, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t); osc.stop(t + 0.45);
+  } catch (e) {}
+}
+
+// ---- selection power tools -------------------------------------------------
+function setDegreesBulk(fn) { // fn(d) -> 0/1
+  const edo = cfg ? cfg.edo : 12;
+  const old = degrees.slice();
+  for (let d = 0; d < edo; d++) degrees[d] = fn(d, old);
+  updateRulerState();
+  postDegrees();
+}
+function dist12(d) {
+  const abs = d * stepCents() + cfg.rootCents;
+  return Math.abs(abs - Math.round(abs / 100) * 100);
+}
+function distJi(d) {
+  const c = d * stepCents();
+  let best = 1e9;
+  for (const [jc] of jiCents) best = Math.min(best, Math.abs(c - jc));
+  return Math.min(best, c); // 1/1 at 0¢ counts too
+}
+$('deg-all').onclick  = () => setDegreesBulk(() => 1);
+$('deg-none').onclick = () => setDegreesBulk(() => 0);
+$('deg-inv').onclick  = () => setDegreesBulk((d, o) => o[d] ? 0 : 1);
+$('rot-l').onclick    = () => setDegreesBulk((d, o) => o[(d + 1) % cfg.edo]);
+$('rot-r').onclick    = () => setDegreesBulk((d, o) => o[(d - 1 + cfg.edo) % cfg.edo]);
+$('near12').onclick   = () => {
+  const n = parseFloat($('near-tol').value) || 15;
+  setDegreesBulk(d => dist12(d) <= n ? 1 : 0);
+};
+$('nearji').onclick   = () => {
+  const n = parseFloat($('near-tol').value) || 15;
+  setDegreesBulk(d => distJi(d) <= n ? 1 : 0);
+};
+
+// presets: computed from the tuning itself, so they are correct in any EDO
+function nearestDegreeToCents(c) { return ((Math.round(c / stepCents()) % cfg.edo) + cfg.edo) % cfg.edo; }
+function maskFromCents(list) {
+  const s = new Set(list.map(nearestDegreeToCents));
+  setDegreesBulk(d => s.has(d) ? 1 : 0);
+}
+function fifthDegree() { return Math.round(701.955 / stepCents()); }
+function chainOfFifths(count) { // k = -1..count-2 fifths from root
+  const f = fifthDegree(), out = [];
+  for (let k = -1; k <= count - 2; k++)
+    out.push((((k * f) % cfg.edo) + cfg.edo) % cfg.edo);
+  return out;
+}
+const PRESETS = {
+  'Chromatic (all)':        () => setDegreesBulk(() => 1),
+  'Major (nearest 12-TET)': () => maskFromCents([0,200,400,500,700,900,1100]),
+  'Minor (nearest 12-TET)': () => maskFromCents([0,200,300,500,700,800,1000]),
+  'Pentatonic (nearest 12-TET)': () => maskFromCents([0,200,400,700,900]),
+  'Diatonic [7] (chain of fifths)': () => { const s = new Set(chainOfFifths(7)); setDegreesBulk(d => s.has(d) ? 1 : 0); },
+  'Pentatonic [5] (chain of fifths)': () => { const s = new Set(chainOfFifths(5)); setDegreesBulk(d => s.has(d) ? 1 : 0); },
+};
+function userPresets() {
+  try { return JSON.parse(localStorage.getItem('autoedoPresets') || '{}'); }
+  catch (e) { return {}; }
+}
+function rebuildPresetList() {
+  const sel = $('preset');
+  sel.innerHTML = '<option value="">Preset…</option>';
+  for (const name of Object.keys(PRESETS)) {
+    const o = document.createElement('option');
+    o.value = 'b:' + name; o.textContent = name;
+    sel.appendChild(o);
+  }
+  const up = userPresets();
+  for (const name of Object.keys(up)) {
+    const o = document.createElement('option');
+    o.value = 'u:' + name; o.textContent = `${name} (saved, ${up[name].edo}-EDO)`;
+    sel.appendChild(o);
+  }
+}
+$('preset').onchange = e => {
+  const v = e.target.value;
+  e.target.value = '';
+  if (!v) return;
+  if (v.startsWith('b:')) { PRESETS[v.slice(2)](); return; }
+  const p = userPresets()[v.slice(2)];
+  if (!p) return;
+  // map by cents so a mask saved in one EDO lands sensibly in another
+  const cents = [];
+  for (let d = 0; d < p.edo; d++) if (p.degrees[d]) cents.push(d * 1200 / p.edo);
+  maskFromCents(cents);
+};
+$('preset-save').onclick = () => {
+  const name = prompt('Preset name:');
+  if (!name) return;
+  const up = userPresets();
+  up[name] = { edo: cfg.edo, degrees: degrees.slice(0, cfg.edo) };
+  localStorage.setItem('autoedoPresets', JSON.stringify(up));
+  rebuildPresetList();
+};
+
+// Scala .scl import/export
+$('scl-exp').onclick = () => {
+  const lit = [];
+  for (let d = 1; d < cfg.edo; d++) if (degrees[d]) lit.push(d);
+  let s = '! autoedo.scl\n!\n';
+  s += `AutoEDO mask export: subset of ${cfg.edo}-EDO` +
+       (cfg.stretchCents ? ` (octave ${period().toFixed(1)}c)` : '') + '\n';
+  s += ` ${lit.length + 1}\n!\n`;
+  for (const d of lit) s += ` ${(d * stepCents()).toFixed(5)}\n`;
+  s += cfg.stretchCents ? ` ${period().toFixed(5)}\n` : ' 2/1\n';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([s], { type: 'text/plain' }));
+  a.download = `autoedo-${cfg.edo}edo.scl`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$('scl-imp').onclick = () => $('scl-file').click();
+$('scl-file').onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter(l => !l.trim().startsWith('!'));
+  // line 0 = description, line 1 = count, then pitches (cents have a '.')
+  const cents = [0];
+  for (let i = 2; i < lines.length; i++) {
+    const tok = lines[i].trim().split(/\s+/)[0];
+    if (!tok) continue;
+    let c = null;
+    if (tok.includes('.')) c = parseFloat(tok);
+    else if (tok.includes('/')) {
+      const [a, b] = tok.split('/').map(Number);
+      if (a > 0 && b > 0) c = 1200 * Math.log2(a / b);
+    } else if (/^\d+$/.test(tok)) c = 1200 * Math.log2(parseInt(tok, 10));
+    if (c !== null && isFinite(c)) cents.push(((c % period()) + period()) % period());
+  }
+  if (cents.length > 1) maskFromCents(cents);
+};
+
+// ---- generic control wiring ------------------------------------------------
+function bindSlider(id, key, fmt, scale = 1) {
+  $(id).oninput = e => {
+    const v = +e.target.value;
+    $(id + '-val').textContent = fmt(v);
+    schedulePost({ [key]: v * scale });
+    if (key === 'toleranceCents') { if (cfg) { cfg.toleranceCents = v; buildRuler(); } }
+  };
+}
+bindSlider('retune', 'retuneMs', v => `${v} ms`);
+bindSlider('amount', 'amount', v => `${v} %`, 0.01);
+bindSlider('tolerance', 'toleranceCents', v => `±${v.toFixed(1)} ¢`);
+bindSlider('stickiness', 'stickiness', v => `${v} %`, 0.01);
+bindSlider('transition', 'transitionMs', v => `${v} ms`);
+bindSlider('humanize', 'humanize', v => `${v} %`, 0.01);
+bindSlider('gain', 'outputGainDb', v => `${v.toFixed(1)} dB`);
+bindSlider('stretch', 'stretchCents', v => `${v >= 0 ? '+' : ''}${v.toFixed(1)} ¢/oct`);
+$('stretch').addEventListener('input', () => {
+  if (cfg) { cfg.stretchCents = +$('stretch').value; buildRuler(); }
+});
+$('bypass').onchange = e => schedulePost({ bypass: e.target.checked });
+$('bufsize').onchange = e => schedulePost({ bufferFrames: +e.target.value });
+$('range').onchange = e => schedulePost({ range: e.target.value });
+$('in-dev').onchange = e => schedulePost({ inputUid: e.target.value });
+$('out-dev').onchange = e => schedulePost({ outputUid: e.target.value });
+$('refresh-dev').onclick = () => loadDevices();
+$('show-piano').onchange = buildRuler;
+$('show-ji').onchange = buildRuler;
+$('restart').onclick = async () => {
+  try {
+    const r = await fetch('/api/restart', { method: 'POST' });
+    applyStatus(await r.json());
+  } catch (e) {}
+};
+
+// root & reference
+for (let i = 0; i < 12; i++) {
+  const o = document.createElement('option');
+  o.value = i; o.textContent = NOTE_NAMES[i];
+  $('root').appendChild(o);
+}
+$('root').onchange = e => {
+  const v = +e.target.value;
+  if (cfg) { cfg.rootNote = v; buildRuler(); }
+  schedulePost({ rootNote: v });
+};
+$('root-cents').onchange = e => {
+  const v = Math.max(-50, Math.min(50, +e.target.value || 0));
+  e.target.value = v;
+  if (cfg) { cfg.rootCents = v; buildRuler(); }
+  schedulePost({ rootCents: v });
+};
+$('a4').onchange = e => {
+  const v = Math.max(400, Math.min(480, +e.target.value || 440));
+  e.target.value = v;
+  if (cfg) cfg.refA4 = v;
+  schedulePost({ refA4: v });
+};
+
+// EDO: chips + numeric text field
+function rebuildChips() {
+  const host = $('edo-chips');
+  host.innerHTML = '';
+  for (const n of EDO_CHIPS) {
     const b = document.createElement('button');
-    b.textContent = d === 0 ? 'C' : (sparse ? '' : d);
-    b.style.fontSize = fs;
-    b.title = `degree ${d} · ${(d * 1200 / edo).toFixed(1)} ¢ above C`;
-    if (degrees[d]) b.classList.add('on');
-    b.onclick = () => {
-      degrees[d] = degrees[d] ? 0 : 1;
-      b.classList.toggle('on', !!degrees[d]);
-      schedulePost({ degrees: degrees.slice(0, 72) });
-    };
+    b.className = 'small' + (cfg && cfg.edo === n ? ' cur' : '');
+    b.textContent = n;
+    b.onclick = () => { $('edo').value = n; commitEdo(n); };
     host.appendChild(b);
   }
 }
-
-function setDegreesBulk(on) {
-  const edo = cfg ? cfg.edo : 12;
-  for (let d = 0; d < edo; d++) degrees[d] = on ? 1 : 0;
-  renderDegrees();
-  schedulePost({ degrees: degrees.slice(0, 72) });
+$('edo').oninput = e => {
+  e.target.value = e.target.value.replace(/[^0-9]/g, ''); // numeric only
+  markDirty();
+  const v = parseInt(e.target.value, 10);
+  if (v >= 10 && v <= 72) commitEdo(v);
+};
+$('edo').onchange = e => {
+  let v = parseInt(e.target.value, 10);
+  if (isNaN(v)) v = cfg ? cfg.edo : 12;
+  v = Math.max(10, Math.min(72, v));
+  e.target.value = v;
+  commitEdo(v);
+};
+$('edo').onkeydown = e => { if (e.key === 'Enter') e.target.blur(); };
+function commitEdo(v) {
+  const post = { edo: v };
+  // Spec: auto-raise stickiness as the EDO climbs (step < vibrato width),
+  // and say so. Only ever raises, never lowers a user's setting.
+  const sugg = v > 41 ? Math.min(0.7, (v - 24) / 48) : 0;
+  if (cfg && sugg > 0 && cfg.stickiness < sugg) {
+    post.stickiness = sugg;
+    const hint = $('stick-hint');
+    hint.hidden = false;
+    hint.innerHTML = `<span class="hintnote">stickiness auto-raised to ` +
+      `${Math.round(sugg * 100)}% for ${v}-EDO (step ${ (1200 / v).toFixed(1) }¢ &lt; vibrato width)</span>`;
+    setTimeout(() => { hint.hidden = true; }, 6000);
+  }
+  if (cfg && cfg.edo !== v) { cfg.edo = v; buildRuler(); rebuildChips(); }
+  schedulePost(post);
 }
 
+// ---- A/B config slots ------------------------------------------------------
+let abSlot = 'A';
+function abStore() {
+  try { return JSON.parse(localStorage.getItem('autoedoAB') || '{}'); }
+  catch (e) { return {}; }
+}
+function abSave(slot, config) {
+  const s = abStore();
+  s[slot] = config;
+  localStorage.setItem('autoedoAB', JSON.stringify(s));
+}
+async function abSwitch(to) {
+  if (!cfg || to === abSlot) return;
+  abSave(abSlot, cfg);          // stash current settings in the old slot
+  abSlot = to;
+  $('ab-a').classList.toggle('on', to === 'A');
+  $('ab-b').classList.toggle('on', to === 'B');
+  const stored = abStore()[to];
+  if (stored) {
+    markDirty();
+    try {
+      const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(stored) });
+      applyStatus(await r.json());
+      cfg = null; // force a full control resync from the response
+    } catch (e) {}
+  }
+}
+$('ab-a').onclick = () => abSwitch('A');
+$('ab-b').onclick = () => abSwitch('B');
+$('ab-copy').onclick = () => { if (cfg) { abSave('A', cfg); abSave('B', cfg); } };
+
+// ---- devices ---------------------------------------------------------------
 function fillDeviceSelect(sel, devices, wantInput, currentUid) {
   sel.innerHTML = '';
   const def = document.createElement('option');
@@ -282,9 +889,8 @@ function fillDeviceSelect(sel, devices, wantInput, currentUid) {
     sel.appendChild(o);
   }
   sel.value = currentUid || '';
-  if (sel.value !== (currentUid || '')) sel.value = ''; // stored device unplugged
+  if (sel.value !== (currentUid || '')) sel.value = '';
 }
-
 async function loadDevices() {
   try {
     const r = await fetch('/api/devices');
@@ -294,10 +900,10 @@ async function loadDevices() {
   } catch (e) {}
 }
 
+// ---- status / poll ---------------------------------------------------------
 function applyStatus(s) {
   if (!s) return;
 
-  // status line
   $('dot').classList.toggle('ok', !!s.running);
   $('statustext').textContent = s.running
     ? `running · ${s.inputName} → ${s.outputName} · ` +
@@ -307,12 +913,21 @@ function applyStatus(s) {
   $('err').hidden = !s.error;
   $('err').textContent = s.error || '';
 
-  // live read-out
+  // live read-out + amber active lug
   const det = s.voiced ? s.detectedHz : 0;
   const tgt = s.voiced ? s.targetHz : 0;
   $('det-note').textContent = noteName(det);
   $('det-hz').textContent = det ? `${det.toFixed(1)} Hz · input (12-TET name)` : 'input';
-  $('tgt-note').textContent = s.voiced ? degreeName(tgt, s.config.edo) : '—';
+  if (s.voiced && cfg) {
+    const j = hzToDegree(tgt);
+    const deg = ((j % cfg.edo) + cfg.edo) % cfg.edo;
+    const oct = Math.floor(j / cfg.edo);
+    $('tgt-note').textContent = `${deg}\\${cfg.edo} · oct ${oct}`;
+    if (deg !== activeDeg) { activeDeg = deg; updateRulerState(); }
+  } else {
+    $('tgt-note').textContent = '—';
+    if (activeDeg !== -1) { activeDeg = -1; updateRulerState(); }
+  }
   $('tgt-hz').textContent = tgt ? `${tgt.toFixed(1)} Hz · target` : 'target';
   $('voiced').innerHTML = s.voiced ? '<b>voiced</b> — correcting' : 'unvoiced — dry passthrough';
 
@@ -335,33 +950,45 @@ function applyStatus(s) {
   const first = cfg === null;
   const c = s.config;
   if (first || Date.now() > dirtyUntil) {
-    const edoChanged = !cfg || cfg.edo !== c.edo;
+    const structural = !cfg || cfg.edo !== c.edo || cfg.rootNote !== c.rootNote
+      || cfg.rootCents !== c.rootCents || cfg.stretchCents !== c.stretchCents
+      || cfg.toleranceCents !== c.toleranceCents
+      || JSON.stringify(cfg.degrees) !== JSON.stringify(c.degrees);
     cfg = c;
     degrees = c.degrees.slice();
-    if (document.activeElement !== $('edo')) $('edo').value = c.edo;
-    $('retune').value = c.retuneMs;
-    $('retune-val').textContent = `${Math.round(c.retuneMs)} ms`;
-    $('gain').value = c.outputGainDb;
-    $('gain-val').textContent = `${c.outputGainDb.toFixed(1)} dB`;
-    $('bypass').checked = c.bypass;
-    $('bufsize').value = String(c.bufferFrames);
-    $('stepmeta').textContent = `step = ${(1200 / c.edo).toFixed(1)} ¢ · ` +
-      `${c.degrees.slice(0, c.edo).filter(x => x).length}/${c.edo} degrees enabled`;
-    if (first) loadDevices();
-    else {
-      if ($('in-dev').value !== (c.inputUid || '')) $('in-dev').value = c.inputUid || '';
-      if ($('out-dev').value !== (c.outputUid || '')) $('out-dev').value = c.outputUid || '';
-    }
-    if (first || edoChanged) renderDegrees();
-    else renderDegreesStateOnly();
+    setControls(c);
+    if (first) { loadDevices(); rebuildChips(); rebuildPresetList(); buildRuler(); }
+    else if (structural) { rebuildChips(); buildRuler(); }
+    else updateRulerState();
   }
 }
 
-function renderDegreesStateOnly() {
-  const host = $('degrees');
-  const btns = host.children;
-  for (let d = 0; d < btns.length; d++)
-    btns[d].classList.toggle('on', !!degrees[d]);
+function setControls(c) {
+  if (document.activeElement !== $('edo')) $('edo').value = c.edo;
+  $('root').value = c.rootNote;
+  if (document.activeElement !== $('root-cents')) $('root-cents').value = c.rootCents;
+  if (document.activeElement !== $('a4')) $('a4').value = c.refA4;
+  $('stretch').value = c.stretchCents;
+  $('stretch-val').textContent = `${c.stretchCents >= 0 ? '+' : ''}${c.stretchCents.toFixed(1)} ¢/oct`;
+  $('retune').value = c.retuneMs;
+  $('retune-val').textContent = `${Math.round(c.retuneMs)} ms`;
+  $('amount').value = Math.round(c.amount * 100);
+  $('amount-val').textContent = `${Math.round(c.amount * 100)} %`;
+  $('tolerance').value = c.toleranceCents;
+  $('tolerance-val').textContent = `±${c.toleranceCents.toFixed(1)} ¢`;
+  $('stickiness').value = Math.round(c.stickiness * 100);
+  $('stickiness-val').textContent = `${Math.round(c.stickiness * 100)} %`;
+  $('transition').value = c.transitionMs;
+  $('transition-val').textContent = `${Math.round(c.transitionMs)} ms`;
+  $('humanize').value = Math.round(c.humanize * 100);
+  $('humanize-val').textContent = `${Math.round(c.humanize * 100)} %`;
+  $('range').value = c.range;
+  $('gain').value = c.outputGainDb;
+  $('gain-val').textContent = `${c.outputGainDb.toFixed(1)} dB`;
+  $('bypass').checked = c.bypass;
+  $('bufsize').value = String(c.bufferFrames);
+  if ($('in-dev').value !== (c.inputUid || '')) $('in-dev').value = c.inputUid || '';
+  if ($('out-dev').value !== (c.outputUid || '')) $('out-dev').value = c.outputUid || '';
 }
 
 async function poll() {
@@ -373,47 +1000,6 @@ async function poll() {
     $('statustext').textContent = 'server unreachable';
   }
 }
-
-// --- control wiring ---------------------------------------------------------
-$('edo').oninput = e => {
-  e.target.value = e.target.value.replace(/[^0-9]/g, ''); // numeric only
-  markDirty();
-  const v = parseInt(e.target.value, 10);
-  if (v >= 10 && v <= 72) commitEdo(v); // apply as soon as the value is valid
-};
-$('edo').onchange = e => { // blur / Enter: clamp whatever is left into range
-  let v = parseInt(e.target.value, 10);
-  if (isNaN(v)) v = cfg ? cfg.edo : 12;
-  v = Math.max(10, Math.min(72, v));
-  e.target.value = v;
-  commitEdo(v);
-};
-$('edo').onkeydown = e => { if (e.key === 'Enter') e.target.blur(); };
-function commitEdo(v) {
-  if (cfg && cfg.edo !== v) { cfg.edo = v; renderDegrees(); }
-  schedulePost({ edo: v });
-}
-$('retune').oninput = e => {
-  $('retune-val').textContent = `${e.target.value} ms`;
-  schedulePost({ retuneMs: +e.target.value });
-};
-$('gain').oninput = e => {
-  $('gain-val').textContent = `${(+e.target.value).toFixed(1)} dB`;
-  schedulePost({ outputGainDb: +e.target.value });
-};
-$('bypass').onchange = e => schedulePost({ bypass: e.target.checked });
-$('bufsize').onchange = e => schedulePost({ bufferFrames: +e.target.value });
-$('in-dev').onchange = e => schedulePost({ inputUid: e.target.value });
-$('out-dev').onchange = e => schedulePost({ outputUid: e.target.value });
-$('deg-all').onclick = () => setDegreesBulk(true);
-$('deg-none').onclick = () => setDegreesBulk(false);
-$('refresh-dev').onclick = () => loadDevices();
-$('restart').onclick = async () => {
-  try {
-    const r = await fetch('/api/restart', { method: 'POST' });
-    applyStatus(await r.json());
-  } catch (e) {}
-};
 
 poll();
 setInterval(poll, 150);

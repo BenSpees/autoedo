@@ -19,6 +19,7 @@
 #include "tuning.h"
 
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -33,11 +34,42 @@
 typedef struct
 {
     AeEngineConfig  engine_cfg;
+    /* UI-facing tuning-reference fields; params.ref_hz / period_cents and
+       the detection range are derived from these in config_sync(). */
+    int             root_note;     /* 0..11, 0 = C (degree 0 of the grid) */
+    double          root_cents;    /* fine offset, -50..+50 */
+    double          ref_a4;        /* reference A4, default 440.0 */
+    double          stretch_cents; /* octave stretch, cents per octave */
+    char            range_name[16];/* detection range preset */
     int             port;
     pthread_mutex_t lock;      /* guards engine + engine_cfg */
     AeAudioEngine  *engine;
     char            engine_err[256];
 } App;
+
+/* Detection-range presets (min/max Hz of the tracking window). */
+static const struct { const char *name; double min_hz, max_hz; } k_ranges[] = {
+    { "bass",       55.0,  400.0 },
+    { "baritone",   65.0,  450.0 },
+    { "tenor",      80.0,  600.0 },
+    { "alto",      100.0,  800.0 },
+    { "soprano",   130.0, 1200.0 },
+    { "instrument", 65.0, 1600.0 },
+    { "wide",       40.0, 2000.0 },
+};
+
+static void range_lookup (const char *name, double *min_hz, double *max_hz)
+{
+    for (size_t i = 0; i < sizeof (k_ranges) / sizeof (k_ranges[0]); ++i)
+        if (strcmp (name, k_ranges[i].name) == 0)
+        {
+            *min_hz = k_ranges[i].min_hz;
+            *max_hz = k_ranges[i].max_hz;
+            return;
+        }
+    *min_hz = 65.0; /* "instrument" */
+    *max_hz = 1600.0;
+}
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -58,25 +90,60 @@ static void config_path (char *out, size_t cap)
         snprintf (out, cap, ".autoedo.json");
 }
 
-static void config_defaults (AeEngineConfig *c)
+static void config_defaults (App *app)
 {
+    AeEngineConfig *c = &app->engine_cfg;
     memset (c, 0, sizeof (*c));
     c->buffer_frames          = 256;
     c->params.edo             = 12;
     c->params.retune_ms       = 20.0;
+    c->params.transition_ms   = 50.0;
+    c->params.amount          = 1.0;
+    c->params.tolerance_cents = 0.0;
+    c->params.stickiness      = 0.0;
+    c->params.humanize        = 0.0;
     c->params.degrees_lo      = ~0ull;   /* every degree enabled */
     c->params.degrees_hi      = 0xffull;
     c->params.bypass          = false;
     c->params.output_gain_db  = 0.0;
+
+    app->root_note     = 0;      /* C */
+    app->root_cents    = 0.0;
+    app->ref_a4        = 440.0;
+    app->stretch_cents = 0.0;
+    snprintf (app->range_name, sizeof (app->range_name), "instrument");
+}
+
+/* Derive the engine-facing reference/period/detection-range values from the
+   UI-facing fields. Degree 0 sits on the root note in octave 0 (e.g. root C
+   at A4 = 440 gives the classic 16.3516 Hz C0 anchor). */
+static void config_sync (App *app)
+{
+    AeEngineConfig *c = &app->engine_cfg;
+    c->params.ref_hz = app->ref_a4
+                     * pow (2.0, ((double) app->root_note - 9.0) / 12.0) / 16.0
+                     * pow (2.0, app->root_cents / 1200.0);
+    c->params.period_cents = 1200.0 + app->stretch_cents;
+    range_lookup (app->range_name, &c->det_min_hz, &c->det_max_hz);
 }
 
 /* Serialise just the config (shared between the save file and /api/status). */
-static void config_json (const AeEngineConfig *c, char *out, size_t cap)
+static void config_json (const App *app, char *out, size_t cap)
 {
+    const AeEngineConfig *c = &app->engine_cfg;
     snprintf (out, cap,
-              "{\"edo\":%d,\"retuneMs\":%.6g,\"bypass\":%s,\"outputGainDb\":%.6g,"
+              "{\"edo\":%d,\"retuneMs\":%.6g,\"transitionMs\":%.6g,"
+              "\"amount\":%.6g,\"toleranceCents\":%.6g,\"stickiness\":%.6g,"
+              "\"humanize\":%.6g,"
+              "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
+              "\"stretchCents\":%.6g,\"range\":\"%s\","
+              "\"bypass\":%s,\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputUid\":\"",
-              c->params.edo, c->params.retune_ms,
+              c->params.edo, c->params.retune_ms, c->params.transition_ms,
+              c->params.amount, c->params.tolerance_cents, c->params.stickiness,
+              c->params.humanize,
+              app->root_note, app->root_cents, app->ref_a4,
+              app->stretch_cents, app->range_name,
               c->params.bypass ? "true" : "false",
               c->params.output_gain_db, c->buffer_frames);
     ae_json_escape_append (out, cap, c->input_uid);
@@ -105,15 +172,21 @@ static void config_save (const App *app)
         return;
     }
     char body[4096] = "";
-    config_json (&app->engine_cfg, body, sizeof (body));
+    config_json (app, body, sizeof (body));
     fprintf (f, "%s\n", body);
     fclose (f);
 }
 
-/* Apply any known keys found in `json` onto `c`. Returns true if a setting
-   that needs an engine restart (devices / buffer size) changed. */
-static bool config_apply_json (AeEngineConfig *c, const char *json)
+static double num_clamp (double v, double lo, double hi)
 {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/* Apply any known keys found in `json` onto the app config. Returns true if
+   a setting that needs an engine restart (devices / buffer / range) changed. */
+static bool config_apply_json (App *app, const char *json)
+{
+    AeEngineConfig *c = &app->engine_cfg;
     bool restart = false;
     double num;
     bool   b;
@@ -127,11 +200,38 @@ static bool config_apply_json (AeEngineConfig *c, const char *json)
         c->params.edo = edo;
     }
     if (ae_json_get_number (json, "retuneMs", &num))
-        c->params.retune_ms = num < 0.0 ? 0.0 : (num > 500.0 ? 500.0 : num);
+        c->params.retune_ms = num_clamp (num, 0.0, 400.0);
+    if (ae_json_get_number (json, "transitionMs", &num))
+        c->params.transition_ms = num_clamp (num, 0.0, 200.0);
+    if (ae_json_get_number (json, "amount", &num))
+        c->params.amount = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "toleranceCents", &num))
+        c->params.tolerance_cents = num_clamp (num, 0.0, 50.0);
+    if (ae_json_get_number (json, "stickiness", &num))
+        c->params.stickiness = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "humanize", &num))
+        c->params.humanize = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "rootNote", &num))
+        app->root_note = (int) num_clamp (num, 0.0, 11.0);
+    if (ae_json_get_number (json, "rootCents", &num))
+        app->root_cents = num_clamp (num, -50.0, 50.0);
+    if (ae_json_get_number (json, "refA4", &num))
+        app->ref_a4 = num_clamp (num, 400.0, 480.0);
+    if (ae_json_get_number (json, "stretchCents", &num))
+        app->stretch_cents = num_clamp (num, -30.0, 30.0);
+    if (ae_json_get_string (json, "range", str, sizeof (str)))
+    {
+        double lo1, hi1, lo2, hi2;
+        range_lookup (app->range_name, &lo1, &hi1);
+        range_lookup (str, &lo2, &hi2);
+        if (lo1 != lo2 || hi1 != hi2)
+            restart = true; /* detection window is baked in at prepare time */
+        snprintf (app->range_name, sizeof (app->range_name), "%.15s", str);
+    }
     if (ae_json_get_bool (json, "bypass", &b))
         c->params.bypass = b;
     if (ae_json_get_number (json, "outputGainDb", &num))
-        c->params.output_gain_db = num < -60.0 ? -60.0 : (num > 12.0 ? 12.0 : num);
+        c->params.output_gain_db = num_clamp (num, -60.0, 12.0);
 
     unsigned char flags[AE_MAX_EDO];
     const int n = ae_json_get_flag_array (json, "degrees", flags, AE_MAX_EDO);
@@ -186,7 +286,7 @@ static void config_load (App *app)
     const size_t n = fread (buf, 1, sizeof (buf) - 1, f);
     buf[n] = '\0';
     fclose (f);
-    config_apply_json (&app->engine_cfg, buf);
+    config_apply_json (app, buf);
 }
 
 /* ------------------------------------------------------------------ engine */
@@ -218,7 +318,7 @@ static void api_status (App *app, AeHttpResponse *resp)
         ae_audio_engine_get_status (app->engine, &st);
 
     char cfg[4096] = "";
-    config_json (&app->engine_cfg, cfg, sizeof (cfg));
+    config_json (app, cfg, sizeof (cfg));
 
     char in_name[2 * AE_NAME_MAX] = "", out_name[2 * AE_NAME_MAX] = "", err[2 * 256] = "";
     ae_json_escape_append (in_name,  sizeof (in_name),  st.input_name);
@@ -242,7 +342,10 @@ static void api_status (App *app, AeHttpResponse *resp)
         st.latency_samples, lat_ms,
         (double) st.detected_hz, (double) st.target_hz, st.voiced ? "true" : "false",
         in_name, out_name,
-        ae_edo_step_cents (app->engine_cfg.params.edo), cfg);
+        ae_edo_step_cents_ex (app->engine_cfg.params.edo,
+                              app->engine_cfg.params.period_cents > 0.0
+                                ? app->engine_cfg.params.period_cents : 1200.0),
+        cfg);
 
     pthread_mutex_unlock (&app->lock);
 }
@@ -298,7 +401,8 @@ static void api_config_post (App *app, const char *body, AeHttpResponse *resp)
 {
     pthread_mutex_lock (&app->lock);
 
-    const bool restart = config_apply_json (&app->engine_cfg, body);
+    const bool restart = config_apply_json (app, body);
+    config_sync (app);
     if (restart || app->engine == NULL)
         engine_restart_locked (app);
     else if (app->engine != NULL)
@@ -360,8 +464,9 @@ int main (int argc, char **argv)
     memset (&app, 0, sizeof (app));
     pthread_mutex_init (&app.lock, NULL);
     app.port = DEFAULT_PORT;
-    config_defaults (&app.engine_cfg);
+    config_defaults (&app);
     config_load (&app);
+    config_sync (&app);
 
     for (int i = 1; i < argc; ++i)
     {

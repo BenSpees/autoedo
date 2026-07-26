@@ -5,6 +5,7 @@
    unit's render callback. */
 
 #include "audio.h"
+#include "audio_params.h"
 #include "psola.h"
 #include "ring.h"
 
@@ -213,12 +214,7 @@ struct AeAudioEngine
     char out_name[AE_NAME_MAX];
 
     /* Live parameters (any thread -> audio thread). */
-    _Atomic int      p_edo;
-    _Atomic double   p_retune_ms;
-    _Atomic uint64_t p_deg_lo;
-    _Atomic uint64_t p_deg_hi;
-    _Atomic bool     p_bypass;
-    _Atomic double   p_gain;   /* linear */
+    AeAtomicParams params;
 };
 
 static OSStatus input_cb (void *ref, AudioUnitRenderActionFlags *flags,
@@ -281,22 +277,12 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     memcpy (e->dry, e->proc, n * sizeof (float));
 
     /* Apply live parameters, then correct. */
-    const int      edo = atomic_load_explicit (&e->p_edo, memory_order_relaxed);
-    const double   ret = atomic_load_explicit (&e->p_retune_ms, memory_order_relaxed);
-    const uint64_t lo  = atomic_load_explicit (&e->p_deg_lo, memory_order_relaxed);
-    const uint64_t hi  = atomic_load_explicit (&e->p_deg_hi, memory_order_relaxed);
-    bool mask[AE_MAX_EDO];
-    for (int d = 0; d < AE_MAX_EDO; ++d)
-        mask[d] = d < 64 ? ((lo >> d) & 1u) != 0 : ((hi >> (d - 64)) & 1u) != 0;
-
-    ae_psola_set_edo (&e->psola, edo);
-    ae_psola_set_retune_ms (&e->psola, ret);
-    ae_psola_set_enabled_degrees (&e->psola, mask, AE_MAX_EDO);
+    bool  bypass = false;
+    float gain   = 1.0f;
+    ae_atomic_params_apply (&e->params, &e->psola, &bypass, &gain);
     ae_psola_process (&e->psola, e->proc, (int) n);
 
-    const bool  bypass = atomic_load_explicit (&e->p_bypass, memory_order_relaxed);
-    const float gain   = (float) atomic_load_explicit (&e->p_gain, memory_order_relaxed);
-    const float *src   = bypass ? e->dry : e->proc;
+    const float *src = bypass ? e->dry : e->proc;
 
     for (UInt32 b = 0; b < io->mNumberBuffers; ++b)
     {
@@ -368,18 +354,8 @@ static void engine_teardown (AeAudioEngine *e)
 
 void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)
 {
-    if (e == NULL)
-        return;
-    int edo = p->edo;
-    if (edo < AE_MIN_EDO) edo = AE_MIN_EDO;
-    if (edo > AE_MAX_EDO) edo = AE_MAX_EDO;
-    atomic_store_explicit (&e->p_edo, edo, memory_order_relaxed);
-    atomic_store_explicit (&e->p_retune_ms, p->retune_ms, memory_order_relaxed);
-    atomic_store_explicit (&e->p_deg_lo, p->degrees_lo, memory_order_relaxed);
-    atomic_store_explicit (&e->p_deg_hi, p->degrees_hi, memory_order_relaxed);
-    atomic_store_explicit (&e->p_bypass, p->bypass, memory_order_relaxed);
-    atomic_store_explicit (&e->p_gain, pow (10.0, p->output_gain_db / 20.0),
-                           memory_order_relaxed);
+    if (e != NULL)
+        ae_atomic_params_store (&e->params, p);
 }
 
 void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
@@ -471,7 +447,8 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         return NULL;
     }
 
-    ae_psola_prepare (&e->psola, e->out_rate, MAX_FRAMES);
+    ae_psola_prepare (&e->psola, e->out_rate, MAX_FRAMES,
+                      cfg->det_min_hz, cfg->det_max_hz);
     ae_audio_engine_set_params (e, &cfg->params);
 
     /* ~20 ms input-side cushion (or 3 hardware blocks, whichever is more)

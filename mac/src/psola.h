@@ -27,6 +27,8 @@ typedef struct
 {
     /* Configuration -------------------------------------------------------- */
     double fs;
+    double det_min_hz; /* detection range (set in prepare) */
+    double det_max_hz;
     int    frame_size;
     int    hop;
     int    tau_min;
@@ -56,12 +58,24 @@ typedef struct
     bool   voiced;
     bool   primed;         /* becomes true once first pitch is found */
 
-    double out_cents; /* current (smoothed) output pitch, cents re C0 */
+    double out_cents; /* current (smoothed) output pitch, cents re ref */
     double v_gain;    /* smoothed dry(0)/wet(1) crossfade gain */
+
+    long long target_j;      /* current target degree (signed, re root) */
+    bool      target_valid;  /* false until a voiced target exists */
+    bool      in_transition; /* gliding between two different degrees */
+    double    sustain_s;     /* seconds the current degree has been held */
 
     /* Parameters (set from the audio thread between blocks) ---------------- */
     int    edo;
     double retune_ms;
+    double transition_ms;   /* glide between *different* target degrees */
+    double amount;          /* 0..1 partial correction */
+    double tolerance_cents; /* dead zone around each lit degree */
+    double stickiness;      /* 0..1 hysteresis before re-snapping */
+    double humanize;        /* 0..1 relaxes retune on sustained notes */
+    double ref_hz;          /* frequency of degree 0 (the root anchor) */
+    double period_cents;    /* octave size (1200 = true octave) */
     bool   enabled_deg[AE_MAX_EDO];
 
     /* Live read-out (audio thread -> UI thread) ---------------------------- */
@@ -70,8 +84,11 @@ typedef struct
     _Atomic bool  voiced_out;
 } AePsola;
 
-/* Allocate buffers for a sample rate / block size. Call before processing. */
-void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size);
+/* Allocate buffers for a sample rate / block size. Call before processing.
+   min_hz/max_hz bound the detection range (pass 0 for the defaults,
+   65 / 1600 Hz). Lower min_hz costs latency: latency = 3 longest periods. */
+void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size,
+                       double min_hz, double max_hz);
 
 /* Clear all internal state. */
 void ae_psola_reset (AePsola *p);
@@ -82,8 +99,20 @@ void ae_psola_free (AePsola *p);
 /* Process num_samples of mono audio in place. */
 void ae_psola_process (AePsola *p, float *mono, int num_samples);
 
+static inline double ae_psola_clamp01 (double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
 static inline void ae_psola_set_edo (AePsola *p, int edo)          { p->edo = edo; }
 static inline void ae_psola_set_retune_ms (AePsola *p, double ms)  { p->retune_ms = ms < 0.0 ? 0.0 : ms; }
+static inline void ae_psola_set_transition_ms (AePsola *p, double ms) { p->transition_ms = ms < 0.0 ? 0.0 : ms; }
+static inline void ae_psola_set_amount (AePsola *p, double a)      { p->amount = ae_psola_clamp01 (a); }
+static inline void ae_psola_set_tolerance_cents (AePsola *p, double c) { p->tolerance_cents = c < 0.0 ? 0.0 : (c > 50.0 ? 50.0 : c); }
+static inline void ae_psola_set_stickiness (AePsola *p, double s)  { p->stickiness = ae_psola_clamp01 (s); }
+static inline void ae_psola_set_humanize (AePsola *p, double h)    { p->humanize = ae_psola_clamp01 (h); }
+static inline void ae_psola_set_reference (AePsola *p, double ref_hz, double period_cents)
+{
+    p->ref_hz       = ref_hz > 0.0 ? ref_hz : AE_REFERENCE_C0_HZ;
+    p->period_cents = (period_cents >= 600.0 && period_cents <= 2400.0) ? period_cents : 1200.0;
+}
 
 /* Set which scale degrees (0..count-1, 0 == C) the corrector may tune to. */
 static inline void ae_psola_set_enabled_degrees (AePsola *p, const bool *mask, int count)

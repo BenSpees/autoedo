@@ -61,6 +61,22 @@ static void test_tuning (void)
     bool none[AE_MAX_EDO] = { false };
     r = ae_quantize_to_edo_scale (440.0, 12, none);
     CHECK (fabs (r.target_hz - 440.0) < 1e-9, "empty mask falls back: got %f", r.target_hz);
+
+    /* Custom root anchor: with A as root at 27.5 Hz (A0), A4 = 440 sits
+       exactly on degree 4*12 of a 12-EDO grid. */
+    r = ae_quantize_to_edo_scale_ex (441.0, 12, NULL, 27.5, 1200.0);
+    CHECK (fabs (r.target_hz - 440.0) < 1e-9, "A-rooted grid: got %f", r.target_hz);
+    CHECK (r.degree == 48, "A-rooted degree: got %d", r.degree);
+
+    /* Octave stretch: period 1210 cents makes degree 12 land 10 cents high. */
+    r = ae_quantize_to_edo_scale_ex (2.0 * 27.5, 12, NULL, 27.5, 1210.0);
+    const double got_cents = 1200.0 * log2 (r.target_hz / 27.5);
+    CHECK (r.degree == 12, "stretched degree: got %d", r.degree);
+    CHECK (fabs (got_cents - 1210.0) < 1e-6, "stretched octave: %f cents", got_cents);
+
+    /* Old 3-arg helper still means C-anchored true octave. */
+    r = ae_quantize_to_edo_scale (440.0, 12, NULL);
+    CHECK (fabs (r.target_hz - 440.0) < 1e-9, "compat wrapper: got %f", r.target_hz);
 }
 
 static void test_yin (void)
@@ -82,9 +98,10 @@ static void test_yin (void)
 static void test_psola (void)
 {
     AePsola *p = calloc (1, sizeof (AePsola));
-    ae_psola_prepare (p, 48000.0, 512);
+    ae_psola_prepare (p, 48000.0, 512, 0.0, 0.0); /* default detection range */
     ae_psola_set_edo (p, 12);
-    ae_psola_set_retune_ms (p, 0.0); /* hard snap */
+    ae_psola_set_retune_ms (p, 0.0);     /* hard snap */
+    ae_psola_set_transition_ms (p, 0.0); /* and hard degree changes */
 
     /* 30-cents-flat A3 (220 Hz * 2^(-30/1200)) for 1 second. */
     const double f_in = 220.0 * pow (2.0, -30.0 / 1200.0);

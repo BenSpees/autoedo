@@ -5,8 +5,8 @@
 #include <string.h>
 
 #define AE_PI       3.14159265358979323846
-#define AE_MIN_FREQ 65.0    /* lowest detectable pitch (Hz) */
-#define AE_MAX_FREQ 1600.0  /* highest detectable pitch (Hz) */
+#define AE_MIN_FREQ 65.0    /* default lowest detectable pitch (Hz) */
+#define AE_MAX_FREQ 1600.0  /* default highest detectable pitch (Hz) */
 #define AE_GATE_RMS 0.0015  /* ~ -56 dBFS noise gate for detection */
 
 static double dclamp (double v, double lo, double hi)
@@ -14,15 +14,21 @@ static double dclamp (double v, double lo, double hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
-void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size)
+void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size,
+                       double min_hz, double max_hz)
 {
     p->fs        = sample_rate > 0.0 ? sample_rate : 44100.0;
     p->max_block = max_block_size > 16 ? max_block_size : 16;
 
+    if (min_hz < 20.0 || min_hz > 500.0)    min_hz = AE_MIN_FREQ;
+    if (max_hz < min_hz * 2.0 || max_hz > 4000.0) max_hz = AE_MAX_FREQ;
+    p->det_min_hz = min_hz;
+    p->det_max_hz = max_hz;
+
     /* Frame must be large enough that frame_size/2 >= the longest period we
-       want to detect (= fs / AE_MIN_FREQ), so the lowest detectable pitch is
+       want to detect (= fs / min_hz), so the lowest detectable pitch is
        independent of sample rate. Keep it a power of two. */
-    const int longest_period = (int) ceil (p->fs / AE_MIN_FREQ);
+    const int longest_period = (int) ceil (p->fs / min_hz);
     p->frame_size = 2048;
     while (p->frame_size < 2 * longest_period)
         p->frame_size <<= 1;
@@ -35,7 +41,7 @@ void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size)
 
     p->tau_max = p->frame_size / 2 < longest_period ? p->frame_size / 2 : longest_period;
     if (p->tau_max < 64) p->tau_max = 64;
-    p->tau_min = (int) floor (p->fs / AE_MAX_FREQ);
+    p->tau_min = (int) floor (p->fs / max_hz);
     if (p->tau_min < 2) p->tau_min = 2;
     if (p->tau_min > p->tau_max - 1) p->tau_min = p->tau_max - 1;
 
@@ -58,12 +64,16 @@ void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size)
     p->wet_win = calloc ((size_t) p->buf_size, sizeof (float));
     p->frame   = calloc ((size_t) p->frame_size, sizeof (float));
 
-    ae_yin_prepare (&p->detector, p->fs, p->frame_size, AE_MIN_FREQ, AE_MAX_FREQ);
+    ae_yin_prepare (&p->detector, p->fs, p->frame_size, min_hz, max_hz);
 
-    if (p->edo == 0)
+    if (p->edo == 0) /* first prepare on a zeroed struct: neutral defaults */
     {
-        p->edo       = 12;
-        p->retune_ms = 20.0;
+        p->edo           = 12;
+        p->retune_ms     = 20.0;
+        p->transition_ms = 50.0;
+        p->amount        = 1.0;
+        p->ref_hz        = AE_REFERENCE_C0_HZ;
+        p->period_cents  = 1200.0;
     }
 
     ae_psola_reset (p);
@@ -86,6 +96,10 @@ void ae_psola_reset (AePsola *p)
     p->primed         = false;
     p->out_cents      = 0.0;
     p->v_gain         = 0.0;
+    p->target_j       = 0;
+    p->target_valid   = false;
+    p->in_transition  = false;
+    p->sustain_s      = 0.0;
 
     for (int i = 0; i < AE_MAX_EDO; ++i)
         p->enabled_deg[i] = true; /* default: every degree usable */
@@ -129,23 +143,86 @@ static void run_detection (AePsola *p)
         p->current_period = dclamp (p->fs / res.frequency_hz,
                                     (double) p->tau_min, (double) p->tau_max);
 
-        const double detected_cents = 1200.0 * log2 (res.frequency_hz / AE_REFERENCE_C0_HZ);
-        const AeTuningResult t      = ae_quantize_to_edo_scale (res.frequency_hz, p->edo,
-                                                                p->enabled_deg);
-        const double target_cents   = 1200.0 * log2 (t.target_hz / AE_REFERENCE_C0_HZ);
+        const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
+        const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
+
+        const double detected_cents = 1200.0 * log2 (res.frequency_hz / ref);
+        const double steps          = ae_steps_from_ref (res.frequency_hz, p->edo, ref, period);
+
+        AeTuningResult t = ae_quantize_to_edo_scale_ex (res.frequency_hz, p->edo,
+                                                        p->enabled_deg, ref, period);
+        long long cand = t.degree;
+
+        /* Stickiness (hysteresis): stay on the previous target until the
+           detected pitch has travelled past the midpoint toward the new
+           candidate by an extra `stickiness` fraction of the half-gap.
+           Kills degree flicker when the step is smaller than vibrato. */
+        if (p->target_valid && cand != p->target_j && p->stickiness > 0.0)
+        {
+            const int last_deg = (int) (((p->target_j % p->edo) + p->edo) % p->edo);
+            if (p->enabled_deg[last_deg]
+                && fabs (steps - (double) p->target_j)
+                     < (0.5 + 0.5 * p->stickiness) * fabs ((double) (cand - p->target_j)))
+                cand = p->target_j;
+        }
+
+        const double target_hz    = ae_degree_hz ((long) cand, p->edo, ref, period);
+        const double target_cents = 1200.0 * log2 (target_hz / ref);
 
         atomic_store_explicit (&p->detected_hz_out, (float) res.frequency_hz, memory_order_relaxed);
-        atomic_store_explicit (&p->target_hz_out,   (float) t.target_hz,      memory_order_relaxed);
+        atomic_store_explicit (&p->target_hz_out,   (float) target_hz,        memory_order_relaxed);
 
         /* On a fresh onset, start from the pitch actually sung so the
            correction glides from there (retune speed) instead of jumping
            from a stale value. */
         if (! p->voiced || ! p->primed)
-            p->out_cents = detected_cents;
+        {
+            p->out_cents     = detected_cents;
+            p->target_valid  = false;
+            p->in_transition = false;
+            p->sustain_s     = 0.0;
+        }
 
-        const double tau_sec = p->retune_ms / 1000.0;
+        if (! p->target_valid || cand != p->target_j)
+        {
+            /* New target degree: glide there at the transition speed. */
+            p->in_transition = p->target_valid; /* onset itself uses retune speed */
+            p->target_j      = cand;
+            p->target_valid  = true;
+            p->sustain_s     = 0.0;
+        }
+        else
+        {
+            p->sustain_s += elapsed;
+        }
+
+        /* Tolerance: dead zone around the target where the pitch is left
+           alone (preserves vibrato instead of fighting it). Then Amount
+           scales whatever correction remains. */
+        double eff_cents = target_cents;
+        if (fabs (detected_cents - target_cents) <= p->tolerance_cents)
+            eff_cents = detected_cents;
+        eff_cents = detected_cents + (eff_cents - detected_cents) * p->amount;
+
+        /* Retune speed within a note, transition speed between degrees,
+           and Humanize relaxes the retune on long-held notes. */
+        double tau_ms = p->retune_ms;
+        if (p->in_transition)
+        {
+            tau_ms = p->transition_ms;
+            const double step_c = ae_edo_step_cents_ex (p->edo, period);
+            if (fabs (p->out_cents - target_cents) < dclamp (0.1 * step_c, 1.0, 5.0))
+                p->in_transition = false; /* arrived */
+        }
+        else if (p->humanize > 0.0)
+        {
+            const double sustain = p->sustain_s < 1.0 ? p->sustain_s : 1.0;
+            tau_ms *= 1.0 + 3.0 * p->humanize * sustain;
+        }
+
+        const double tau_sec = tau_ms / 1000.0;
         const double alpha   = (tau_sec <= 0.0) ? 1.0 : (1.0 - exp (-elapsed / tau_sec));
-        p->out_cents += (target_cents - p->out_cents) * alpha;
+        p->out_cents += (eff_cents - p->out_cents) * alpha;
 
         double beta = pow (2.0, (p->out_cents - detected_cents) / 1200.0);
         beta = dclamp (beta, 0.5, 2.0); /* safety net; correction ratios stay ~1 */
@@ -156,6 +233,8 @@ static void run_detection (AePsola *p)
     else
     {
         p->synth_period = p->current_period; /* identity timeline; crossfade handles the rest */
+        p->target_valid = false;
+        p->sustain_s    = 0.0;
     }
 
     p->voiced = now_voiced;
