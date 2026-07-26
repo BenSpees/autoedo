@@ -62,7 +62,7 @@
   #readout { margin-left: auto; font-size: 14px; white-space: nowrap; }
   #readout .in  { color: var(--text); }
   #readout .tgt { color: var(--amber); font-weight: 600; }
-  #readout.unvoiced { color: var(--dim); }
+  #readout.unvoiced { color: var(--dim); opacity: .4; }
   #readout.unvoiced .in, #readout.unvoiced .tgt { color: var(--dim); font-weight: 400; }
   /* ── ruler ──────────────────────────────────────────────────────────── */
   #ruler {
@@ -112,11 +112,13 @@
   #rfooter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   #maskmeta { margin-left: auto; color: var(--dim); font-size: 12px;
               font-variant-numeric: tabular-nums; }
-  #hintbar { display: flex; align-items: center; gap: 8px; margin-top: 6px;
-             color: var(--dim); font-size: 12px; }
+  #hintbar { display: flex; align-items: center; gap: 8px; margin-top: 4px;
+             color: var(--dim); font-size: 11px; opacity: .5; }
+  .jilabel.hot { color: var(--teal); opacity: 1 !important; font-weight: 700; }
+  #lane-ji .jilabel { opacity: .55; }
   /* ── knob strip ─────────────────────────────────────────────────────── */
-  #knobstrip { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap;
-               margin-top: 16px; }
+  #knobstrip { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;
+               margin-top: 16px; justify-content: space-between; }
   .knob { display: flex; flex-direction: column; align-items: center; gap: 2px;
           width: 64px; cursor: ns-resize; user-select: none; }
   .dial { width: 44px; height: 44px; border-radius: 50%; background: var(--panel2);
@@ -179,12 +181,21 @@
   /* ── harmony strip ──────────────────────────────────────────────────── */
   #harmline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   #harm-chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  #harm-chips[hidden] { display: none; }
   .hchip { padding: 2px 9px; border-radius: 10px; font-size: 12px;
            font-variant-numeric: tabular-nums; border: 1px solid; background: none; }
-  #harm-pods { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-  .pod { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
-         display: flex; flex-direction: column; gap: 6px; min-width: 128px;
+  /* five pods, one row, guaranteed — below the breakpoint they become
+     compact list rows, never wrapping cards */
+  #harm-pods { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+               gap: 8px; margin-top: 10px; }
+  .pod { border: 1px solid var(--line); border-radius: 10px; padding: 7px 9px;
+         display: flex; flex-direction: column; gap: 5px; min-width: 0;
          background: var(--panel); }
+  @media (max-width: 660px) {
+    #harm-pods { grid-template-columns: 1fr; }
+    .pod { flex-direction: row; align-items: center; }
+    .pod select { width: auto; flex: 1; }
+  }
   .pod.sel { box-shadow: 0 0 0 1.5px var(--pc); }
   .pod .phead { display: flex; align-items: center; gap: 6px; cursor: pointer;
                 font-size: 11px; letter-spacing: 1px; color: var(--pc);
@@ -206,10 +217,13 @@
   .msbtn.on { background: var(--pc); color: #17171c; border-color: var(--pc);
               font-weight: 700; }
   .podval { font-size: 10px; color: var(--dim); font-variant-numeric: tabular-nums; }
-  /* ghost ticks on the ruler (per-voice colors, gold when on the root) */
-  .gtick { position: absolute; top: 1px; width: 8px; height: 8px; border-radius: 50%;
+  /* voice marks on the ruler: a full-height tick through the degree lane,
+     with stacked color chips when voices dedupe onto one degree */
+  .gtick { position: absolute; top: 0; bottom: 0; width: 2px;
            transform: translateX(-50%); pointer-events: none;
-           box-shadow: 0 0 6px 1px; }
+           display: flex; flex-direction: column; align-items: center;
+           padding-top: 2px; gap: 2px; overflow: visible; }
+  .gchip { width: 7px; height: 7px; border-radius: 2px; flex: none; }
   body.perform #harmline > :not(#harm-chips):not(#harm-power) { display: none; }
   body.perform #harm-pods { display: none !important; }
 </style>
@@ -363,8 +377,8 @@
   <!-- harmony strip (collapsed to one line by default) -->
   <div id="harmstrip" class="band">
     <div id="harmline">
-      <button id="harm-expand" class="ghost" title="show the voice pods">&#9656;</button>
-      <button id="harm-power" title="harmony on/off">&#9211; Harmony</button>
+      <button id="harm-power" title="harmony on/off">&#9211;</button>
+      <button id="harm-expand" class="ghost" title="show the voice pods">Harmony &#9656;</button>
       <span class="seg" id="harm-lock">
         <button data-lock="off">Off</button><button data-lock="mask">Mask</button><button data-lock="ji">JI</button>
       </span>
@@ -598,6 +612,7 @@ function buildRuler() {
     shades.appendChild(s);
   }
 
+  $('ghost-layer').dataset.key = ''; // lugs are fresh: force voice-mark redraw
   updateRulerState();
 }
 
@@ -671,6 +686,17 @@ $('lane-deg').addEventListener('pointerdown', ev => {
   updateRulerState();
 });
 $('lane-deg').addEventListener('pointermove', ev => {
+  // contrast on demand: brighten the JI fraction nearest the hovered degree
+  if (cfg && !$('lane-ji').hidden) {
+    const cents = degFromEvent(ev) * stepCents();
+    let best = null, bestD = 1e9;
+    document.querySelectorAll('#lane-ji .jilabel').forEach(el => {
+      el.classList.remove('hot');
+      const d = Math.abs(parseFloat(el.style.left) - xPct(cents));
+      if (d < bestD) { bestD = d; best = el; }
+    });
+    if (best) best.classList.add('hot');
+  }
   if (!painting) return;
   const d = degFromEvent(ev);
   if (!paintTouched.has(d)) {
@@ -679,6 +705,9 @@ $('lane-deg').addEventListener('pointermove', ev => {
     degrees[d] = paintVal;
     updateRulerState();
   }
+});
+$('lane-deg').addEventListener('pointerleave', () => {
+  document.querySelectorAll('#lane-ji .jilabel.hot').forEach(el => el.classList.remove('hot'));
 });
 window.addEventListener('pointerup', () => {
   if (!painting) return;
@@ -940,13 +969,24 @@ let selPod = -1;      // pod selected for learn-from-ruler
 let podEls = [];
 
 function harmCfg() { // defaults until the first status lands
-  return cfg || { harmOn: false, harmLock: 'mask', hm: [0,0,0,0,0], hx: [0,0,0,0,0],
+  return cfg || { edo: 12, harmOn: false, harmLock: 'mask', hm: [0,0,0,0,0], hx: [0,0,0,0,0],
                   hg: [0,0,0,0,0], hp: [0,0,0,0,0], hMute: [0,0,0,0,0], hSolo: [0,0,0,0,0] };
 }
+// Interval name for a step's cents value: nearest 12-TET interval name when
+// within ±25¢ (P5 for 705.9¢ in 17-EDO), otherwise nothing (bare step).
+const IV_NAMES = [[0,'P1'],[100,'m2'],[200,'M2'],[300,'m3'],[400,'M3'],[500,'P4'],
+                  [600,'TT'],[700,'P5'],[800,'m6'],[900,'M6'],[1000,'m7'],[1100,'M7'],[1200,'P8']];
+function intervalName(cents) {
+  for (const [c, n] of IV_NAMES)
+    if (Math.abs(cents - c) <= 25) return n;
+  return '';
+}
+const EXT_LABEL = ['', ' +8ve', ' +15ma'];
 function voiceLabel(v, c) {
   const iv = c.hm[v];
   if (!iv) return 'None';
-  return `${iv > 0 ? '↑' : '↓'}${Math.abs(iv)}${c.hx[v] ? `+${c.hx[v]}8ve` : ''}`;
+  // thin space between arrow and number; extension as +8ve / +15ma
+  return `${iv > 0 ? '↑' : '↓'} ${Math.abs(iv)}${EXT_LABEL[c.hx[v]] || ''}`;
 }
 
 function miniKnob(host, color, opts) { // {min,max,get,fmt,onset}
@@ -987,10 +1027,14 @@ function rebuildIntervalOptions(sel) {
     sel.appendChild(o);
   };
   add(0, 'None');
-  for (let n = 1; n <= edo; n++)
-    add(n, `↑${n}${n === edo ? ' (equave)' : ''} · ${(n * stepCents()).toFixed(0)}¢`);
-  for (let n = 1; n <= edo; n++)
-    add(-n, `↓${n}${n === edo ? ' (equave)' : ''} · −${(n * stepCents()).toFixed(0)}¢`);
+  // label only in the pool (P5-style names when they exist); cents live on
+  // the pod's readout line
+  const lbl = (n, arrow) => {
+    const name = n === edo ? '8ve' : intervalName(n * stepCents());
+    return `${arrow} ${n}${name ? ` ${name}` : ''}`;
+  };
+  for (let n = 1; n <= edo; n++) add(n, lbl(n, '↑'));
+  for (let n = 1; n <= edo; n++) add(-n, lbl(n, '↓'));
   sel.value = cur !== '' && Math.abs(+cur) <= edo ? cur : 0;
 }
 
@@ -1065,8 +1109,11 @@ function buildHarmPods() {
 
     const updVal = () => {
       const cc = harmCfg();
+      const iv = cc.hm[v];
+      const eff = iv ? iv + Math.sign(iv) * cc.hx[v] * cc.edo : 0;
+      const cents = iv ? ` · ${eff > 0 ? '+' : '−'}${Math.abs(eff * stepCents()).toFixed(1)}¢` : '';
       val.textContent = `${cc.hg[v].toFixed(1)} dB · pan ${cc.hp[v] === 0 ? 'C'
-        : (cc.hp[v] < 0 ? 'L' : 'R') + Math.abs(Math.round(cc.hp[v] * 100))}`;
+        : (cc.hp[v] < 0 ? 'L' : 'R') + Math.abs(Math.round(cc.hp[v] * 100))}${cents}`;
     };
     updVal();
     host.appendChild(pod);
@@ -1080,8 +1127,10 @@ function syncHarm() {
   $('harm-power').classList.toggle('on', !!c.harmOn);
   document.querySelectorAll('#harm-lock button').forEach(b =>
     b.classList.toggle('on', b.dataset.lock === c.harmLock));
-  // collapsed chips: what the voices are, not just how many
+  // collapsed chips: what the voices are, not just how many — and ONLY when
+  // collapsed (expanded shows the pods; never the same state twice)
   const chips = $('harm-chips');
+  chips.hidden = ! $('harm-pods').hidden;
   const key = JSON.stringify([c.harmOn, c.hm, c.hx, c.hMute]);
   if (chips.dataset.key !== key) {
     chips.dataset.key = key;
@@ -1113,33 +1162,68 @@ document.querySelectorAll('#harm-lock button').forEach(b => {
 $('harm-expand').onclick = () => {
   const open = $('harm-pods').hidden;
   $('harm-pods').hidden = !open;
-  $('harm-expand').innerHTML = open ? '&#9662;' : '&#9656;';
+  $('harm-expand').innerHTML = open ? 'Harmony &#9662;' : 'Harmony &#9656;';
+  syncHarm(); // chips show only while collapsed
 };
 
-// ghost ticks: the whole chord as a constellation of colored glows
+// Voice marks on the ruler: one full-height tick through the degree lane per
+// sounding pitch class, stacked color chips when voices dedupe onto it, and a
+// colored border-glow on the target lug (gold override on root landings).
+let glowedLugs = [];
 function updateGhosts(degs) {
   const layer = $('ghost-layer');
   const edo = cfg ? cfg.edo : 12;
-  const key = JSON.stringify([degs, edo]);
+  const c = harmCfg();
+  const key = JSON.stringify([degs, edo, c.hMute, c.hSolo]);
   if (layer.dataset.key === key) return;
   layer.dataset.key = key;
   layer.innerHTML = '';
+  for (const lug of glowedLugs) lug.style.boxShadow = '';
+  glowedLugs = [];
   if (!degs) return;
-  const top = $('lane-deg').offsetTop + 2;
-  const seen = {};
+
+  const lane = $('lane-deg');
+  const anySolo = c.hSolo.some(x => x);
+
+  // group voices by landing pitch class
+  const byPc = {};
   for (let v = 0; v < 5; v++) {
     if (degs[v] === null || degs[v] === undefined) continue;
     const pc = ((degs[v] % edo) + edo) % edo;
-    const stack = seen[pc] || 0;   // deduped voices: stacked chips, not overlap
-    seen[pc] = stack + 1;
+    (byPc[pc] = byPc[pc] || []).push(v);
+  }
+
+  for (const [pcs, voices] of Object.entries(byPc)) {
+    const pc = +pcs;
+    const goldWin = pc === 0; // gold override beats the voice color on root
+    const tickCol = goldWin ? 'var(--gold)' : VOICE_COLORS[voices[0]];
+    // every voice on this pc silent (muted / not soloed) -> dim the mark
+    const silent = voices.every(v => c.hMute[v] || (anySolo && !c.hSolo[v]));
+
     const g = document.createElement('div');
     g.className = 'gtick';
-    const col = pc === 0 ? 'var(--gold)' : VOICE_COLORS[v]; // gold wins on root
-    g.style.left = `calc(${xPct(pc * stepCents())}% + ${stack * 9}px)`;
-    g.style.top = top + 'px';
-    g.style.background = col;
-    g.style.boxShadow = `0 0 6px 1px ${col === 'var(--gold)' ? '#c9a22790' : col}`;
+    g.style.left = xPct(pc * stepCents()) + '%';
+    g.style.top = lane.offsetTop + 'px';
+    g.style.bottom = 'auto';
+    g.style.height = lane.offsetHeight + 'px';
+    g.style.background = tickCol;
+    g.style.opacity = silent ? 0.25 : 1;
+    if (voices.length > 1) // dedupe: one tick, stacked color chips
+      for (const v of voices) {
+        const chip = document.createElement('div');
+        chip.className = 'gchip';
+        chip.style.background = VOICE_COLORS[v];
+        g.appendChild(chip);
+      }
     layer.appendChild(g);
+
+    // lug border-glow in the voice color (amber active target wins)
+    if (pc !== activeDeg && lugEls[pc]) {
+      lugEls[pc].style.boxShadow =
+        `0 0 7px 2px ${goldWin ? '#c9a227aa' : VOICE_COLORS[voices[0]]}`;
+      if (silent) lugEls[pc].style.boxShadow = '';
+      else glowedLugs.push(lugEls[pc]);
+    }
   }
 }
 
@@ -1281,6 +1365,21 @@ function commitEdo(v) {
     buildRuler();
     rebuildPresetList();                                 // catalog is per-EDO
     podEls.forEach(p => rebuildIntervalOptions(p.sel));  // so is the interval pool
+    // voice intervals keep their step counts, but never silently exceed the
+    // new equave — clamp with a toast
+    const hm = harmCfg().hm.slice();
+    const clamped = [];
+    for (let i = 0; i < 5; i++)
+      if (Math.abs(hm[i]) > v) {
+        hm[i] = Math.sign(hm[i]) * v;
+        clamped.push(i + 1);
+      }
+    if (clamped.length) {
+      post.hm = hm;
+      cfg.hm = hm; // mirror now so the pod sync below shows the clamped value
+      showToast(`Voice ${clamped.join(', ')} interval clamped to the ${v}-EDO equave`);
+    }
+    syncHarm();
   }
   rebuildChips();
   schedulePost(post);

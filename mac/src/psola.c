@@ -325,8 +325,7 @@ static void run_detection (AePsola *p)
             p->h_active[v] = false;
             int deg_out = AE_HARM_DEG_OFF;
 
-            if (p->harm_on && hv->interval != 0 && ! hv->mute
-                && ! (any_solo && ! hv->solo))
+            if (p->harm_on && hv->interval != 0)
             {
                 /* eff = interval + sign(interval) * extOct * equaveSteps */
                 const int eff = hv->interval
@@ -339,26 +338,31 @@ static void run_detection (AePsola *p)
                 if (p->harm_lock == 2)
                     ghost_cents = ji_snap_cents (ghost_cents, period);
 
+                /* Muted / solo-suppressed voices still report their degree so
+                   the UI can dim their ruler tick instead of hiding it. */
                 deg_out = (int) lround (ghost_cents * (double) p->edo / period);
 
-                /* Dedupe: voices landing on one pitch must not double up.
-                   The deduped voice still reports its degree for the UI. */
-                bool dup = false;
-                for (int u = 0; u < used_n; ++u)
-                    if (fabs (ghost_cents - used_cents[u]) < 0.5)
-                        dup = true;
-
-                if (! dup)
+                if (! hv->mute && ! (any_solo && ! hv->solo))
                 {
-                    used_cents[used_n++] = ghost_cents;
+                    /* Dedupe: voices landing on one pitch must not double up.
+                       The deduped voice still reports its degree for the UI. */
+                    bool dup = false;
+                    for (int u = 0; u < used_n; ++u)
+                        if (fabs (ghost_cents - used_cents[u]) < 0.5)
+                            dup = true;
 
-                    const double voice_cents = p->out_cents + (ghost_cents - target_cents);
-                    double hbeta = pow (2.0, (voice_cents - detected_cents) / 1200.0);
-                    /* keep the synthesis period coverable by the grain width */
-                    const double beta_min = p->current_period / (double) p->tau_max;
-                    hbeta = dclamp (hbeta, beta_min > 0.25 ? beta_min : 0.25, 4.0);
-                    p->h_period[v] = p->current_period / hbeta;
-                    p->h_active[v] = true;
+                    if (! dup)
+                    {
+                        used_cents[used_n++] = ghost_cents;
+
+                        const double voice_cents = p->out_cents + (ghost_cents - target_cents);
+                        double hbeta = pow (2.0, (voice_cents - detected_cents) / 1200.0);
+                        /* keep the synthesis period coverable by the grain width */
+                        const double beta_min = p->current_period / (double) p->tau_max;
+                        hbeta = dclamp (hbeta, beta_min > 0.25 ? beta_min : 0.25, 4.0);
+                        p->h_period[v] = p->current_period / hbeta;
+                        p->h_active[v] = true;
+                    }
                 }
             }
             atomic_store_explicit (&p->h_deg_out[v], deg_out, memory_order_relaxed);
