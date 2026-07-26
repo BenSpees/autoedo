@@ -135,6 +135,8 @@ static void config_defaults (App *app)
     }
     c->params.harm_mute = 0;
     c->params.harm_solo = 0;
+    c->params.midi_mode = false;
+    c->midi_source[0]   = '\0'; /* all MIDI inputs */
 }
 
 /* Derive the engine-facing reference/period/detection-range values from the
@@ -190,11 +192,14 @@ static void config_json (const App *app, char *out, size_t cap)
     /* Harmony (Xentar hm/hx field packing, plus gains/pans/mute/solo). */
     char harm[512];
     static const char *lock_names[] = { "off", "mask", "ji" };
-    snprintf (harm, sizeof (harm), ",\"harmOn\":%s,\"harmLock\":\"%s\"",
+    snprintf (harm, sizeof (harm), ",\"harmOn\":%s,\"harmLock\":\"%s\",\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
-                           ? c->params.harm_lock : 0]);
+                           ? c->params.harm_lock : 0],
+              c->params.midi_mode ? "true" : "false");
     strncat (out, harm, cap - strlen (out) - 1);
+    ae_json_escape_append (out, cap, c->midi_source);
+    strncat (out, "\"", cap - strlen (out) - 1);
     const char *keys[4] = { "hm", "hx", "hg", "hp" };
     for (int k = 0; k < 4; ++k)
     {
@@ -333,6 +338,16 @@ static bool config_apply_json (App *app, const char *json)
     if (ae_json_get_string (json, "scaleName", str, sizeof (str)))
         snprintf (app->scale_name, sizeof (app->scale_name), "%.63s", str);
 
+    /* MIDI Harmony: the mode is live; the source binding needs a restart. */
+    if (ae_json_get_bool (json, "midiMode", &b))
+        c->params.midi_mode = b;
+    if (ae_json_get_string (json, "midiSource", str, sizeof (str))
+        && strcmp (str, c->midi_source) != 0)
+    {
+        snprintf (c->midi_source, sizeof (c->midi_source), "%s", str);
+        restart = true;
+    }
+
     unsigned char flags[AE_MAX_EDO];
     const int n = ae_json_get_flag_array (json, "degrees", flags, AE_MAX_EDO);
     if (n >= 0)
@@ -445,19 +460,34 @@ static void status_refresh (App *app)
     }
     snprintf (hdeg + hn, sizeof (hdeg) - hn, "]");
 
+    /* held MIDI notes as note numbers */
+    char midi[512];
+    size_t mn = 0;
+    mn += (size_t) snprintf (midi + mn, sizeof (midi) - mn, "[");
+    int mcount = 0;
+    for (int n = 0; n < 128 && mn < sizeof (midi) - 8; ++n)
+    {
+        const bool on = n < 64 ? ((st.midi_held_lo >> n) & 1u) != 0
+                               : ((st.midi_held_hi >> (n - 64)) & 1u) != 0;
+        if (on)
+            mn += (size_t) snprintf (midi + mn, sizeof (midi) - mn, "%s%d",
+                                     mcount++ ? "," : "", n);
+    }
+    snprintf (midi + mn, sizeof (midi) - mn, "]");
+
     snprintf (buf, sizeof (buf),
         "{\"running\":%s,\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,"
         "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"voiced\":%s,"
-        "\"harmDeg\":%s,"
+        "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", err,
         st.input_rate, st.output_rate,
         st.latency_samples, lat_ms,
         (double) st.detected_hz, (double) st.target_hz, st.voiced ? "true" : "false",
-        hdeg,
+        hdeg, midi,
         in_name, out_name,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
@@ -517,6 +547,15 @@ static void api_devices (App *app, AeHttpResponse *resp)
                   devs[i].is_default_input ? "true" : "false",
                   devs[i].is_default_output ? "true" : "false");
         strncat (body, item, cap - strlen (body) - 1);
+    }
+    strncat (body, "],\"midiSources\":[", cap - strlen (body) - 1);
+    char midi_names[16][AE_NAME_MAX];
+    const int mn = ae_audio_list_midi_sources (midi_names, 16);
+    for (int i = 0; i < mn; ++i)
+    {
+        strncat (body, i > 0 ? ",\"" : "\"", cap - strlen (body) - 1);
+        ae_json_escape_append (body, cap, midi_names[i]);
+        strncat (body, "\"", cap - strlen (body) - 1);
     }
     strncat (body, "]}", cap - strlen (body) - 1);
     free (devs);
@@ -579,6 +618,27 @@ static void handle_request (void *user, const char *method, const char *path,
     if (strcmp (method, "POST") == 0 && strcmp (path, "/api/config") == 0)
     {
         api_config_post (app, body, resp);
+        return;
+    }
+    if (strcmp (method, "POST") == 0 && strcmp (path, "/api/midi") == 0)
+    {
+        /* Virtual held notes: {"notes":[60,64,67]}. Merged (OR) with any
+           hardware MIDI input; also how tests drive MIDI Harmony. */
+        double notes[32];
+        const int n = ae_json_get_num_array (body, "notes", notes, 32);
+        uint64_t lo = 0, hi = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            const int note = (int) notes[i];
+            if (note >= 0 && note < 64)        lo |= 1ull << note;
+            else if (note >= 64 && note < 128) hi |= 1ull << (note - 64);
+        }
+        pthread_mutex_lock (&app->lock);
+        if (app->engine != NULL)
+            ae_audio_engine_set_midi_notes (app->engine, lo, hi);
+        pthread_mutex_unlock (&app->lock);
+        status_refresh (app);
+        api_status (app, resp);
         return;
     }
     if (strcmp (method, "POST") == 0 && strcmp (path, "/api/restart") == 0)

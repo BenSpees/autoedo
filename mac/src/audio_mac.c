@@ -11,6 +11,7 @@
 
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
+#include <CoreMIDI/CoreMIDI.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -215,9 +216,119 @@ struct AeAudioEngine
     char in_name[AE_NAME_MAX];
     char out_name[AE_NAME_MAX];
 
+    /* MIDI input (CoreMIDI callback thread -> audio thread). */
+    MIDIClientRef    midi_client;
+    MIDIPortRef      midi_port;
+    _Atomic uint64_t hw_midi_lo;
+    _Atomic uint64_t hw_midi_hi;
+
     /* Live parameters (any thread -> audio thread). */
     AeAtomicParams params;
 };
+
+/* ------------------------------------------------------------------- MIDI */
+
+static bool midi_source_name (MIDIEndpointRef src, char *out, size_t cap)
+{
+    CFStringRef s = NULL;
+    if (MIDIObjectGetStringProperty (src, kMIDIPropertyDisplayName, &s) != noErr
+        || s == NULL)
+        return false;
+    const bool ok = cfstring_to_utf8 (s, out, cap);
+    CFRelease (s);
+    return ok;
+}
+
+int ae_audio_list_midi_sources (char out[][AE_NAME_MAX], int max)
+{
+    const ItemCount n = MIDIGetNumberOfSources();
+    int m = 0;
+    for (ItemCount i = 0; i < n && m < max; ++i)
+        if (midi_source_name (MIDIGetSource (i), out[m], AE_NAME_MAX))
+            ++m;
+    return m;
+}
+
+static void midi_note (AeAudioEngine *e, int note, bool on)
+{
+    if (note < 0 || note > 127)
+        return;
+    _Atomic uint64_t *word = note < 64 ? &e->hw_midi_lo : &e->hw_midi_hi;
+    const uint64_t bit = 1ull << (note & 63);
+    if (on)
+        atomic_fetch_or_explicit (word, bit, memory_order_relaxed);
+    else
+        atomic_fetch_and_explicit (word, ~bit, memory_order_relaxed);
+}
+
+static void midi_read (const MIDIPacketList *pktlist, void *ref_con, void *src_ref)
+{
+    (void) src_ref;
+    AeAudioEngine *e = ref_con;
+    const MIDIPacket *pkt = &pktlist->packet[0];
+    for (UInt32 i = 0; i < pktlist->numPackets; ++i)
+    {
+        const Byte *d = pkt->data;
+        UInt16 len = pkt->length;
+        UInt16 k = 0;
+        Byte status = 0;
+        while (k < len)
+        {
+            if (d[k] & 0x80)
+                status = d[k++];
+            if (status == 0)
+            {
+                ++k;
+                continue;
+            }
+            const Byte hi = status & 0xF0;
+            if (hi == 0x90 && k + 1 < len)      /* note on (vel 0 = off) */
+            {
+                midi_note (e, d[k], d[k + 1] > 0);
+                k += 2;
+            }
+            else if (hi == 0x80 && k + 1 < len) /* note off */
+            {
+                midi_note (e, d[k], false);
+                k += 2;
+            }
+            else if (hi == 0xC0 || hi == 0xD0)  /* 1-data-byte messages */
+                k += 1;
+            else if (hi >= 0x80 && hi <= 0xE0)  /* other 2-data-byte messages */
+                k += 2;
+            else                                 /* system: skip byte-wise */
+                ++k;
+        }
+        pkt = MIDIPacketNext (pkt);
+    }
+}
+
+/* Connect MIDI input. Non-fatal: audio runs fine without it. */
+static void midi_setup (AeAudioEngine *e, const char *source_name)
+{
+    if (MIDIClientCreate (CFSTR ("AutoEDO"), NULL, NULL, &e->midi_client) != noErr)
+        return;
+    if (MIDIInputPortCreate (e->midi_client, CFSTR ("AutoEDO In"), midi_read,
+                             e, &e->midi_port) != noErr)
+    {
+        MIDIClientDispose (e->midi_client);
+        e->midi_client = 0;
+        return;
+    }
+    const ItemCount n = MIDIGetNumberOfSources();
+    for (ItemCount i = 0; i < n; ++i)
+    {
+        MIDIEndpointRef src = MIDIGetSource (i);
+        if (source_name != NULL && source_name[0] != '\0')
+        {
+            char name[AE_NAME_MAX];
+            if (! midi_source_name (src, name, sizeof (name))
+                || strcmp (name, source_name) != 0)
+                continue; /* a named source: connect only that one */
+        }
+        MIDIPortConnectSource (e->midi_port, src, NULL);
+    }
+}
 
 static OSStatus input_cb (void *ref, AudioUnitRenderActionFlags *flags,
                           const AudioTimeStamp *ts, UInt32 bus, UInt32 n_frames,
@@ -281,7 +392,10 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     /* Apply live parameters, then correct. */
     bool  bypass = false;
     float gain   = 1.0f;
-    ae_atomic_params_apply (&e->params, &e->psola, &bypass, &gain);
+    ae_atomic_params_apply (&e->params, &e->psola,
+                            atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
+                            atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
+                            &bypass, &gain);
     ae_psola_process (&e->psola, e->proc, e->harm_l, e->harm_r, (int) n);
 
     const float *src = bypass ? e->dry : e->proc;
@@ -341,6 +455,8 @@ static AudioStreamBasicDescription float_format (double rate, int channels)
 
 static void engine_teardown (AeAudioEngine *e)
 {
+    if (e->midi_client != 0)
+        MIDIClientDispose (e->midi_client); /* disposes the port too */
     if (e->in_unit != NULL)
     {
         if (e->in_running)
@@ -371,6 +487,14 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)
         ae_atomic_params_store (&e->params, p);
 }
 
+void ae_audio_engine_set_midi_notes (AeAudioEngine *e, uint64_t lo, uint64_t hi)
+{
+    if (e == NULL)
+        return;
+    atomic_store_explicit (&e->params.vmidi_lo, lo, memory_order_relaxed);
+    atomic_store_explicit (&e->params.vmidi_hi, hi, memory_order_relaxed);
+}
+
 void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
 {
     memset (out, 0, sizeof (*out));
@@ -385,6 +509,10 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->voiced          = ae_psola_voiced (&e->psola);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_psola_harm_degree (&e->psola, v);
+    out->midi_held_lo = atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed)
+                      | atomic_load_explicit (&e->params.vmidi_lo, memory_order_relaxed);
+    out->midi_held_hi = atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed)
+                      | atomic_load_explicit (&e->params.vmidi_hi, memory_order_relaxed);
     snprintf (out->input_name,  sizeof (out->input_name),  "%s", e->in_name);
     snprintf (out->output_name, sizeof (out->output_name), "%s", e->out_name);
 }
@@ -584,6 +712,8 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         return NULL;
     }
     e->out_running = true;
+
+    midi_setup (e, cfg->midi_source); /* non-fatal */
 
     return e;
 }

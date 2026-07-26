@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "tuning.h"
 #include "yin.h"
@@ -83,6 +84,16 @@ typedef struct
     bool      in_transition; /* gliding between two different degrees */
     double    sustain_s;     /* seconds the current degree has been held */
 
+    /* MIDI Harmony mode ------------------------------------------------------ */
+    /* While any note is held, the held notes override the mask: correction
+       snaps to the nearest held note (absolute degree) and harmony's Mask
+       lock quantizes within the held pitch classes. MIDI note 60 (middle C)
+       is the pivot, mapping to degree 4*edo (the root, four equaves up);
+       each MIDI semitone is one EDO step. No notes held = normal behavior. */
+    bool     midi_mode;
+    uint64_t midi_lo; /* held-note bitset, notes 0..63 */
+    uint64_t midi_hi; /* notes 64..127 */
+
     /* Harmony voices -------------------------------------------------------- */
     bool        harm_on;
     int         harm_lock; /* 0 = off, 1 = mask, 2 = JI landmarks */
@@ -138,6 +149,15 @@ void ae_psola_process (AePsola *p, float *mono, float *harm_l, float *harm_r,
 /* Configure the harmony voices (audio thread, between blocks). */
 void ae_psola_set_harmony (AePsola *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES]);
+
+/* Configure MIDI Harmony (audio thread, between blocks). */
+static inline void ae_psola_set_midi (AePsola *p, bool mode,
+                                      uint64_t held_lo, uint64_t held_hi)
+{
+    p->midi_mode = mode;
+    p->midi_lo   = held_lo;
+    p->midi_hi   = held_hi;
+}
 
 /* Live ghost degree of a voice (signed steps re root), AE_HARM_DEG_OFF when
    the voice is silent. Lock-free; any thread. */

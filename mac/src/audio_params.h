@@ -27,6 +27,11 @@ typedef struct
     _Atomic bool     bypass;
     _Atomic double   gain_lin;
 
+    _Atomic bool     midi_mode;
+    _Atomic uint64_t vmidi_lo; /* virtual held notes (API/tests); backends OR
+                                  their hardware bits in at apply time */
+    _Atomic uint64_t vmidi_hi;
+
     _Atomic bool     harm_on;
     _Atomic int      harm_lock;
     _Atomic int      harm_interval[AE_HARM_VOICES];
@@ -57,6 +62,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->gain_lin, pow (10.0, p->output_gain_db / 20.0),
                            memory_order_relaxed);
 
+    atomic_store_explicit (&a->midi_mode, p->midi_mode, memory_order_relaxed);
     atomic_store_explicit (&a->harm_on,   p->harm_on,   memory_order_relaxed);
     atomic_store_explicit (&a->harm_lock, p->harm_lock, memory_order_relaxed);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
@@ -72,10 +78,16 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
 }
 
 /* Audio thread, once per block: push the current parameters into the
-   corrector and report bypass/gain for the output stage. */
+   corrector and report bypass/gain for the output stage. hw_midi_lo/hi are
+   the backend's hardware held-note bits (0 if it has no MIDI input). */
 static inline void ae_atomic_params_apply (AeAtomicParams *a, AePsola *ps,
+                                           uint64_t hw_midi_lo, uint64_t hw_midi_hi,
                                            bool *bypass_out, float *gain_out)
 {
+    ae_psola_set_midi (ps,
+                       atomic_load_explicit (&a->midi_mode, memory_order_relaxed),
+                       hw_midi_lo | atomic_load_explicit (&a->vmidi_lo, memory_order_relaxed),
+                       hw_midi_hi | atomic_load_explicit (&a->vmidi_hi, memory_order_relaxed));
     ae_psola_set_edo             (ps, atomic_load_explicit (&a->edo, memory_order_relaxed));
     ae_psola_set_retune_ms       (ps, atomic_load_explicit (&a->retune_ms, memory_order_relaxed));
     ae_psola_set_transition_ms   (ps, atomic_load_explicit (&a->transition_ms, memory_order_relaxed));

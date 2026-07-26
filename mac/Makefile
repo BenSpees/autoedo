@@ -14,7 +14,7 @@ SRC := src/yin.c src/psola.c src/json.c src/httpd.c src/main.c
 
 ifeq ($(UNAME),Darwin)
   SRC     += src/audio_mac.c
-  LDLIBS  := -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
+  LDLIBS  := -framework CoreAudio -framework AudioToolbox -framework CoreMIDI -framework CoreFoundation
 else
   SRC     += src/audio_stub.c
   CFLAGS  += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L

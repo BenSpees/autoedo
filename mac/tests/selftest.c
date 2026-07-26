@@ -279,6 +279,70 @@ static void test_harmony (void)
     free (in); free (hl); free (hr);
 }
 
+static void test_midi_harmony (void)
+{
+    AePsola *p = calloc (1, sizeof (AePsola));
+    ae_psola_prepare (p, 48000.0, 512, 0.0, 0.0);
+    ae_psola_set_edo (p, 12);
+    ae_psola_set_retune_ms (p, 0.0);
+    ae_psola_set_transition_ms (p, 0.0);
+
+    /* Full-chromatic mask, but hold C4+E4+G4 (60/64/67): with MIDI mode on,
+       an A3 input must retune to the nearest held note = C4 (261.63 Hz),
+       and a +7 mask-locked harmony voice must land within the held pcs. */
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v) voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_psola_set_harmony (p, true, 1, voices);
+    ae_psola_set_midi (p, true, (1ull << 60) | (1ull << 63), 1ull << (67 - 64));
+    /* note: bit 63 is note 63 (D#4) — held set {60, 63, 67} */
+
+    const int total = 48000;
+    float *in = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_psola_process (p, in + off, hl + off, hr + off, n);
+    }
+
+    CHECK (ae_psola_voiced (p), "midi test voiced");
+    const float tgt = ae_psola_target_hz (p);
+    CHECK (fabs (tgt - 261.63) < 0.5,
+           "A3 retunes to held C4: got %.2f (expect 261.63)", tgt);
+    /* voice +7 from C4 (deg 48) = 55 (pc 7 = G, held) -> stays 55 */
+    const int d0 = ae_psola_harm_degree (p, 0);
+    CHECK (d0 == 55, "harmony locks to held pcs: got %d (expect 55)", d0);
+
+    /* Release all notes: normal behavior resumes (A3 stays 220 on the
+       chromatic mask). */
+    ae_psola_set_midi (p, true, 0, 0);
+    phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_psola_process (p, in + off, hl + off, hr + off, n);
+    }
+    CHECK (fabs (ae_psola_target_hz (p) - 220.0) < 0.5,
+           "release -> normal behavior: got %.2f (expect 220)", ae_psola_target_hz (p));
+
+    ae_psola_free (p);
+    free (p); free (in); free (hl); free (hr);
+}
+
 static void test_json (void)
 {
     const char *j = "{\"edo\":19, \"retuneMs\": 42.5, \"bypass\":true,"
@@ -322,6 +386,7 @@ int main (void)
     test_psola();
     test_walk();
     test_harmony();
+    test_midi_harmony();
     test_json();
 
     if (failures == 0)

@@ -78,7 +78,7 @@ static void *stub_thread (void *arg)
         bool  bypass = false;
         float gain   = 1.0f;
         float harm_l[STUB_BLOCK], harm_r[STUB_BLOCK];
-        ae_atomic_params_apply (&e->params, &e->psola, &bypass, &gain);
+        ae_atomic_params_apply (&e->params, &e->psola, 0, 0, &bypass, &gain);
         ae_psola_process (&e->psola, block, harm_l, harm_r, STUB_BLOCK);
 
         struct timespec ts = { 0, (long) (1e9 * STUB_BLOCK / STUB_RATE) };
@@ -91,6 +91,22 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)
 {
     if (e != NULL)
         ae_atomic_params_store (&e->params, p);
+}
+
+void ae_audio_engine_set_midi_notes (AeAudioEngine *e, uint64_t lo, uint64_t hi)
+{
+    if (e == NULL)
+        return;
+    atomic_store_explicit (&e->params.vmidi_lo, lo, memory_order_relaxed);
+    atomic_store_explicit (&e->params.vmidi_hi, hi, memory_order_relaxed);
+}
+
+int ae_audio_list_midi_sources (char out[][AE_NAME_MAX], int max)
+{
+    if (max < 1)
+        return 0;
+    snprintf (out[0], AE_NAME_MAX, "Stub Virtual Keyboard");
+    return 1;
 }
 
 void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
@@ -107,6 +123,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->voiced          = ae_psola_voiced (&e->psola);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_psola_harm_degree (&e->psola, v);
+    out->midi_held_lo = atomic_load_explicit (&e->params.vmidi_lo, memory_order_relaxed);
+    out->midi_held_hi = atomic_load_explicit (&e->params.vmidi_hi, memory_order_relaxed);
     snprintf (out->input_name,  sizeof (out->input_name),  "Stub Test Tone (input)");
     snprintf (out->output_name, sizeof (out->output_name), "Stub Null Sink (output)");
 }

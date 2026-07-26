@@ -188,6 +188,7 @@
      compact list rows, never wrapping cards */
   #harm-pods { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
                gap: 8px; margin-top: 10px; }
+  #harm-pods[hidden] { display: none; }
   .pod { border: 1px solid var(--line); border-radius: 10px; padding: 7px 9px;
          display: flex; flex-direction: column; gap: 5px; min-width: 0;
          background: var(--panel); }
@@ -224,6 +225,9 @@
            display: flex; flex-direction: column; align-items: center;
            padding-top: 2px; gap: 2px; overflow: visible; }
   .gchip { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+  /* held MIDI notes: hue-free dashed outline (MIDI-ghost convention) */
+  .lug.midi { outline: 1.5px dashed #d6d6e0; outline-offset: 2px; }
+  #midi-mode.held { box-shadow: 0 0 8px 2px #d6d6e080; }
   body.perform #harmline > :not(#harm-chips):not(#harm-power) { display: none; }
   body.perform #harm-pods { display: none !important; }
 </style>
@@ -248,6 +252,9 @@
             <option>512</option><option>1024</option>
           </select>
           <button class="ghost" id="refresh-dev">Refresh</button>
+        </div>
+        <div class="prow"><label>MIDI input</label>
+          <select id="midi-src"><option value="">All inputs</option></select>
         </div>
         <div class="prow"><label>Detection range</label>
           <select id="range">
@@ -382,6 +389,8 @@
       <span class="seg" id="harm-lock">
         <button data-lock="off">Off</button><button data-lock="mask">Mask</button><button data-lock="ji">JI</button>
       </span>
+      <button id="midi-mode"
+        title="MIDI Harmony: held MIDI notes override the mask — retune snaps to the nearest held note, harmony locks to the held pitch classes. Middle C = the root in octave 4; one EDO step per semitone. No notes held = normal behavior. Pick the input in ⚙.">MIDI</button>
       <span id="harm-chips"></span>
       <span style="flex:1"></span>
       <span class="meta" style="margin:0" id="harm-hint"></span>
@@ -613,6 +622,7 @@ function buildRuler() {
   }
 
   $('ghost-layer').dataset.key = ''; // lugs are fresh: force voice-mark redraw
+  midiKey = null;                    // ...and the held-note lighting
   updateRulerState();
 }
 
@@ -1227,6 +1237,26 @@ function updateGhosts(degs) {
   }
 }
 
+// Light up the lugs whose pitch classes are receiving MIDI input.
+// Note 60 (middle C) pivots to degree 4*edo; one EDO step per semitone.
+let midiKey = null;
+function updateMidiLugs(notes) {
+  const edo = cfg ? cfg.edo : 12;
+  const on = cfg && cfg.midiMode && notes && notes.length > 0;
+  const key = JSON.stringify([on ? notes : [], edo]);
+  if (key === midiKey) return;
+  midiKey = key;
+  const pcs = new Set();
+  if (on)
+    for (const n of notes) {
+      const j = 4 * edo + (n - 60);
+      pcs.add(((j % edo) + edo) % edo);
+    }
+  for (let d = 0; d < lugEls.length; d++)
+    lugEls[d].classList.toggle('midi', pcs.has(d));
+  $('midi-mode').classList.toggle('held', !!on);
+}
+
 // ---- scale catalog (xentar-scales-dump) ------------------------------------
 let SCALES = null;
 async function loadScales() {
@@ -1434,6 +1464,12 @@ $('ab-copy').onclick = () => {
 // engine popover controls
 $('bufsize').onchange = e => schedulePost({ bufferFrames: +e.target.value });
 $('range').onchange = e => schedulePost({ range: e.target.value });
+$('midi-src').onchange = e => schedulePost({ midiSource: e.target.value });
+$('midi-mode').onclick = () => {
+  const on = !(cfg && cfg.midiMode);
+  $('midi-mode').classList.toggle('on', on);
+  schedulePost({ midiMode: on });
+};
 $('in-dev').onchange = e => schedulePost({ inputUid: e.target.value });
 $('out-dev').onchange = e => schedulePost({ outputUid: e.target.value });
 $('refresh-dev').onclick = () => loadDevices();
@@ -1483,6 +1519,15 @@ async function loadDevices() {
     const j = await r.json();
     fillDeviceSelect($('in-dev'), j.devices || [], true, cfg ? cfg.inputUid : '');
     fillDeviceSelect($('out-dev'), j.devices || [], false, cfg ? cfg.outputUid : '');
+    const ms = $('midi-src');
+    ms.innerHTML = '<option value="">All inputs</option>';
+    for (const name of j.midiSources || []) {
+      const o = document.createElement('option');
+      o.value = name; o.textContent = name;
+      ms.appendChild(o);
+    }
+    ms.value = cfg ? cfg.midiSource : '';
+    if (ms.value !== (cfg ? cfg.midiSource : '')) ms.value = '';
   } catch (e) {}
 }
 
@@ -1512,6 +1557,7 @@ function updateReadout(s) {
   $('big-sub').textContent = sub;
 
   updateGhosts(s.harmDeg);
+  updateMidiLugs(s.midiNotes);
 
   // live needle at the detected pitch's cents position (folded into the octave)
   const needle = $('needle');
@@ -1588,6 +1634,8 @@ function setControls(c) {
   knobSync(KNOBS[4], c.transitionMs);
   knobSync(KNOBS[5], Math.round(c.humanize * 100));
   $('range').value = c.range;
+  $('midi-mode').classList.toggle('on', !!c.midiMode);
+  if ($('midi-src').value !== (c.midiSource || '')) $('midi-src').value = c.midiSource || '';
   $('gain').value = c.outputGainDb;
   $('gain-val').textContent = `${c.outputGainDb.toFixed(1)} dB`;
   $('bypass').classList.toggle('on', c.bypass);

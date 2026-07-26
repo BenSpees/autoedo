@@ -47,6 +47,10 @@ typedef struct
     bool     bypass;          /* true = pass input through uncorrected */
     double   output_gain_db;  /* -60..+12 */
 
+    /* MIDI Harmony: held notes override the mask (middle C = degree 4*edo,
+       one EDO step per semitone). Off = held notes are ignored. */
+    bool     midi_mode;
+
     /* Smart harmony (Xentar emulation): five independent ghost voices. */
     bool     harm_on;
     int      harm_lock;              /* 0 off, 1 mask, 2 JI */
@@ -63,6 +67,7 @@ typedef struct
 {
     char         input_uid[AE_UID_MAX];  /* "" => system default input */
     char         output_uid[AE_UID_MAX]; /* "" => system default output */
+    char         midi_source[AE_NAME_MAX]; /* "" => all MIDI inputs */
     int          buffer_frames;          /* preferred device I/O block size */
     double       det_min_hz;             /* detection range (0 = default) */
     double       det_max_hz;
@@ -79,6 +84,8 @@ typedef struct
     float  target_hz;
     bool   voiced;
     int    harm_deg[5];     /* live ghost degrees (signed, re root); INT_MIN = silent */
+    uint64_t midi_held_lo;  /* currently held MIDI notes (hardware + virtual) */
+    uint64_t midi_held_hi;
     char   input_name[AE_NAME_MAX];
     char   output_name[AE_NAME_MAX];
 } AeEngineStatus;
@@ -96,5 +103,12 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p);
 
 /* Snapshot current status (callable from any thread while running). */
 void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out);
+
+/* Set "virtual" held MIDI notes (bitsets, note 0..127). These merge (OR)
+   with hardware MIDI input — used by the /api/midi endpoint and tests. */
+void ae_audio_engine_set_midi_notes (AeAudioEngine *e, uint64_t lo, uint64_t hi);
+
+/* Enumerate MIDI input source names into out[0..max-1]. Returns the count. */
+int ae_audio_list_midi_sources (char out[][AE_NAME_MAX], int max);
 
 #endif /* AUTOEDO_AUDIO_H */

@@ -118,6 +118,16 @@ strips the window to the ruler + a stage-readable readout.
   colored ghost ticks on the ruler (gold when a voice lands on the root).
   **Learn-from-ruler**: select a pod, then shift-click a lug to set its
   interval. Harmony state persists as `hm`/`hx`/`hg`/`hp` fields.
+- **MIDI Harmony mode** — the `MIDI` toggle on the harmony line (input
+  device picked in the ⚙ popover; CoreMIDI on macOS, "All inputs" by
+  default). Middle C (note 60) is the pivot, mapping to the root in
+  octave 4, with EDO steps progressing up and down one per semitone.
+  While notes are held they override the mask: correction retunes to the
+  nearest *held* note and harmony's Mask lock quantizes within the held
+  pitch classes; held notes light up on the ruler with a dashed outline.
+  Release everything and normal behavior resumes. `POST /api/midi
+  {"notes":[60,64,67]}` injects virtual held notes (merged with hardware
+  input) for testing or driving the mode without a keyboard.
 - **Scale catalog** — the Preset menu carries the full Xentar scale dump
   (31 EDO packs, 702 named scales incl. the world-music sets, served at
   `/api/scales`) filtered to the current EDO, plus the familiar 12-EDO
@@ -140,6 +150,7 @@ The UI is plain HTML/JS embedded into the binary at build time
 | `/api/status`  | GET  | same status JSON (serialized once per tick, shared by all consumers) |
 | `/api/devices` | GET  | audio device list |
 | `/api/config`  | POST | partial config update (restarts engine if devices/buffer changed) |
+| `/api/midi`    | POST | set virtual held MIDI notes: `{"notes":[60,64,67]}` |
 | `/api/restart` | POST | force an engine restart |
 
 The server binds to `127.0.0.1` only. If the stream dies the UI dims and

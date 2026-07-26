@@ -228,9 +228,47 @@ static void run_detection (AePsola *p)
         const double detected_cents = 1200.0 * log2 (res.frequency_hz / ref);
         const double steps          = ae_steps_from_ref (res.frequency_hz, p->edo, ref, period);
 
-        AeTuningResult t = ae_quantize_to_edo_scale_ex (res.frequency_hz, p->edo,
-                                                        p->enabled_deg, ref, period);
-        long long cand = t.degree;
+        /* MIDI Harmony override: while notes are held they ARE the target
+           set — middle C (60) pivots to degree 4*edo, one EDO step per
+           semitone. No notes held = normal mask behavior. */
+        bool      midi_active = false;
+        bool      held_mask[AE_MAX_EDO];
+        long long held_j[32];
+        int       held_n = 0;
+        if (p->midi_mode && (p->midi_lo | p->midi_hi) != 0)
+        {
+            memset (held_mask, 0, sizeof (held_mask));
+            for (int n = 0; n < 128 && held_n < 32; ++n)
+            {
+                const bool on = n < 64 ? ((p->midi_lo >> n) & 1u) != 0
+                                       : ((p->midi_hi >> (n - 64)) & 1u) != 0;
+                if (! on)
+                    continue;
+                const long long j = 4LL * p->edo + (n - 60);
+                held_j[held_n++] = j;
+                held_mask[(int) (((j % p->edo) + p->edo) % p->edo)] = true;
+            }
+            midi_active = held_n > 0;
+        }
+
+        long long cand;
+        if (midi_active)
+        {
+            /* retune to the nearest held note (absolute, not pitch-class) */
+            cand = held_j[0];
+            double best = fabs (steps - (double) held_j[0]);
+            for (int i = 1; i < held_n; ++i)
+            {
+                const double d = fabs (steps - (double) held_j[i]);
+                if (d < best) { best = d; cand = held_j[i]; }
+            }
+        }
+        else
+        {
+            const AeTuningResult t = ae_quantize_to_edo_scale_ex (res.frequency_hz, p->edo,
+                                                                  p->enabled_deg, ref, period);
+            cand = t.degree;
+        }
 
         /* Stickiness (hysteresis): stay on the previous target until the
            detected pitch has travelled past the midpoint toward the new
@@ -238,8 +276,20 @@ static void run_detection (AePsola *p)
            Kills degree flicker when the step is smaller than vibrato. */
         if (p->target_valid && cand != p->target_j && p->stickiness > 0.0)
         {
-            const int last_deg = (int) (((p->target_j % p->edo) + p->edo) % p->edo);
-            if (p->enabled_deg[last_deg]
+            bool last_ok;
+            if (midi_active)
+            {
+                last_ok = false; /* the old target must still be held */
+                for (int i = 0; i < held_n; ++i)
+                    if (held_j[i] == p->target_j)
+                        last_ok = true;
+            }
+            else
+            {
+                const int last_deg = (int) (((p->target_j % p->edo) + p->edo) % p->edo);
+                last_ok = p->enabled_deg[last_deg];
+            }
+            if (last_ok
                 && fabs (steps - (double) p->target_j)
                      < (0.5 + 0.5 * p->stickiness) * fabs ((double) (cand - p->target_j)))
                 cand = p->target_j;
@@ -331,8 +381,9 @@ static void run_detection (AePsola *p)
                 const int eff = hv->interval
                               + (hv->interval > 0 ? 1 : -1) * hv->ext_oct * p->edo;
                 long long gj = cand + eff;
-                if (p->harm_lock == 1)
-                    gj = ae_walk_to_enabled (gj, p->edo, p->enabled_deg);
+                if (p->harm_lock == 1) /* MIDI notes override the mask here too */
+                    gj = ae_walk_to_enabled (gj, p->edo,
+                                             midi_active ? held_mask : p->enabled_deg);
 
                 double ghost_cents = (double) gj * period / (double) p->edo;
                 if (p->harm_lock == 2)
