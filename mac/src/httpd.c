@@ -1,23 +1,69 @@
 #include "httpd.h"
 
-#include <arpa/inet.h>
+#include <stdbool.h>
+
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <pthread.h> /* winpthreads (mingw-w64) */
+  typedef SOCKET ae_sock_t;
+  #define AE_BAD_SOCK   INVALID_SOCKET
+  #define sock_close    closesocket
+  #define sock_read(fd, buf, n)  recv ((fd), (char *) (buf), (int) (n), 0)
+  #define sock_write(fd, buf, n) send ((fd), (const char *) (buf), (int) (n), 0)
+  #define SHUT_RDWR     SD_BOTH
+  #ifndef MSG_NOSIGNAL
+  #define MSG_NOSIGNAL 0
+  #endif
+  #ifndef strncasecmp
+  #define strncasecmp _strnicmp
+  #endif
+  static void sock_set_nonblock (ae_sock_t fd)
+  {
+      u_long one = 1;
+      ioctlsocket (fd, FIONBIO, &one);
+  }
+  static void sock_startup (void)
+  {
+      static bool done = false;
+      if (! done)
+      {
+          WSADATA wsa;
+          WSAStartup (MAKEWORD (2, 2), &wsa);
+          done = true;
+      }
+  }
+#else
+  #include <arpa/inet.h>
+  #include <fcntl.h>
+  #include <netinet/in.h>
+  #include <pthread.h>
+  #include <signal.h>
+  #include <sys/socket.h>
+  #include <unistd.h>
+  typedef int ae_sock_t;
+  #define AE_BAD_SOCK   (-1)
+  #define sock_close    close
+  #define sock_read(fd, buf, n)  read ((fd), (buf), (n))
+  #define sock_write(fd, buf, n) write ((fd), (buf), (n))
+  #ifndef MSG_NOSIGNAL /* macOS: SIGPIPE is globally ignored instead */
+  #define MSG_NOSIGNAL 0
+  #endif
+  static void sock_set_nonblock (ae_sock_t fd)
+  {
+      fcntl (fd, F_SETFL, fcntl (fd, F_GETFL, 0) | O_NONBLOCK);
+  }
+  static void sock_startup (void) {}
+#endif
+
 #include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <pthread.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-#ifndef MSG_NOSIGNAL /* macOS: SIGPIPE is globally ignored instead */
-#define MSG_NOSIGNAL 0
-#endif
 
 #define MAX_HEADER 8192
 #define MAX_BODY   (1 << 20)
@@ -25,7 +71,7 @@
 
 struct AeHttpServer
 {
-    int           listen_fd;
+    ae_sock_t     listen_fd;
     pthread_t     thread;
     AeHttpHandler handler;
     void         *user;
@@ -33,7 +79,7 @@ struct AeHttpServer
 
     /* WebSocket clients (GET /ws connections hijacked from the HTTP path). */
     pthread_mutex_t ws_lock;
-    int             ws_fds[MAX_WS];
+    ae_sock_t       ws_fds[MAX_WS];
     int             ws_count;
 };
 
@@ -190,12 +236,12 @@ static const char *status_text (int status)
     }
 }
 
-static bool write_all (int fd, const void *data, size_t len)
+static bool write_all (ae_sock_t fd, const void *data, size_t len)
 {
     const char *p = data;
     while (len > 0)
     {
-        const ssize_t n = write (fd, p, len);
+        const long n = (long) sock_write (fd, p, len);
         if (n <= 0)
         {
             if (n < 0 && errno == EINTR)
@@ -210,7 +256,7 @@ static bool write_all (int fd, const void *data, size_t len)
 
 /* Upgrade an accepted socket into a /ws push client. Returns true if the
    fd was taken over (registered or closed here). */
-static bool ws_upgrade (struct AeHttpServer *s, int fd,
+static bool ws_upgrade (struct AeHttpServer *s, ae_sock_t fd,
                         const char *header, const char *body_start)
 {
     char key[128];
@@ -233,18 +279,18 @@ static bool ws_upgrade (struct AeHttpServer *s, int fd,
                             "Sec-WebSocket-Accept: %s\r\n\r\n", accept);
     if (! write_all (fd, resp, (size_t) n))
     {
-        close (fd);
+        sock_close (fd);
         return true;
     }
 
     /* Non-blocking so a stalled client can never wedge the broadcaster. */
-    fcntl (fd, F_SETFL, fcntl (fd, F_GETFL, 0) | O_NONBLOCK);
+    sock_set_nonblock (fd);
 
     pthread_mutex_lock (&s->ws_lock);
     if (s->ws_count < MAX_WS)
         s->ws_fds[s->ws_count++] = fd;
     else
-        close (fd);
+        sock_close (fd);
     pthread_mutex_unlock (&s->ws_lock);
     return true;
 }
@@ -275,15 +321,15 @@ void ae_http_ws_broadcast (AeHttpServer *s, const char *data, size_t len)
     pthread_mutex_lock (&s->ws_lock);
     for (int i = 0; i < s->ws_count; )
     {
-        const int fd = s->ws_fds[i];
+        const ae_sock_t fd = s->ws_fds[i];
         /* Localhost + small frames: a short or failed write means the tab is
            gone or wedged either way — drop it. */
         const bool ok =
-            send (fd, hdr, hn, MSG_NOSIGNAL) == (ssize_t) hn
-            && send (fd, data, len, MSG_NOSIGNAL) == (ssize_t) len;
+            send (fd, (const char *) hdr, (int) hn, MSG_NOSIGNAL) == (long) hn
+            && send (fd, (const char *) data, (int) len, MSG_NOSIGNAL) == (long) len;
         if (! ok)
         {
-            close (fd);
+            sock_close (fd);
             s->ws_fds[i] = s->ws_fds[--s->ws_count];
         }
         else
@@ -293,7 +339,7 @@ void ae_http_ws_broadcast (AeHttpServer *s, const char *data, size_t len)
 }
 
 /* Returns true if the fd was hijacked (WebSocket) and must not be closed. */
-static bool handle_connection (struct AeHttpServer *s, int fd)
+static bool handle_connection (struct AeHttpServer *s, ae_sock_t fd)
 {
     char   header[MAX_HEADER + 1];
     size_t got = 0;
@@ -302,7 +348,7 @@ static bool handle_connection (struct AeHttpServer *s, int fd)
     /* Read until end of headers. */
     while (got < MAX_HEADER)
     {
-        const ssize_t n = read (fd, header + got, MAX_HEADER - got);
+        const long n = (long) sock_read (fd, header + got, MAX_HEADER - got);
         if (n <= 0)
         {
             if (n < 0 && errno == EINTR)
@@ -364,7 +410,7 @@ static bool handle_connection (struct AeHttpServer *s, int fd)
     memcpy (body, body_start, have);
     while (have < content_len)
     {
-        const ssize_t n = read (fd, body + have, content_len - have);
+        const long n = (long) sock_read (fd, body + have, content_len - have);
         if (n <= 0)
         {
             if (n < 0 && errno == EINTR)
@@ -406,15 +452,15 @@ static void *server_thread (void *arg)
     {
         struct sockaddr_in addr;
         socklen_t alen = sizeof (addr);
-        const int fd = accept (s->listen_fd, (struct sockaddr *) &addr, &alen);
-        if (fd < 0)
+        const ae_sock_t fd = accept (s->listen_fd, (struct sockaddr *) &addr, &alen);
+        if (fd == AE_BAD_SOCK)
         {
             if (errno == EINTR)
                 continue;
             break; /* listen socket closed (shutdown) or fatal error */
         }
         if (! handle_connection (s, fd))
-            close (fd);
+            sock_close (fd);
     }
     return NULL;
 }
@@ -422,17 +468,20 @@ static void *server_thread (void *arg)
 AeHttpServer *ae_http_start (int port, AeHttpHandler handler, void *user,
                              char *err, size_t err_len)
 {
+    sock_startup();
+#ifndef _WIN32
     signal (SIGPIPE, SIG_IGN); /* a dropped browser connection must not kill us */
+#endif
 
-    const int fd = socket (AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    const ae_sock_t fd = socket (AF_INET, SOCK_STREAM, 0);
+    if (fd == AE_BAD_SOCK)
     {
         snprintf (err, err_len, "socket: %s", strerror (errno));
         return NULL;
     }
 
     const int one = 1;
-    setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof (one));
+    setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, (const char *) &one, sizeof (one));
 
     struct sockaddr_in addr;
     memset (&addr, 0, sizeof (addr));
@@ -443,13 +492,13 @@ AeHttpServer *ae_http_start (int port, AeHttpHandler handler, void *user,
     if (bind (fd, (struct sockaddr *) &addr, sizeof (addr)) < 0)
     {
         snprintf (err, err_len, "bind 127.0.0.1:%d: %s", port, strerror (errno));
-        close (fd);
+        sock_close (fd);
         return NULL;
     }
     if (listen (fd, 16) < 0)
     {
         snprintf (err, err_len, "listen: %s", strerror (errno));
-        close (fd);
+        sock_close (fd);
         return NULL;
     }
 
@@ -457,7 +506,7 @@ AeHttpServer *ae_http_start (int port, AeHttpHandler handler, void *user,
     if (s == NULL)
     {
         snprintf (err, err_len, "out of memory");
-        close (fd);
+        sock_close (fd);
         return NULL;
     }
     s->listen_fd = fd;
@@ -468,7 +517,7 @@ AeHttpServer *ae_http_start (int port, AeHttpHandler handler, void *user,
     if (pthread_create (&s->thread, NULL, server_thread, s) != 0)
     {
         snprintf (err, err_len, "pthread_create failed");
-        close (fd);
+        sock_close (fd);
         free (s);
         return NULL;
     }
@@ -481,11 +530,11 @@ void ae_http_stop (AeHttpServer *s)
         return;
     s->stopping = true;
     shutdown (s->listen_fd, SHUT_RDWR);
-    close (s->listen_fd);
+    sock_close (s->listen_fd);
     pthread_join (s->thread, NULL);
     pthread_mutex_lock (&s->ws_lock);
     for (int i = 0; i < s->ws_count; ++i)
-        close (s->ws_fds[i]);
+        sock_close (s->ws_fds[i]);
     s->ws_count = 0;
     pthread_mutex_unlock (&s->ws_lock);
     pthread_mutex_destroy (&s->ws_lock);

@@ -26,7 +26,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+  static void ae_sleep_ms (int ms) { Sleep ((DWORD) ms); }
+#else
+  #include <unistd.h>
+  static void ae_sleep_ms (int ms) { usleep ((useconds_t) ms * 1000); }
+#endif
 
 #include "web_index.h"  /* generated: web_index_html[], web_index_html_len */
 #include "web_scales.h" /* generated: web_scales_json[], web_scales_json_len */
@@ -94,6 +102,10 @@ static void on_signal (int sig)
 static void config_path (char *out, size_t cap)
 {
     const char *home = getenv ("HOME");
+#ifdef _WIN32
+    if (home == NULL || home[0] == '\0')
+        home = getenv ("USERPROFILE");
+#endif
     if (home != NULL && home[0] != '\0')
         snprintf (out, cap, "%s/.autoedo.json", home);
     else
@@ -717,7 +729,7 @@ int main (int argc, char **argv)
         memcpy (frame, app.status_json, n + 1);
         pthread_mutex_unlock (&app.status_lock);
         ae_http_ws_broadcast (server, frame, n);
-        usleep (100 * 1000);
+        ae_sleep_ms (100);
     }
 
     printf ("autoedo: shutting down\n");

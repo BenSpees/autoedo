@@ -1,22 +1,44 @@
-# AutoEDO Live (standalone Mac C app)
+# AutoEDO Live (standalone C app — macOS & Windows 10)
 
 A self-contained, plain-C version of AutoEDO that runs **live**: it captures
 the selected audio input, pitch-corrects it to an *N*-EDO scale in real time,
 and plays the result on the selected audio output. Every device and
 processing setting is controlled from a **web UI** served by the app itself
 at `http://127.0.0.1:8017/` — no plugin host, no JUCE, no dependencies
-beyond the macOS system frameworks.
+beyond the OS system libraries. (The directory is named `mac/` for
+historical reasons; it builds the macOS **CoreAudio/CoreMIDI** backend, the
+Windows 10 **WASAPI/winmm** backend, or a test-tone stub elsewhere.)
 
 ```
-mic ─► CoreAudio AUHAL (input) ─► ring buffer ─► YIN ─► EDO snap ─► glide ─► TD-PSOLA ─► AUHAL (output) ─► speakers
-                                                          ▲ live settings via embedded web UI ▲
+mic ─► CoreAudio AUHAL / WASAPI (input) ─► ring buffer ─► YIN ─► EDO snap ─► glide ─► TD-PSOLA ─► output ─► speakers
+                                                             ▲ live settings via embedded web UI ▲
 ```
 
 The DSP is a direct C port of the plugin engine in `../Source/dsp/`
 (YIN pitch detection, C-anchored EDO tuning math, TD-PSOLA resynthesis with
 a latency-matched dry path for unvoiced passages).
 
-## Quick start
+## Quick start (Windows 10)
+
+Install the [MSYS2](https://www.msys2.org) toolchain once, then from an
+**"MSYS2 MinGW x64"** shell:
+
+```bash
+pacman -S make mingw-w64-x86_64-gcc
+cd mac
+make          # builds build/autoedo.exe (WASAPI + winmm, statically linked)
+```
+
+Launch with `tools\autoedo.bat` (double-click or from cmd): it rebuilds if a
+`make` is on PATH, restarts the service, waits for the health check (Windows
+10 ships `curl`), and opens the browser. `tools\autoedo.bat --stop` stops
+it. You can also cross-compile from Linux/macOS:
+`make PLATFORM=windows CC=x86_64-w64-mingw32-gcc`. Windows notes: the mic
+needs Settings → Privacy → Microphone enabled for desktop apps; input and
+output run at their devices' shared-mode mix rates (the app resamples
+between them); config persists to `%USERPROFILE%\.autoedo.json`.
+
+## Quick start (macOS)
 
 Two ways to launch — one brain (`tools/autoedo.command`), two faces:
 
@@ -175,7 +197,8 @@ for developing the UI/API and running the self-tests anywhere.
 mac/
 ├── run.sh              thin wrapper → tools/autoedo.command
 ├── tools/
-│   ├── autoedo.command        the launcher (terminal + --headless modes)
+│   ├── autoedo.command        macOS launcher (terminal + --headless modes)
+│   ├── autoedo.bat            Windows 10 launcher
 │   ├── AutoEDO.app/           dockable 3-file bundle (shim → the .command)
 │   └── make_launcher_icon.py  regenerates AppIcon.icns (pure stdlib)
 ├── Makefile
@@ -189,9 +212,12 @@ mac/
 │   ├── ring.h          lock-free SPSC ring buffer with resampling reader
 │   ├── audio.h         backend interface
 │   ├── audio_params.h  lock-free live-parameter mirror shared by backends
-│   ├── audio_mac.c     CoreAudio backend (two AUHAL units, device selection)
-│   ├── audio_stub.c    test-tone backend for non-macOS builds
-│   ├── httpd.[ch]      tiny embedded HTTP server (127.0.0.1 only)
+│   ├── audio_mac.c     CoreAudio backend (two AUHAL units) + CoreMIDI
+│   ├── audio_win.c     Windows 10 WASAPI backend (event-driven capture /
+│   │                   render threads) + winmm MIDI
+│   ├── audio_stub.c    test-tone backend for other hosts (dev/CI)
+│   ├── httpd.[ch]      tiny embedded HTTP server (127.0.0.1 only; POSIX
+│   │                   sockets or Winsock)
 │   ├── json.[ch]       minimal JSON helpers
 │   └── main.c          config persistence + JSON API + lifecycle
 └── tests/selftest.c    tuning/YIN/PSOLA/JSON self-tests (`make test`)

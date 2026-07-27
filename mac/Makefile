@@ -1,20 +1,39 @@
 # AutoEDO Live — self-contained realtime EDO pitch corrector with a web UI.
 #
-#   make            build ./build/autoedo (CoreAudio on macOS, stub elsewhere)
+#   make            build ./build/autoedo — CoreAudio on macOS, WASAPI on
+#                   Windows (MSYS2/mingw-w64), test-tone stub elsewhere
 #   make test       build and run the DSP/JSON self-tests
 #   make clean
+#
+# Cross-compile the Windows build from Linux/macOS:
+#   make PLATFORM=windows CC=x86_64-w64-mingw32-gcc
 
 UNAME  := $(shell uname -s)
 CC     ?= cc
 CFLAGS ?= -O2
 CFLAGS += -std=c11 -Wall -Wextra -Isrc -Ibuild
 BUILD  := build
+EXE    :=
+
+ifeq ($(OS),Windows_NT)
+  PLATFORM ?= windows
+else ifeq ($(UNAME),Darwin)
+  PLATFORM ?= mac
+else
+  PLATFORM ?= stub
+endif
 
 SRC := src/yin.c src/psola.c src/json.c src/httpd.c src/main.c
 
-ifeq ($(UNAME),Darwin)
+ifeq ($(PLATFORM),mac)
   SRC     += src/audio_mac.c
   LDLIBS  := -framework CoreAudio -framework AudioToolbox -framework CoreMIDI -framework CoreFoundation
+else ifeq ($(PLATFORM),windows)
+  SRC     += src/audio_win.c
+  CFLAGS  += -D_WIN32_WINNT=0x0A00
+  # -static folds winpthread/libgcc in, so the exe needs only system DLLs
+  LDLIBS  := -static -lole32 -lwinmm -lws2_32 -lpthread
+  EXE     := .exe
 else
   SRC     += src/audio_stub.c
   CFLAGS  += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L
@@ -23,7 +42,7 @@ endif
 
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 
-all: $(BUILD)/autoedo
+all: $(BUILD)/autoedo$(EXE)
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -37,7 +56,7 @@ $(BUILD)/web_scales.h: web/scales.json scripts/embed.sh | $(BUILD)
 $(BUILD)/%.o: src/%.c $(BUILD)/web_index.h $(BUILD)/web_scales.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/autoedo: $(OBJ)
+$(BUILD)/autoedo$(EXE): $(OBJ)
 	$(CC) $(CFLAGS) $(OBJ) $(LDLIBS) -o $@
 
 # Headers are few; rebuild everything when any of them changes.
