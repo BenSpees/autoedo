@@ -10,7 +10,7 @@ set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-REPO="$(cd "$(dirname "$SELF")/.." && pwd)"   # tools/ -> mac/
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"   # tools/ -> live/
 cd "$REPO" || exit 1
 
 # ═══ EDIT ME ═════════════════════════════════════════════════════════════════

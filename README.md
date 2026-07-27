@@ -12,8 +12,8 @@ Built with [JUCE](https://juce.com) so a single codebase targets **AAX**
 > **Standalone live app (macOS & Windows 10):** a self-contained plain-C
 > version that processes the live audio input to the audio output in real
 > time, with all device and processing settings controlled from a built-in
-> web UI, lives in [`mac/`](mac/README.md) — run `mac/run.sh` (macOS) or
-> `mac\tools\autoedo.bat` (Windows) to build and launch it.
+> web UI, lives in [`live/`](live/README.md) — run `live/run.sh` (macOS) or
+> `live\tools\autoedo.bat` (Windows) to build and launch it.
 
 > **Phase 1 scope.** C is the reference note, fixed at its standard-tuning
 > frequency, and every other pitch is derived relative to it. At `EDO = 12`

@@ -5,9 +5,9 @@ the selected audio input, pitch-corrects it to an *N*-EDO scale in real time,
 and plays the result on the selected audio output. Every device and
 processing setting is controlled from a **web UI** served by the app itself
 at `http://127.0.0.1:8017/` — no plugin host, no JUCE, no dependencies
-beyond the OS system libraries. (The directory is named `mac/` for
-historical reasons; it builds the macOS **CoreAudio/CoreMIDI** backend, the
-Windows 10 **WASAPI/winmm** backend, or a test-tone stub elsewhere.)
+beyond the OS system libraries. The same tree builds the macOS
+**CoreAudio/CoreMIDI** backend, the Windows 10 **WASAPI/winmm** backend, or
+a test-tone stub elsewhere.
 
 ```
 mic ─► CoreAudio AUHAL / WASAPI (input) ─► ring buffer ─► YIN ─► EDO snap ─► glide ─► TD-PSOLA ─► output ─► speakers
@@ -25,7 +25,7 @@ Install the [MSYS2](https://www.msys2.org) toolchain once, then from an
 
 ```bash
 pacman -S make mingw-w64-x86_64-gcc
-cd mac
+cd live
 make          # builds build/autoedo.exe (WASAPI + winmm, statically linked)
 ```
 
@@ -42,17 +42,17 @@ between them); config persists to `%USERPROFILE%\.autoedo.json`.
 
 Two ways to launch — one brain (`tools/autoedo.command`), two faces:
 
-**Dock button.** Drag `mac/tools/AutoEDO.app` into your Dock. One click
+**Dock button.** Drag `live/tools/AutoEDO.app` into your Dock. One click
 stops the running copy, rebuilds only if sources changed, relaunches, and
 *focuses your existing browser tab* instead of opening a duplicate. No
 Terminal window appears; a real rebuild shows a notification banner, and a
 failure shows a dialog with a *Show Log* button.
 
-**Terminal.** Double-click `mac/tools/autoedo.command` (or run it / the
+**Terminal.** Double-click `live/tools/autoedo.command` (or run it / the
 `./run.sh` wrapper) for the full watch-it-scroll experience:
 
 ```bash
-cd mac
+cd live
 ./run.sh                      # build if needed + relaunch + open/focus the UI
 ./run.sh --stop               # stop the service
 ./run.sh --no-ui              # don't touch the browser
@@ -194,7 +194,7 @@ for developing the UI/API and running the self-tests anywhere.
 ## Layout
 
 ```
-mac/
+live/
 ├── run.sh              thin wrapper → tools/autoedo.command
 ├── tools/
 │   ├── autoedo.command        macOS launcher (terminal + --headless modes)
