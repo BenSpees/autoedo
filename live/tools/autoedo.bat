@@ -4,6 +4,8 @@ rem AutoEDO one-stop launcher for Windows 10: rebuild if a make is on PATH,
 rem restart the service, health-check, open the web UI.
 rem
 rem   autoedo.bat            build (if possible) + relaunch + open browser
+rem   autoedo.bat --no-ui    same, but never touch the browser (for use by
+rem                          an external controller app)
 rem   autoedo.bat --stop     stop a running instance
 rem   set AUTOEDO_PORT=9000 first to use another port
 rem
@@ -20,6 +22,8 @@ if "%~1"=="--stop" (
     echo stopped.
     exit /b 0
 )
+set OPEN_UI=1
+if "%~1"=="--no-ui" set OPEN_UI=
 
 rem ── 1. Build only if a make is available ────────────────────────────────
 where mingw32-make >nul 2>&1
@@ -64,7 +68,7 @@ if not defined UP (
 )
 
 echo AutoEDO Live is up: http://localhost:%PORT%/
-start "" http://localhost:%PORT%/
+if defined OPEN_UI start "" http://localhost:%PORT%/
 echo Stop it later with: tools\autoedo.bat --stop
 exit /b 0
 

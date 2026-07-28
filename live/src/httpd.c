@@ -383,6 +383,21 @@ static bool handle_connection (struct AeHttpServer *s, ae_sock_t fd)
     if (strcmp (method, "GET") == 0 && strcmp (path, "/ws") == 0)
         return ws_upgrade (s, fd, header, body_start);
 
+    /* CORS preflight: the server is single-controller by design and binds
+       to loopback only; external control UIs on other origins are allowed. */
+    if (strcmp (method, "OPTIONS") == 0)
+    {
+        const char *pre = "HTTP/1.1 204 No Content\r\n"
+                          "Access-Control-Allow-Origin: *\r\n"
+                          "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                          "Access-Control-Allow-Headers: Content-Type\r\n"
+                          "Access-Control-Allow-Private-Network: true\r\n"
+                          "Access-Control-Max-Age: 86400\r\n"
+                          "Connection: close\r\n\r\n";
+        write_all (fd, pre, strlen (pre));
+        return false;
+    }
+
     /* Content-Length (case-insensitive search). */
     size_t content_len = 0;
     for (char *h = header; h < body_start; ++h)
@@ -435,6 +450,7 @@ static bool handle_connection (struct AeHttpServer *s, ae_sock_t fd)
                              "Content-Type: %s\r\n"
                              "Content-Length: %zu\r\n"
                              "Cache-Control: no-store\r\n"
+                             "Access-Control-Allow-Origin: *\r\n"
                              "Connection: close\r\n\r\n",
                              resp.status, status_text (resp.status),
                              resp.content_type != NULL ? resp.content_type : "text/plain",

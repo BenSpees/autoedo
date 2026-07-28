@@ -179,6 +179,12 @@ The server binds to `127.0.0.1` only. If the stream dies the UI dims and
 says so (no animating a dead engine), keeps reconnecting once a second,
 and falls back to slow polling until the socket is back.
 
+**External control:** the built-in page is just one client of this API —
+another app can replace it entirely (CORS is open, the launchers take
+`--no-ui`). The full contract — every config key with ranges and
+live-vs-restart semantics, the status stream, launcher integration, and a
+conformance checklist — is specced in [`CONTROL.md`](CONTROL.md).
+
 ## Building manually
 
 ```bash
