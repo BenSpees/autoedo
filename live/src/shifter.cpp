@@ -1,6 +1,6 @@
 #include "shifter.h"
 
-#include "../third_party/signalsmith-stretch/signalsmith-stretch.h"
+#include <signalsmith-stretch/signalsmith-stretch.h>
 
 #include <cstdio>
 #include <type_traits>
@@ -36,6 +36,31 @@ namespace
     }
     template <typename S>
     inline void apply_formants (S &, float, bool, std::false_type) {}
+
+    template <typename S>
+    inline void apply_formant_base (S &s, float base, std::true_type)
+    {
+        s.setFormantBase (base);
+    }
+    template <typename S>
+    inline void apply_formant_base (S &, float, std::false_type) {}
+
+    /* splitComputation spreads each block's FFT work across the interval
+       instead of doing it in one burst. With six voices whose intervals all
+       land on the same sample, that burst is what decides whether the audio
+       callback makes its deadline — so it is worth the one extra interval of
+       output latency it costs. The 4-argument configure() arrived with the
+       same release as the formant methods. */
+    template <typename S>
+    inline void do_configure (S &s, int block, int interval, std::true_type)
+    {
+        s.configure (1, block, interval, true);
+    }
+    template <typename S>
+    inline void do_configure (S &s, int block, int interval, std::false_type)
+    {
+        s.configure (1, block, interval);
+    }
 }
 
 struct AeShifter
@@ -73,7 +98,8 @@ AeShifter *ae_shifter_create (double sample_rate, int block_samples)
         return NULL;
     s->sample_rate = sample_rate;
     /* interval = block/4 matches the library's own presetDefault ratio. */
-    s->stretch.configure (1, block_samples, block_samples / 4);
+    do_configure (s->stretch, block_samples, block_samples / 4,
+                  std::integral_constant<bool, HasFormants<Stretch>::value>());
     s->latency = s->stretch.inputLatency() + s->stretch.outputLatency();
     return s;
 }
@@ -108,6 +134,16 @@ void ae_shifter_set_formant_semitones (AeShifter *s, double semitones,
         return;
     apply_formants (s->stretch, (float) semitones, compensate,
                     std::integral_constant<bool, HasFormants<Stretch>::value>());
+}
+
+void ae_shifter_set_formant_base (AeShifter *s, double base_hz)
+{
+    if (s == NULL)
+        return;
+    /* The library takes the base normalised against the sample rate. */
+    apply_formant_base (s->stretch,
+                        base_hz > 0.0 ? (float) (base_hz / s->sample_rate) : 0.0f,
+                        std::integral_constant<bool, HasFormants<Stretch>::value>());
 }
 
 bool ae_shifter_has_formant_support (void)

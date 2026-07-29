@@ -16,17 +16,17 @@ extern "C" {
 
 typedef struct AeShifter AeShifter;
 
-/* Quality presets: block size sets both the spectral resolution and the
-   latency (latency == block). Measured on a 220 Hz harmonic tone:
-   small corrections (< 1 semitone) stay within a few cents at every
-   setting, but large harmony intervals need the bigger blocks to land
-   accurately (+7 semitones: ~30 cents off at LOW, ~7 at BALANCED,
-   < 1 at HIGH). */
+/* Quality presets. The analysis block sets the spectral resolution, and the
+   latency is that block plus one interval (a quarter block) for the split
+   computation the shifters run in. Measured end to end across 110-440 Hz:
+   correction lands within ~10 cents at LOW/BALANCED and ~5 at HIGH, while
+   large harmony intervals need HIGH — below it they drift sharp on low
+   voices, and LOW can lose the octave entirely on a bass. */
 typedef enum
 {
-    AE_SHIFT_QUALITY_LOW      = 0, /* 25 ms block — lowest latency */
-    AE_SHIFT_QUALITY_BALANCED = 1, /* 45 ms block — default */
-    AE_SHIFT_QUALITY_HIGH     = 2  /* 120 ms block — the library's own preset */
+    AE_SHIFT_QUALITY_LOW      = 0, /* 25 ms block -> 31 ms latency */
+    AE_SHIFT_QUALITY_BALANCED = 1, /* 45 ms block -> 56 ms latency (default) */
+    AE_SHIFT_QUALITY_HIGH     = 2  /* 120 ms block -> 150 ms (library preset) */
 } AeShifterQuality;
 
 /* Block size (samples) for a quality preset at this sample rate. */
@@ -48,18 +48,26 @@ void ae_shifter_set_semitones (AeShifter *s, double semitones,
                                double tonality_limit_hz);
 
 /* Shift formants by `semitones` (compensate = true also undoes the pitch
-   shift's own formant movement). No-op unless the vendored library
+   shift's own formant movement, which is what keeps a transposed voice
+   sounding like the same singer). No-op unless the vendored library
    supports formants — see ae_shifter_has_formant_support(). */
 void ae_shifter_set_formant_semitones (AeShifter *s, double semitones,
                                        bool compensate);
 
+/* Tell the formant analysis roughly where the fundamental sits (Hz); the
+   library asks for this to separate formants from the harmonic series. We
+   have it from YIN, so we pass the detected pitch. 0 = let it guess.
+   No-op without formant support. */
+void ae_shifter_set_formant_base (AeShifter *s, double base_hz);
+
 /* True when the vendored Signalsmith Stretch exposes formant control
-   (v1.3+). The v1.1 series bundled here does not; the call above is then
-   a no-op and large harmony intervals move formants with the pitch. */
+   (v1.3+). Without it the two calls above are no-ops and large harmony
+   intervals move formants with the pitch. */
 bool ae_shifter_has_formant_support (void);
 
-/* Total latency in samples (input + output halves): output sample i
-   corresponds to input sample i - latency. Constant after create(). */
+/* Total latency in samples (input + output halves, including the extra
+   interval that split computation costs): output sample i corresponds to
+   input sample i - latency. Constant after create(). */
 int ae_shifter_latency (const AeShifter *s);
 
 /* Process n samples. `in` and `out` must not alias. Allocation-free. */

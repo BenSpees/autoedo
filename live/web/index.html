@@ -259,9 +259,9 @@
         </div>
         <div class="prow"><label>Shifter quality</label>
           <select id="quality">
-            <option value="low">Low latency &mdash; 25 ms</option>
-            <option value="balanced">Balanced &mdash; 45 ms</option>
-            <option value="high">High quality &mdash; 120 ms</option>
+            <option value="low">Low latency &mdash; 31 ms</option>
+            <option value="balanced">Balanced &mdash; 56 ms</option>
+            <option value="high">High quality &mdash; 150 ms</option>
           </select>
         </div>
         <div class="prow" id="quality-note" hidden>
@@ -1647,16 +1647,23 @@ function setControls(c) {
   knobSync(KNOBS[5], Math.round(c.humanize * 100));
   $('range').value = c.range;
   $('quality').value = c.quality;
-  // Harmony intervals are the demanding case for the phase vocoder: on low
-  // voices they only land accurately with the biggest analysis block.
+  // The phase vocoder's tuning accuracy follows its analysis block, and two
+  // situations are demanding enough to say so: harmony intervals (which can
+  // drift tens of cents on low voices) and fine EDOs (where a step is
+  // smaller than the correction error).
   const harmActive = c.harmOn && c.hm.some(x => x);
+  const fineEdo = c.edo > 24;
   const note = $('quality-note');
-  note.hidden = !(harmActive && c.quality !== 'high');
-  if (!note.hidden)
+  note.hidden = !((harmActive || fineEdo) && c.quality !== 'high');
+  if (!note.hidden) {
+    const why = harmActive && fineEdo
+        ? `harmony voices and a ${c.edo}-EDO step of ${(1200 / c.edo).toFixed(1)}¢`
+      : harmActive ? 'harmony voices'
+      : `a ${c.edo}-EDO step of only ${(1200 / c.edo).toFixed(1)}¢`;
     note.firstElementChild.textContent =
-      'Harmony voices are most in-tune at High quality — below it, low ' +
-      'voices can drift sharp by tens of cents. Correction itself is ' +
-      'accurate at every setting.';
+      `High quality is worth its latency here: ${why}. Below it the shifter ` +
+      `lands within about ±10¢, and harmony on low voices drifts further.`;
+  }
   $('midi-mode').classList.toggle('on', !!c.midiMode);
   if ($('midi-src').value !== (c.midiSource || '')) $('midi-src').value = c.midiSource || '';
   $('gain').value = c.outputGainDb;

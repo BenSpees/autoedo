@@ -105,8 +105,8 @@ down. Both carry the identical string, serialized once per tick server-side.
   "error": "",                // human-readable engine error when !running
   "inputRate": 48000,         // capture device rate, Hz
   "outputRate": 48000,        // render device rate (DSP runs at this rate)
-  "latencySamples": 2160,     // total latency in output frames
-  "latencyMs": 45.0,     // shifter block + input cushion + device buffer
+  "latencySamples": 2700,     // total latency in output frames
+  "latencyMs": 56.2,     // shifter block + input cushion + device buffer
   "detectedHz": 224.49,       // last detected input f0 (stale when !voiced)
   "targetHz": 220.0,          // current correction target
   "voiced": true,             // false = dry passthrough (show readouts dimmed)
@@ -118,9 +118,8 @@ down. Both carry the identical string, serialized once per tick server-side.
   "midiNotes": [60, 64, 67],  // currently held MIDI notes (hardware ∪ virtual)
   "inputName": "MacBook Pro Microphone",
   "outputName": "External Headphones",
-  "shifter": "Signalsmith Stretch 1.1.1",  // the vendored pitch-shift engine
-  "formantSupport": false,    // true once a library release with formant
-                              // control is vendored (see third_party/README)
+  "shifter": "Signalsmith Stretch 1.3.2",  // the vendored pitch-shift engine
+  "formantSupport": true,     // formants held still under pitch shift
   "stepCents": 100.0,         // period / edo, stretch-adjusted
   "config": { ... }           // the FULL config object of §4 — the echo your
                               // UI syncs its controls from
@@ -180,7 +179,7 @@ UI behavior you may want to replicate).
 | `humanize` | float 0–1 | live | relaxes retune on sustained notes |
 | `bypass` | bool | live | dry input passthrough (also silences harmony) |
 | `outputGainDb` | float −60…12 | live | master output gain |
-| `quality` | `"low"` \| `"balanced"` \| `"high"` | **restart** | pitch-shifter analysis block: 25 / 45 / 120 ms, which *is* the shifter's latency. Correction is accurate at all three; harmony intervals only stay in tune on low voices at `high` |
+| `quality` | `"low"` \| `"balanced"` \| `"high"` | **restart** | pitch-shifter analysis block: 25 / 45 / 120 ms, giving 31 / 56 / 150 ms of shifter latency. Correction is accurate at all three; harmony intervals only stay in tune on low voices at `high` |
 | `range` | string | **restart** | detection window preset: `bass` (55–400 Hz), `baritone` (65–450), `tenor` (80–600), `alto` (100–800), `soprano` (130–1200), `instrument` (65–1600, default), `wide` (40–2000). Unknown names behave as `instrument`. Latency follows the low limit |
 
 ### Devices

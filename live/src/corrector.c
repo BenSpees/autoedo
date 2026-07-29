@@ -445,13 +445,17 @@ static void run_detection (AeCorrector *p)
 #define AE_TONALITY_HZ    8000.0
 #define AE_TONALITY_MIN_ST 1.0
 
-static void set_shift (AeShifter *s, double semitones)
+/* `base_hz` is the detected fundamental, which the library's formant
+   analysis wants in order to separate formants from the harmonic series. */
+static void set_shift (AeShifter *s, double semitones, double base_hz)
 {
     ae_shifter_set_semitones (s, semitones,
                               fabs (semitones) >= AE_TONALITY_MIN_ST
                                 ? AE_TONALITY_HZ : 0.0);
-    /* Undo the pitch shift's own formant movement where supported. */
+    /* Hold the formants still while the pitch moves, so a transposed voice
+       still sounds like the same singer instead of chipmunking. */
     ae_shifter_set_formant_semitones (s, 0.0, true);
+    ae_shifter_set_formant_base (s, base_hz);
 }
 
 static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
@@ -474,7 +478,9 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
        behind the newest input, which is close to where the shifter's own
        processing time sits (its input latency), so the ratio lands on the
        audio it was measured from. */
-    set_shift (p->shifter, p->shift_semitones);
+    const double base_hz =
+        atomic_load_explicit (&p->detected_hz_out, memory_order_relaxed);
+    set_shift (p->shifter, p->shift_semitones, base_hz);
     ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
 
     /* 3. Deliver the corrected voice against the latency-matched dry path. */
@@ -524,7 +530,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->h_mix[v] = 0.0; /* fade in from silence */
         }
 
-        set_shift (p->h_shifter[v], p->h_semitones[v]);
+        set_shift (p->h_shifter[v], p->h_semitones[v], base_hz);
         ae_shifter_process (p->h_shifter[v], p->in_block, p->voice_buf, num_samples);
 
         const double want = p->h_active[v] ? 1.0 : 0.0;

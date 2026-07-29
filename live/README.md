@@ -169,23 +169,31 @@ The phase vocoder's analysis block sets both its frequency resolution and
 its latency, so it is a user choice (⚙ popover; changing it restarts the
 engine). Measured on synthetic harmonic tones across the vocal range:
 
-| Setting | Block / added latency | Correction accuracy | Harmony (±7 semitones) |
-|---|---|---|---|
-| Low latency | 25 ms | within ~5 ¢ | poor on low voices (tens of ¢ sharp) |
-| **Balanced** (default) | **45 ms** | within ~5 ¢ | good above ~200 Hz, drifts sharp below |
-| High quality | 120 ms | within ~8 ¢ | within a few ¢ across the range |
+| Setting | Block | Added latency | Corrected voice | Harmony (±7 semitones) |
+|---|---|---|---|---|
+| Low latency | 25 ms | 31 ms | ±10 ¢ (worse low) | unusable — tens of ¢, octave errors on bass |
+| **Balanced** (default) | 45 ms | **56 ms** | ±10 ¢ (worse low) | ±5 ¢ above ~250 Hz, to +30 ¢ on bass |
+| High quality | 120 ms | 150 ms | within ~5 ¢ | within ~5 ¢ above ~200 Hz, ~14 ¢ on bass |
 
-Correction — the app's main job — is accurate at every setting, so pick by
-latency. Harmony voices are the demanding case: they only stay in tune on
-low/male voices at **High**, and the UI says so when harmony is enabled
-below it. End-to-end live latency is this figure plus the input cushion
-(~20 ms) and your device buffer, i.e. roughly **50 / 70 / 145 ms** at a
-256-frame buffer; the header read-out shows the real total.
+(End-to-end pipeline error measured with YIN on the output across
+110–440 Hz — what a tuner would read, so it includes the phase vocoder's
+mild inharmonicity, not just where the fundamental lands.)
 
-Formant preservation is not available in the vendored library release
-(1.1.1), so large harmony intervals move formants with the pitch; the code
-is ready for it and enables it automatically on upgrade — see
-[`third_party/README.md`](third_party/README.md).
+Latency is the block plus one interval: the shifters run in the library's
+*split-computation* mode, which spreads each block's FFT work out instead of
+bursting it. That costs a quarter-block of latency and buys a lot of
+dropout margin — with six voices the worst audio callback falls from 91% of
+its deadline to 65%, and six voices' FFTs would otherwise all land on the
+same sample. Balanced is the default, ~10 ms above the engine it replaced. Pick **High** when tuning precision is the point — fine EDOs,
+where a 72-EDO step is only 16.7 ¢, or harmony voices on low/male voices.
+The UI says so in both situations. End-to-end live latency is this figure
+plus the input cushion (~20 ms) and your device buffer, i.e. roughly
+**56 / 81 / 175 ms** at a 256-frame buffer; the header read-out shows the
+real total.
+
+**Formants are held still** while the pitch moves (Stretch 1.3's formant
+compensation, fed the detected fundamental as its base), so transposed
+harmony voices still sound like the same singer rather than chipmunking.
 
 All settings apply live and persist to `~/.autoedo.json`. Not in this build
 (future work): the pitch-trace lane, MIDI target/out, per-degree gravity
