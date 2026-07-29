@@ -5,7 +5,7 @@
 
 #include "audio.h"
 #include "audio_params.h"
-#include "psola.h"
+#include "corrector.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -48,7 +48,7 @@ struct AeAudioEngine
     pthread_t     thread;
     volatile bool stopping;
 
-    AePsola psola;
+    AeCorrector corrector;
     double  phase;
     double  wobble_phase;
 
@@ -78,8 +78,8 @@ static void *stub_thread (void *arg)
         bool  bypass = false;
         float gain   = 1.0f;
         float harm_l[STUB_BLOCK], harm_r[STUB_BLOCK];
-        ae_atomic_params_apply (&e->params, &e->psola, 0, 0, &bypass, &gain);
-        ae_psola_process (&e->psola, block, harm_l, harm_r, STUB_BLOCK);
+        ae_atomic_params_apply (&e->params, &e->corrector, 0, 0, &bypass, &gain);
+        ae_corrector_process (&e->corrector, block, harm_l, harm_r, STUB_BLOCK);
 
         struct timespec ts = { 0, (long) (1e9 * STUB_BLOCK / STUB_RATE) };
         nanosleep (&ts, NULL);
@@ -117,12 +117,12 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->running         = true;
     out->input_rate      = STUB_RATE;
     out->output_rate     = STUB_RATE;
-    out->latency_samples = ae_psola_latency (&e->psola);
-    out->detected_hz     = ae_psola_detected_hz (&e->psola);
-    out->target_hz       = ae_psola_target_hz (&e->psola);
-    out->voiced          = ae_psola_voiced (&e->psola);
+    out->latency_samples = ae_corrector_latency (&e->corrector);
+    out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
+    out->target_hz       = ae_corrector_target_hz (&e->corrector);
+    out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
-        out->harm_deg[v] = ae_psola_harm_degree (&e->psola, v);
+        out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);
     out->midi_held_lo = atomic_load_explicit (&e->params.vmidi_lo, memory_order_relaxed);
     out->midi_held_hi = atomic_load_explicit (&e->params.vmidi_hi, memory_order_relaxed);
     snprintf (out->input_name,  sizeof (out->input_name),  "Stub Test Tone (input)");
@@ -149,14 +149,14 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         snprintf (err, err_len, "out of memory");
         return NULL;
     }
-    ae_psola_prepare (&e->psola, STUB_RATE, STUB_BLOCK,
-                      cfg->det_min_hz, cfg->det_max_hz);
+    ae_corrector_prepare (&e->corrector, STUB_RATE, STUB_BLOCK,
+                          cfg->det_min_hz, cfg->det_max_hz, cfg->quality);
     ae_audio_engine_set_params (e, &cfg->params);
 
     if (pthread_create (&e->thread, NULL, stub_thread, e) != 0)
     {
         snprintf (err, err_len, "pthread_create failed");
-        ae_psola_free (&e->psola);
+        ae_corrector_free (&e->corrector);
         free (e);
         return NULL;
     }
@@ -169,6 +169,6 @@ void ae_audio_engine_stop (AeAudioEngine *e)
         return;
     e->stopping = true;
     pthread_join (e->thread, NULL);
-    ae_psola_free (&e->psola);
+    ae_corrector_free (&e->corrector);
     free (e);
 }

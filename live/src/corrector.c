@@ -1,4 +1,4 @@
-#include "psola.h"
+#include "corrector.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -46,8 +46,8 @@ static double ji_snap_cents (double cents, double period)
     return cents + best_diff;
 }
 
-void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size,
-                       double min_hz, double max_hz)
+void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_size,
+                           double min_hz, double max_hz, int quality)
 {
     p->fs        = sample_rate > 0.0 ? sample_rate : 44100.0;
     p->max_block = max_block_size > 16 ? max_block_size : 16;
@@ -77,31 +77,35 @@ void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size,
     if (p->tau_min < 2) p->tau_min = 2;
     if (p->tau_min > p->tau_max - 1) p->tau_min = p->tau_max - 1;
 
-    /* Latency must guarantee that every delivered output sample is fully
-       covered by already-placed grains: 3 * longest period. */
-    p->latency = 3 * p->tau_max;
+    /* Latency is the shifter's: output sample i is the corrected input from
+       `latency` samples ago, so the dry path is delayed to match. The block
+       size (quality preset) is what sets it. */
+    p->block_samples = ae_shifter_block_samples (p->fs, quality);
 
-    const int need = p->latency + p->max_block + 2 * p->tau_max + p->frame_size + 16;
+    ae_corrector_free_shifters (p);
+    p->shifter = ae_shifter_create (p->fs, p->block_samples);
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        p->h_shifter[v] = ae_shifter_create (p->fs, p->block_samples);
+
+    p->latency = p->shifter != NULL ? ae_shifter_latency (p->shifter)
+                                    : p->block_samples;
+
+    const int need = p->latency + 2 * p->max_block + p->frame_size + 16;
     p->buf_size = 1;
     while (p->buf_size < need)
         p->buf_size <<= 1;
     p->buf_mask = p->buf_size - 1;
 
     free (p->in_buf);
-    free (p->wet_acc);
-    free (p->wet_win);
     free (p->frame);
-    p->in_buf  = calloc ((size_t) p->buf_size, sizeof (float));
-    p->wet_acc = calloc ((size_t) p->buf_size, sizeof (float));
-    p->wet_win = calloc ((size_t) p->buf_size, sizeof (float));
-    p->frame   = calloc ((size_t) p->frame_size, sizeof (float));
-    for (int v = 0; v < AE_HARM_VOICES; ++v)
-    {
-        free (p->h_acc[v]);
-        free (p->h_win[v]);
-        p->h_acc[v] = calloc ((size_t) p->buf_size, sizeof (float));
-        p->h_win[v] = calloc ((size_t) p->buf_size, sizeof (float));
-    }
+    free (p->in_block);
+    free (p->wet_buf);
+    free (p->voice_buf);
+    p->in_buf    = calloc ((size_t) p->buf_size, sizeof (float));
+    p->frame     = calloc ((size_t) p->frame_size, sizeof (float));
+    p->in_block  = calloc ((size_t) p->max_block, sizeof (float));
+    p->wet_buf   = calloc ((size_t) p->max_block, sizeof (float));
+    p->voice_buf = calloc ((size_t) p->max_block, sizeof (float));
 
     ae_yin_prepare (&p->detector, p->fs, p->frame_size, min_hz, max_hz);
 
@@ -115,22 +119,18 @@ void ae_psola_prepare (AePsola *p, double sample_rate, int max_block_size,
         p->period_cents  = 1200.0;
     }
 
-    ae_psola_reset (p);
+    ae_corrector_reset (p);
 }
 
-void ae_psola_reset (AePsola *p)
+void ae_corrector_reset (AeCorrector *p)
 {
-    memset (p->in_buf,  0, (size_t) p->buf_size * sizeof (float));
-    memset (p->wet_acc, 0, (size_t) p->buf_size * sizeof (float));
-    memset (p->wet_win, 0, (size_t) p->buf_size * sizeof (float));
+    if (p->in_buf != NULL)
+        memset (p->in_buf, 0, (size_t) p->buf_size * sizeof (float));
 
-    p->in_write       = 0;
-    p->last_detect_at = 0;
-    p->last_touched   = -1;
-    p->synth_mark     = (double) p->tau_max;
+    p->in_write        = 0;
+    p->last_detect_at  = 0;
+    p->shift_semitones = 0.0;
 
-    p->current_period = dclamp (p->fs / 220.0, (double) p->tau_min, (double) p->tau_max);
-    p->synth_period   = p->current_period;
     p->voiced         = false;
     p->primed         = false;
     p->out_cents      = 0.0;
@@ -143,16 +143,14 @@ void ae_psola_reset (AePsola *p)
     for (int i = 0; i < AE_MAX_EDO; ++i)
         p->enabled_deg[i] = true; /* default: every degree usable */
 
+    ae_shifter_reset (p->shifter);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
     {
-        if (p->h_acc[v] != NULL)
-            memset (p->h_acc[v], 0, (size_t) p->buf_size * sizeof (float));
-        if (p->h_win[v] != NULL)
-            memset (p->h_win[v], 0, (size_t) p->buf_size * sizeof (float));
-        p->h_mark[v]    = 0.0;
-        p->h_touched[v] = -1;
-        p->h_period[v]  = p->current_period;
-        p->h_active[v]  = false;
+        ae_shifter_reset (p->h_shifter[v]);
+        p->h_semitones[v] = 0.0;
+        p->h_active[v]    = false;
+        p->h_fed[v]       = false;
+        p->h_mix[v]       = 0.0;
         atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
     }
 
@@ -161,23 +159,30 @@ void ae_psola_reset (AePsola *p)
     atomic_store_explicit (&p->voiced_out,      false, memory_order_relaxed);
 }
 
-void ae_psola_free (AePsola *p)
+void ae_corrector_free_shifters (AeCorrector *p)
 {
-    free (p->in_buf);
-    free (p->wet_acc);
-    free (p->wet_win);
-    free (p->frame);
-    p->in_buf = p->wet_acc = p->wet_win = p->frame = NULL;
+    ae_shifter_destroy (p->shifter);
+    p->shifter = NULL;
     for (int v = 0; v < AE_HARM_VOICES; ++v)
     {
-        free (p->h_acc[v]);
-        free (p->h_win[v]);
-        p->h_acc[v] = p->h_win[v] = NULL;
+        ae_shifter_destroy (p->h_shifter[v]);
+        p->h_shifter[v] = NULL;
     }
+}
+
+void ae_corrector_free (AeCorrector *p)
+{
+    free (p->in_buf);
+    free (p->frame);
+    free (p->in_block);
+    free (p->wet_buf);
+    free (p->voice_buf);
+    p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
+    ae_corrector_free_shifters (p);
     ae_yin_free (&p->detector);
 }
 
-void ae_psola_set_harmony (AePsola *p, bool on, int lock,
+void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES])
 {
     p->harm_on   = on;
@@ -198,7 +203,7 @@ void ae_psola_set_harmony (AePsola *p, bool on, int lock,
     }
 }
 
-static void run_detection (AePsola *p)
+static void run_detection (AeCorrector *p)
 {
     const long long start = p->in_write - p->frame_size;
     double sum = 0.0;
@@ -219,9 +224,6 @@ static void run_detection (AePsola *p)
 
     if (now_voiced)
     {
-        p->current_period = dclamp (p->fs / res.frequency_hz,
-                                    (double) p->tau_min, (double) p->tau_max);
-
         const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
         const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
 
@@ -353,9 +355,10 @@ static void run_detection (AePsola *p)
         const double alpha   = (tau_sec <= 0.0) ? 1.0 : (1.0 - exp (-elapsed / tau_sec));
         p->out_cents += (eff_cents - p->out_cents) * alpha;
 
-        double beta = pow (2.0, (p->out_cents - detected_cents) / 1200.0);
-        beta = dclamp (beta, 0.5, 2.0); /* safety net; correction ratios stay ~1 */
-        p->synth_period = p->current_period / beta;
+        /* The shifter takes semitones. Correction ratios stay near 1; the
+           clamp is a safety net against a wild detection. */
+        p->shift_semitones = dclamp ((p->out_cents - detected_cents) / 100.0,
+                                     -12.0, 12.0);
 
         p->primed = true;
 
@@ -406,12 +409,11 @@ static void run_detection (AePsola *p)
                     {
                         used_cents[used_n++] = ghost_cents;
 
+                        /* The voice rides the corrected pitch, so its shift is
+                           measured from the detected input like the main one. */
                         const double voice_cents = p->out_cents + (ghost_cents - target_cents);
-                        double hbeta = pow (2.0, (voice_cents - detected_cents) / 1200.0);
-                        /* keep the synthesis period coverable by the grain width */
-                        const double beta_min = p->current_period / (double) p->tau_max;
-                        hbeta = dclamp (hbeta, beta_min > 0.25 ? beta_min : 0.25, 4.0);
-                        p->h_period[v] = p->current_period / hbeta;
+                        p->h_semitones[v] = dclamp ((voice_cents - detected_cents) / 100.0,
+                                                    -36.0, 36.0);
                         p->h_active[v] = true;
                     }
                 }
@@ -421,9 +423,9 @@ static void run_detection (AePsola *p)
     }
     else
     {
-        p->synth_period = p->current_period; /* identity timeline; crossfade handles the rest */
-        p->target_valid = false;
-        p->sustain_s    = 0.0;
+        p->shift_semitones = 0.0; /* identity; the crossfade handles the rest */
+        p->target_valid    = false;
+        p->sustain_s       = 0.0;
         for (int v = 0; v < AE_HARM_VOICES; ++v)
         {
             p->h_active[v] = false;
@@ -435,151 +437,112 @@ static void run_detection (AePsola *p)
     atomic_store_explicit (&p->voiced_out, now_voiced, memory_order_relaxed);
 }
 
-/* Place one Hann grain centred at `center_out` into an accumulator pair.
-   `synth_period` sizes the grain so slower (lower-pitched) streams still
-   fully overlap. `touched` tracks the highest cleared slot of that pair. */
-static void place_grain_into (AePsola *p, float *acc, float *win,
-                              long long *touched, long long center_out,
-                              double synth_period)
+/* Tonality limit for large shifts: frequencies above this are mapped
+   non-linearly, which keeps some of the timbre instead of transposing the
+   whole spectrum (the poor man's formant preservation — the real thing
+   arrives with Signalsmith Stretch 1.3, see shifter.h). Correction-sized
+   shifts use a plain linear map, where it buys nothing. */
+#define AE_TONALITY_HZ    8000.0
+#define AE_TONALITY_MIN_ST 1.0
+
+static void set_shift (AeShifter *s, double semitones)
 {
-    const double T0 = p->current_period;
-    const double Tw = synth_period > T0 ? synth_period : T0;
-    int half = (int) llround (Tw);
-    if (half < p->tau_min) half = p->tau_min;
-    if (half > p->tau_max) half = p->tau_max;
-
-    /* Analysis mark: the input-period grid point nearest this output center.
-       (Epoch-free placement — a uniform T0 grid; see the plugin source for
-       the design discussion.) */
-    const long long m        = llround ((double) center_out / T0);
-    const long long a_center = llround ((double) m * T0);
-
-    /* Clear any output slots this grain newly reaches, before accumulating. */
-    const long long top = center_out + half;
-    for (long long s = *touched + 1; s <= top; ++s)
-    {
-        const int k = (int) (s & p->buf_mask);
-        win[k] = 0.0f;
-        acc[k] = 0.0f;
-    }
-    if (top > *touched)
-        *touched = top;
-
-    /* Hann-windowed overlap-add. */
-    const double norm = 1.0 / (double) (2 * half);
-    for (int j = -half; j <= half; ++j)
-    {
-        const double pos = (double) (j + half) * norm; /* 0..1 */
-        const float  wv  = (float) (0.5 - 0.5 * cos (2.0 * AE_PI * pos));
-
-        const long long out_i = center_out + j;
-        const long long in_i  = a_center + j;
-        const int       ok    = (int) (out_i & p->buf_mask);
-
-        win[ok] += wv;
-
-        float sample = 0.0f;
-        if (in_i >= 0 && in_i > p->in_write - p->buf_size && in_i < p->in_write)
-            sample = p->in_buf[in_i & p->buf_mask];
-        acc[ok] += wv * sample;
-    }
+    ae_shifter_set_semitones (s, semitones,
+                              fabs (semitones) >= AE_TONALITY_MIN_ST
+                                ? AE_TONALITY_HZ : 0.0);
+    /* Undo the pitch shift's own formant movement where supported. */
+    ae_shifter_set_formant_semitones (s, 0.0, true);
 }
 
-static void process_chunk (AePsola *p, float *mono, float *harm_l,
+static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                            float *harm_r, int num_samples)
 {
+    /* 1. Take in the block: keep a contiguous copy (mono is written in place
+       below) and push it into the ring, which feeds detection and the dry
+       path. */
+    memcpy (p->in_block, mono, (size_t) num_samples * sizeof (float));
     for (int i = 0; i < num_samples; ++i)
     {
-        const int w = (int) (p->in_write & p->buf_mask);
-        p->in_buf[w] = mono[i];
+        p->in_buf[p->in_write & p->buf_mask] = mono[i];
         ++p->in_write;
-
-        if (! p->primed)
-        {
-            /* Hold the synthesis pointer at the input frontier until the first
-               pitch primes the engine, so a long silent intro doesn't force
-               the onset block to "catch up" a backlog of grains. */
-            p->synth_mark   = (double) p->in_write;
-            p->last_touched = p->in_write - 1;
-        }
 
         if (p->in_write - p->last_detect_at >= p->hop && p->in_write >= p->frame_size)
             run_detection (p);
-
-        const long long frontier = p->in_write - 2 * p->tau_max;
-        while (p->primed && p->synth_mark <= (double) frontier)
-        {
-            place_grain_into (p, p->wet_acc, p->wet_win, &p->last_touched,
-                              (long long) llround (p->synth_mark), p->synth_period);
-            p->synth_mark += p->synth_period;
-        }
-
-        for (int v = 0; v < AE_HARM_VOICES; ++v)
-        {
-            if (p->h_active[v])
-            {
-                while (p->h_mark[v] <= (double) frontier)
-                {
-                    place_grain_into (p, p->h_acc[v], p->h_win[v], &p->h_touched[v],
-                                      (long long) llround (p->h_mark[v]), p->h_period[v]);
-                    p->h_mark[v] += p->h_period[v];
-                }
-            }
-            else
-            {
-                /* Idle voices track the frontier and scrub the slot they pass,
-                   so reactivation can never replay a stale lap of the ring. */
-                p->h_mark[v]    = (double) p->in_write;
-                p->h_touched[v] = p->in_write - 1;
-                p->h_win[v][w]  = 0.0f;
-                p->h_acc[v][w]  = 0.0f;
-            }
-        }
     }
 
-    /* Deliver: output sample i is the corrected input from `latency` ago. */
+    /* 2. Shift. The detection above is centred about half an analysis frame
+       behind the newest input, which is close to where the shifter's own
+       processing time sits (its input latency), so the ratio lands on the
+       audio it was measured from. */
+    set_shift (p->shifter, p->shift_semitones);
+    ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
+
+    /* 3. Deliver the corrected voice against the latency-matched dry path. */
     const long long block_start = p->in_write - num_samples;
     const double gain_alpha = 1.0 - exp (-1.0 / (0.005 * p->fs)); /* ~5 ms crossfade */
+    double v_gain = p->v_gain;
 
     for (int i = 0; i < num_samples; ++i)
     {
         const double target = p->voiced ? 1.0 : 0.0;
-        p->v_gain += (target - p->v_gain) * gain_alpha;
+        v_gain += (target - v_gain) * gain_alpha;
 
         const long long t_out = block_start + i - p->latency;
-        if (t_out < 0)
+        const float dry = t_out >= 0 ? p->in_buf[t_out & p->buf_mask] : 0.0f;
+        mono[i] = (float) (v_gain * p->wet_buf[i] + (1.0 - v_gain) * dry);
+    }
+    p->v_gain = v_gain;
+
+    if (harm_l == NULL)
+        return;
+
+    for (int i = 0; i < num_samples; ++i)
+    {
+        harm_l[i] = 0.0f;
+        harm_r[i] = 0.0f;
+    }
+
+    /* 4. Harmony voices: one shifter each, mixed through their own smoothed
+       gain so mute/solo and voice changes can't click. A configured voice is
+       fed even while muted, so unmuting is instant rather than costing a
+       shifter's worth of latency to refill. */
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        const bool configured = p->harm_on && p->harm[v].interval != 0
+                              && p->h_shifter[v] != NULL;
+        if (! configured)
         {
-            mono[i] = 0.0f;
-            if (harm_l != NULL) { harm_l[i] = 0.0f; harm_r[i] = 0.0f; }
+            p->h_fed[v] = false; /* history is stale; reset before reuse */
+            p->h_mix[v] = 0.0;
             continue;
         }
 
-        const int   idx = (int) (t_out & p->buf_mask);
-        const float win = p->wet_win[idx];
-        const float dry = p->in_buf[idx];
-        const float wet = (win > 1.0e-6f) ? (p->wet_acc[idx] / win) : dry;
-        mono[i] = (float) (p->v_gain * wet + (1.0 - p->v_gain) * dry);
-
-        if (harm_l != NULL)
+        if (! p->h_fed[v])
         {
-            double hl = 0.0, hr = 0.0;
-            for (int v = 0; v < AE_HARM_VOICES; ++v)
-            {
-                const float hwv = p->h_win[v][idx];
-                if (hwv > 1.0e-6f)
-                {
-                    const double s = p->h_acc[v][idx] / hwv;
-                    hl += p->h_gl[v] * s;
-                    hr += p->h_gr[v] * s;
-                }
-            }
-            harm_l[i] = (float) (p->v_gain * hl);
-            harm_r[i] = (float) (p->v_gain * hr);
+            ae_shifter_reset (p->h_shifter[v]);
+            p->h_fed[v] = true;
+            p->h_mix[v] = 0.0; /* fade in from silence */
         }
+
+        set_shift (p->h_shifter[v], p->h_semitones[v]);
+        ae_shifter_process (p->h_shifter[v], p->in_block, p->voice_buf, num_samples);
+
+        const double want = p->h_active[v] ? 1.0 : 0.0;
+        const double gl = p->h_gl[v], gr = p->h_gr[v];
+        double mix = p->h_mix[v];
+        double vg = p->v_gain;
+        for (int i = 0; i < num_samples; ++i)
+        {
+            mix += (want - mix) * gain_alpha;
+            const double s = p->voice_buf[i] * mix * vg;
+            harm_l[i] += (float) (gl * s);
+            harm_r[i] += (float) (gr * s);
+        }
+        p->h_mix[v] = mix;
     }
 }
 
-void ae_psola_process (AePsola *p, float *mono, float *harm_l, float *harm_r,
+void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *harm_r,
                        int num_samples)
 {
     if (p->in_buf == NULL || num_samples <= 0)

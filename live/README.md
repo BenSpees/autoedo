@@ -10,13 +10,17 @@ beyond the OS system libraries. The same tree builds the macOS
 a test-tone stub elsewhere.
 
 ```
-mic ─► CoreAudio AUHAL / WASAPI (input) ─► ring buffer ─► YIN ─► EDO snap ─► glide ─► TD-PSOLA ─► output ─► speakers
-                                                             ▲ live settings via embedded web UI ▲
+mic ─► CoreAudio / WASAPI (in) ─► ring ─► YIN ─► EDO snap ─► glide ─► Signalsmith Stretch ─► out ─► speakers
+                                                      ▲ live settings via embedded web UI ▲
 ```
 
-The DSP is a direct C port of the plugin engine in `../Source/dsp/`
-(YIN pitch detection, C-anchored EDO tuning math, TD-PSOLA resynthesis with
-a latency-matched dry path for unvoiced passages).
+Detection and tuning are a C port of the plugin engine in `../Source/dsp/`
+(YIN pitch detection, root-anchored EDO tuning math, a latency-matched dry
+path for unvoiced passages). Pitch shifting itself is
+[Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/), a
+phase-vocoder library vendored under
+[`third_party/`](third_party/README.md) — one instance for the corrected
+voice and one per harmony voice.
 
 ## Quick start (Windows 10)
 
@@ -24,7 +28,7 @@ Install the [MSYS2](https://www.msys2.org) toolchain once, then from an
 **"MSYS2 MinGW x64"** shell:
 
 ```bash
-pacman -S make mingw-w64-x86_64-gcc
+pacman -S make mingw-w64-x86_64-gcc    # gcc package includes g++
 cd live
 make          # builds build/autoedo.exe (WASAPI + winmm, statically linked)
 ```
@@ -33,7 +37,7 @@ Launch with `tools\autoedo.bat` (double-click or from cmd): it rebuilds if a
 `make` is on PATH, restarts the service, waits for the health check (Windows
 10 ships `curl`), and opens the browser. `tools\autoedo.bat --stop` stops
 it. You can also cross-compile from Linux/macOS:
-`make PLATFORM=windows CC=x86_64-w64-mingw32-gcc`. Windows notes: the mic
+`make PLATFORM=windows CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++`. Windows notes: the mic
 needs Settings → Privacy → Microphone enabled for desktop apps; input and
 output run at their devices' shared-mode mix rates (the app resamples
 between them); config persists to `%USERPROFILE%\.autoedo.json`.
@@ -122,6 +126,7 @@ strips the window to the ruler + a stage-readable readout.
   sustained notes).
 - **⚙ engine popover** — input/output device (may be different devices at
   different rates; the app resamples and compensates drift), buffer size,
+  **shifter quality** (see below),
   detection-range preset (Bass … Soprano / Instrument / Wide; changing it
   restarts the engine — announced by a toast — and latency follows the low
   limit), output gain, lane toggles, restart, and any engine error.
@@ -157,6 +162,30 @@ strips the window to the ruler + a stage-readable readout.
   scales). Loading a scale sets the mask and remembers the name until the
   mask is edited by hand. Multi-octave scales load octave 0's steps and
   carry a ⧉ badge (both display and engine flatten to octave 0).
+
+### Shifter quality vs. latency
+
+The phase vocoder's analysis block sets both its frequency resolution and
+its latency, so it is a user choice (⚙ popover; changing it restarts the
+engine). Measured on synthetic harmonic tones across the vocal range:
+
+| Setting | Block / added latency | Correction accuracy | Harmony (±7 semitones) |
+|---|---|---|---|
+| Low latency | 25 ms | within ~5 ¢ | poor on low voices (tens of ¢ sharp) |
+| **Balanced** (default) | **45 ms** | within ~5 ¢ | good above ~200 Hz, drifts sharp below |
+| High quality | 120 ms | within ~8 ¢ | within a few ¢ across the range |
+
+Correction — the app's main job — is accurate at every setting, so pick by
+latency. Harmony voices are the demanding case: they only stay in tune on
+low/male voices at **High**, and the UI says so when harmony is enabled
+below it. End-to-end live latency is this figure plus the input cushion
+(~20 ms) and your device buffer, i.e. roughly **50 / 70 / 145 ms** at a
+256-frame buffer; the header read-out shows the real total.
+
+Formant preservation is not available in the vendored library release
+(1.1.1), so large harmony intervals move formants with the pitch; the code
+is ready for it and enables it automatically on upgrade — see
+[`third_party/README.md`](third_party/README.md).
 
 All settings apply live and persist to `~/.autoedo.json`. Not in this build
 (future work): the pitch-trace lane, MIDI target/out, per-degree gravity
@@ -207,14 +236,18 @@ live/
 │   ├── autoedo.bat            Windows 10 launcher
 │   ├── AutoEDO.app/           dockable 3-file bundle (shim → the .command)
 │   └── make_launcher_icon.py  regenerates AppIcon.icns (pure stdlib)
+├── third_party/        vendored Signalsmith Stretch (MIT) + notes
 ├── Makefile
 ├── scripts/embed.sh    embeds web/index.html into the binary (od-based, no deps)
 ├── web/index.html      the control UI (single self-contained page)
 ├── src/
 │   ├── tuning.h        EDO tuning math (root anchor + octave stretch)
 │   ├── yin.[ch]        YIN pitch detector (port of YinPitchDetector)
-│   ├── psola.[ch]      TD-PSOLA corrector (mono) + tolerance/stickiness/
-│   │                   transition/amount/humanize correction behavior
+│   ├── corrector.[ch]  detection -> EDO snap -> correction behavior
+│   │                   (tolerance/stickiness/transition/amount/humanize)
+│   │                   -> pitch shifting, plus the harmony voices
+│   ├── shifter.h       C ABI for the pitch shifter
+│   ├── shifter.cpp     Signalsmith Stretch behind that ABI (only C++ file)
 │   ├── ring.h          lock-free SPSC ring buffer with resampling reader
 │   ├── audio.h         backend interface
 │   ├── audio_params.h  lock-free live-parameter mirror shared by backends
@@ -226,7 +259,7 @@ live/
 │   │                   sockets or Winsock)
 │   ├── json.[ch]       minimal JSON helpers
 │   └── main.c          config persistence + JSON API + lifecycle
-└── tests/selftest.c    tuning/YIN/PSOLA/JSON self-tests (`make test`)
+└── tests/selftest.c    tuning/YIN/correction/harmony/JSON self-tests
 ```
 
 ## Latency

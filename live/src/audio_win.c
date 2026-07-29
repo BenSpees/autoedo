@@ -25,7 +25,7 @@
 
 #include "audio.h"
 #include "audio_params.h"
-#include "psola.h"
+#include "corrector.h"
 #include "ring.h"
 
 #define MAX_FRAMES 4096
@@ -296,7 +296,7 @@ struct AeAudioEngine
     float *harm_l;
     float *harm_r;
 
-    AePsola psola;
+    AeCorrector corrector;
 
     double in_rate, out_rate;
     int    buffer_frames;
@@ -480,11 +480,11 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
 
     bool  bypass = false;
     float gain   = 1.0f;
-    ae_atomic_params_apply (&e->params, &e->psola,
+    ae_atomic_params_apply (&e->params, &e->corrector,
                             atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
                             atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
                             &bypass, &gain);
-    ae_psola_process (&e->psola, e->proc, e->harm_l, e->harm_r, (int) n);
+    ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
     const float *src = bypass ? e->dry : e->proc;
     const int    ch  = e->out_fmt.channels;
@@ -586,7 +586,7 @@ static void engine_teardown (AeAudioEngine *e)
     free (e->dry);
     free (e->harm_l);
     free (e->harm_r);
-    ae_psola_free (&e->psola);
+    ae_corrector_free (&e->corrector);
     free (e);
 }
 
@@ -613,11 +613,11 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->input_rate      = e->in_rate;
     out->output_rate     = e->out_rate;
     out->latency_samples = e->latency_frames;
-    out->detected_hz     = ae_psola_detected_hz (&e->psola);
-    out->target_hz       = ae_psola_target_hz (&e->psola);
-    out->voiced          = ae_psola_voiced (&e->psola);
+    out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
+    out->target_hz       = ae_corrector_target_hz (&e->corrector);
+    out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
-        out->harm_deg[v] = ae_psola_harm_degree (&e->psola, v);
+        out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);
     out->midi_held_lo = atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed)
                       | atomic_load_explicit (&e->params.vmidi_lo, memory_order_relaxed);
     out->midi_held_hi = atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed)
@@ -768,8 +768,8 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         return NULL;
     }
 
-    ae_psola_prepare (&e->psola, e->out_rate, MAX_FRAMES,
-                      cfg->det_min_hz, cfg->det_max_hz);
+    ae_corrector_prepare (&e->corrector, e->out_rate, MAX_FRAMES,
+                          cfg->det_min_hz, cfg->det_max_hz, cfg->quality);
     ae_audio_engine_set_params (e, &cfg->params);
 
     uint64_t cushion = (uint64_t) (e->in_rate * 0.020);
@@ -778,7 +778,7 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         cushion = three_blocks;
     e->prefill_target = cushion;
 
-    e->latency_frames = ae_psola_latency (&e->psola)
+    e->latency_frames = ae_corrector_latency (&e->corrector)
                       + (int) ((double) cushion * e->out_rate / e->in_rate)
                       + e->buffer_frames;
 

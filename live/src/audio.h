@@ -71,6 +71,7 @@ typedef struct
     int          buffer_frames;          /* preferred device I/O block size */
     double       det_min_hz;             /* detection range (0 = default) */
     double       det_max_hz;
+    int          quality;                /* AeShifterQuality: shifter block/latency */
     AeLiveParams params;
 } AeEngineConfig;
 

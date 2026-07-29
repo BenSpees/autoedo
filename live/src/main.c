@@ -36,6 +36,7 @@
   static void ae_sleep_ms (int ms) { usleep ((useconds_t) ms * 1000); }
 #endif
 
+#include "shifter.h"    /* pitch-shifter quality presets + version */
 #include "web_index.h"  /* generated: web_index_html[], web_index_html_len */
 #include "web_scales.h" /* generated: web_scales_json[], web_scales_json_len */
 
@@ -51,6 +52,7 @@ typedef struct
     double          ref_a4;        /* reference A4, default 440.0 */
     double          stretch_cents; /* octave stretch, cents per octave */
     char            range_name[16];/* detection range preset */
+    char            quality_name[16];/* pitch-shifter quality/latency preset */
     char            scale_cat[64]; /* last-loaded catalog scale (cosmetic; */
     char            scale_name[64];/* the mask itself is the real state)   */
     int             port;
@@ -75,6 +77,13 @@ static const struct { const char *name; double min_hz, max_hz; } k_ranges[] = {
     { "instrument", 65.0, 1600.0 },
     { "wide",       40.0, 2000.0 },
 };
+
+static int quality_lookup (const char *name)
+{
+    if (strcmp (name, "low") == 0)  return AE_SHIFT_QUALITY_LOW;
+    if (strcmp (name, "high") == 0) return AE_SHIFT_QUALITY_HIGH;
+    return AE_SHIFT_QUALITY_BALANCED;
+}
 
 static void range_lookup (const char *name, double *min_hz, double *max_hz)
 {
@@ -134,6 +143,7 @@ static void config_defaults (App *app)
     app->ref_a4        = 440.0;
     app->stretch_cents = 0.0;
     snprintf (app->range_name, sizeof (app->range_name), "instrument");
+    snprintf (app->quality_name, sizeof (app->quality_name), "balanced");
     app->scale_cat[0] = app->scale_name[0] = '\0';
 
     c->params.harm_on   = false;
@@ -162,6 +172,7 @@ static void config_sync (App *app)
                      * pow (2.0, app->root_cents / 1200.0);
     c->params.period_cents = 1200.0 + app->stretch_cents;
     range_lookup (app->range_name, &c->det_min_hz, &c->det_max_hz);
+    c->quality = quality_lookup (app->quality_name);
 }
 
 /* Serialise just the config (shared between the save file and /api/status). */
@@ -173,14 +184,14 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"amount\":%.6g,\"toleranceCents\":%.6g,\"stickiness\":%.6g,"
               "\"humanize\":%.6g,"
               "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
-              "\"stretchCents\":%.6g,\"range\":\"%s\","
+              "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"bypass\":%s,\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
               c->params.humanize,
               app->root_note, app->root_cents, app->ref_a4,
-              app->stretch_cents, app->range_name,
+              app->stretch_cents, app->range_name, app->quality_name,
               c->params.bypass ? "true" : "false",
               c->params.output_gain_db, c->buffer_frames);
     ae_json_escape_append (out, cap, c->input_uid);
@@ -304,6 +315,12 @@ static bool config_apply_json (App *app, const char *json)
         if (lo1 != lo2 || hi1 != hi2)
             restart = true; /* detection window is baked in at prepare time */
         snprintf (app->range_name, sizeof (app->range_name), "%.15s", str);
+    }
+    if (ae_json_get_string (json, "quality", str, sizeof (str)))
+    {
+        if (quality_lookup (str) != quality_lookup (app->quality_name))
+            restart = true; /* the shifter block size is fixed at prepare time */
+        snprintf (app->quality_name, sizeof (app->quality_name), "%.15s", str);
     }
     if (ae_json_get_bool (json, "bypass", &b))
         c->params.bypass = b;
@@ -494,6 +511,7 @@ static void status_refresh (App *app)
         "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"voiced\":%s,"
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
+        "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", err,
         st.input_rate, st.output_rate,
@@ -501,6 +519,7 @@ static void status_refresh (App *app)
         (double) st.detected_hz, (double) st.target_hz, st.voiced ? "true" : "false",
         hdeg, midi,
         in_name, out_name,
+        ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),

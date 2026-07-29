@@ -1,8 +1,8 @@
-/* Self-tests for the C port: tuning math, YIN detection, PSOLA correction
+/* Self-tests for the C port: tuning math, YIN detection, pitch correction
    and the JSON helpers. Pure POSIX — runs anywhere (`make test`). */
 
 #include "../src/json.h"
-#include "../src/psola.h"
+#include "../src/corrector.h"
 #include "../src/tuning.h"
 #include "../src/yin.h"
 
@@ -95,13 +95,13 @@ static void test_yin (void)
     ae_yin_free (&y);
 }
 
-static void test_psola (void)
+static void test_correction (void)
 {
-    AePsola *p = calloc (1, sizeof (AePsola));
-    ae_psola_prepare (p, 48000.0, 512, 0.0, 0.0); /* default detection range */
-    ae_psola_set_edo (p, 12);
-    ae_psola_set_retune_ms (p, 0.0);     /* hard snap */
-    ae_psola_set_transition_ms (p, 0.0); /* and hard degree changes */
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED); /* default detection range */
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);     /* hard snap */
+    ae_corrector_set_transition_ms (p, 0.0); /* and hard degree changes */
 
     /* 30-cents-flat A3 (220 Hz * 2^(-30/1200)) for 1 second. */
     const double f_in = 220.0 * pow (2.0, -30.0 / 1200.0);
@@ -117,12 +117,12 @@ static void test_psola (void)
     for (int off = 0; off < total; off += 512)
     {
         const int n = total - off < 512 ? total - off : 512;
-        ae_psola_process (p, buf + off, NULL, NULL, n);
+        ae_corrector_process (p, buf + off, NULL, NULL, n);
     }
 
-    CHECK (ae_psola_voiced (p), "psola voiced after 1 s of tone");
-    const float det = ae_psola_detected_hz (p);
-    const float tgt = ae_psola_target_hz (p);
+    CHECK (ae_corrector_voiced (p), "voiced after 1 s of tone");
+    const float det = ae_corrector_detected_hz (p);
+    const float tgt = ae_corrector_target_hz (p);
     CHECK (fabs (det - f_in) < 2.0, "detected %f (expected ~%f)", det, f_in);
     CHECK (fabs (tgt - 220.0) < 1e-2, "target %f (expected 220)", tgt);
 
@@ -148,7 +148,7 @@ static void test_psola (void)
            "output pitch corrected: got %f (input was %f)", r.frequency_hz, f_in);
     ae_yin_free (&y);
 
-    ae_psola_free (p);
+    ae_corrector_free (p);
     free (p);
     free (buf);
 }
@@ -190,17 +190,17 @@ static void test_walk (void)
 
 static void test_harmony (void)
 {
-    AePsola *p = calloc (1, sizeof (AePsola));
-    ae_psola_prepare (p, 48000.0, 512, 0.0, 0.0);
-    ae_psola_set_edo (p, 12);
-    ae_psola_set_retune_ms (p, 0.0);
-    ae_psola_set_transition_ms (p, 0.0);
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
 
     /* Voice 1: +7 steps (P5 above), centered. Voice 2: same -> must dedupe.
        Voice 3: +8 steps, mask-locked to a C-major-triad mask -> snaps to +7. */
     bool mask[AE_MAX_EDO] = { false };
     mask[0] = mask[4] = mask[7] = true;
-    ae_psola_set_enabled_degrees (p, mask, 12);
+    ae_corrector_set_enabled_degrees (p, mask, 12);
 
     AeHarmVoice voices[AE_HARM_VOICES];
     memset (voices, 0, sizeof (voices));
@@ -209,7 +209,7 @@ static void test_harmony (void)
     voices[0].interval = 7;
     voices[1].interval = 7; /* duplicate: must not double the level */
     voices[2].interval = 8; /* locks onto 7 via the mask -> deduped too */
-    ae_psola_set_harmony (p, true, 1, voices);
+    ae_corrector_set_harmony (p, true, 1, voices);
 
     /* A3 at exactly 220 Hz (also degree 9+3*12 of the C grid is 220 with
        default ref) so the corrected voice stays at 220 and the P5 ghost
@@ -227,15 +227,15 @@ static void test_harmony (void)
     for (int off = 0; off < total; off += 512)
     {
         const int n = total - off < 512 ? total - off : 512;
-        ae_psola_process (p, in + off, hl + off, hr + off, n);
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
     }
 
-    CHECK (ae_psola_voiced (p), "harmony test voiced");
-    CHECK (ae_psola_harm_degree (p, 0) != AE_HARM_DEG_OFF, "voice 1 sounding");
+    CHECK (ae_corrector_voiced (p), "harmony test voiced");
+    CHECK (ae_corrector_harm_degree (p, 0) != AE_HARM_DEG_OFF, "voice 1 sounding");
     /* Voices 2 and 3 still REPORT their degree (UI shows the chord) even
        though their audio deduped into voice 1's. */
-    const int d0 = ae_psola_harm_degree (p, 0);
-    const int d2 = ae_psola_harm_degree (p, 2);
+    const int d0 = ae_corrector_harm_degree (p, 0);
+    const int d2 = ae_corrector_harm_degree (p, 2);
     CHECK ((d0 % 12 + 12) % 12 == ((d2 % 12) + 12) % 12,
            "mask lock: +8 snapped to the fifth (deg0 %d deg2 %d)", d0, d2);
 
@@ -250,14 +250,14 @@ static void test_harmony (void)
     double rms3 = 0.0;
     for (int i = total - tail; i < total; ++i) rms3 += (double) hl[i] * hl[i];
 
-    ae_psola_reset (p);
-    ae_psola_set_edo (p, 12);
-    ae_psola_set_retune_ms (p, 0.0);
-    ae_psola_set_transition_ms (p, 0.0);
-    ae_psola_set_enabled_degrees (p, mask, 12);
+    ae_corrector_reset (p);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    ae_corrector_set_enabled_degrees (p, mask, 12);
     voices[1].interval = 0;
     voices[2].interval = 0;
-    ae_psola_set_harmony (p, true, 1, voices);
+    ae_corrector_set_harmony (p, true, 1, voices);
     phase = 0.0;
     for (int i = 0; i < total; ++i)
     {
@@ -267,25 +267,25 @@ static void test_harmony (void)
     for (int off = 0; off < total; off += 512)
     {
         const int n = total - off < 512 ? total - off : 512;
-        ae_psola_process (p, in + off, hl + off, hr + off, n);
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
     }
     double rms1 = 0.0;
     for (int i = total - tail; i < total; ++i) rms1 += (double) hl[i] * hl[i];
     CHECK (rms3 < rms1 * 1.5 + 1e-9,
            "dedupe: 3 coincident voices no louder than 1 (%.4g vs %.4g)", rms3, rms1);
 
-    ae_psola_free (p);
+    ae_corrector_free (p);
     free (p);
     free (in); free (hl); free (hr);
 }
 
 static void test_midi_harmony (void)
 {
-    AePsola *p = calloc (1, sizeof (AePsola));
-    ae_psola_prepare (p, 48000.0, 512, 0.0, 0.0);
-    ae_psola_set_edo (p, 12);
-    ae_psola_set_retune_ms (p, 0.0);
-    ae_psola_set_transition_ms (p, 0.0);
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
 
     /* Full-chromatic mask, but hold C4+E4+G4 (60/64/67): with MIDI mode on,
        an A3 input must retune to the nearest held note = C4 (261.63 Hz),
@@ -294,8 +294,8 @@ static void test_midi_harmony (void)
     memset (voices, 0, sizeof (voices));
     for (int v = 0; v < AE_HARM_VOICES; ++v) voices[v].gain = 1.0;
     voices[0].interval = 7;
-    ae_psola_set_harmony (p, true, 1, voices);
-    ae_psola_set_midi (p, true, (1ull << 60) | (1ull << 63), 1ull << (67 - 64));
+    ae_corrector_set_harmony (p, true, 1, voices);
+    ae_corrector_set_midi (p, true, (1ull << 60) | (1ull << 63), 1ull << (67 - 64));
     /* note: bit 63 is note 63 (D#4) — held set {60, 63, 67} */
 
     const int total = 48000;
@@ -311,20 +311,20 @@ static void test_midi_harmony (void)
     for (int off = 0; off < total; off += 512)
     {
         const int n = total - off < 512 ? total - off : 512;
-        ae_psola_process (p, in + off, hl + off, hr + off, n);
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
     }
 
-    CHECK (ae_psola_voiced (p), "midi test voiced");
-    const float tgt = ae_psola_target_hz (p);
+    CHECK (ae_corrector_voiced (p), "midi test voiced");
+    const float tgt = ae_corrector_target_hz (p);
     CHECK (fabs (tgt - 261.63) < 0.5,
            "A3 retunes to held C4: got %.2f (expect 261.63)", tgt);
     /* voice +7 from C4 (deg 48) = 55 (pc 7 = G, held) -> stays 55 */
-    const int d0 = ae_psola_harm_degree (p, 0);
+    const int d0 = ae_corrector_harm_degree (p, 0);
     CHECK (d0 == 55, "harmony locks to held pcs: got %d (expect 55)", d0);
 
     /* Release all notes: normal behavior resumes (A3 stays 220 on the
        chromatic mask). */
-    ae_psola_set_midi (p, true, 0, 0);
+    ae_corrector_set_midi (p, true, 0, 0);
     phase = 0.0;
     for (int i = 0; i < total; ++i)
     {
@@ -334,12 +334,12 @@ static void test_midi_harmony (void)
     for (int off = 0; off < total; off += 512)
     {
         const int n = total - off < 512 ? total - off : 512;
-        ae_psola_process (p, in + off, hl + off, hr + off, n);
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
     }
-    CHECK (fabs (ae_psola_target_hz (p) - 220.0) < 0.5,
-           "release -> normal behavior: got %.2f (expect 220)", ae_psola_target_hz (p));
+    CHECK (fabs (ae_corrector_target_hz (p) - 220.0) < 0.5,
+           "release -> normal behavior: got %.2f (expect 220)", ae_corrector_target_hz (p));
 
-    ae_psola_free (p);
+    ae_corrector_free (p);
     free (p); free (in); free (hl); free (hr);
 }
 
@@ -383,7 +383,7 @@ int main (void)
 {
     test_tuning();
     test_yin();
-    test_psola();
+    test_correction();
     test_walk();
     test_harmony();
     test_midi_harmony();

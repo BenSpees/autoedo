@@ -9,7 +9,7 @@
 #include <stdatomic.h>
 
 #include "audio.h"
-#include "psola.h"
+#include "corrector.h"
 
 typedef struct
 {
@@ -80,22 +80,22 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
 /* Audio thread, once per block: push the current parameters into the
    corrector and report bypass/gain for the output stage. hw_midi_lo/hi are
    the backend's hardware held-note bits (0 if it has no MIDI input). */
-static inline void ae_atomic_params_apply (AeAtomicParams *a, AePsola *ps,
+static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                                            uint64_t hw_midi_lo, uint64_t hw_midi_hi,
                                            bool *bypass_out, float *gain_out)
 {
-    ae_psola_set_midi (ps,
+    ae_corrector_set_midi (ps,
                        atomic_load_explicit (&a->midi_mode, memory_order_relaxed),
                        hw_midi_lo | atomic_load_explicit (&a->vmidi_lo, memory_order_relaxed),
                        hw_midi_hi | atomic_load_explicit (&a->vmidi_hi, memory_order_relaxed));
-    ae_psola_set_edo             (ps, atomic_load_explicit (&a->edo, memory_order_relaxed));
-    ae_psola_set_retune_ms       (ps, atomic_load_explicit (&a->retune_ms, memory_order_relaxed));
-    ae_psola_set_transition_ms   (ps, atomic_load_explicit (&a->transition_ms, memory_order_relaxed));
-    ae_psola_set_amount          (ps, atomic_load_explicit (&a->amount, memory_order_relaxed));
-    ae_psola_set_tolerance_cents (ps, atomic_load_explicit (&a->tolerance_cents, memory_order_relaxed));
-    ae_psola_set_stickiness      (ps, atomic_load_explicit (&a->stickiness, memory_order_relaxed));
-    ae_psola_set_humanize        (ps, atomic_load_explicit (&a->humanize, memory_order_relaxed));
-    ae_psola_set_reference       (ps, atomic_load_explicit (&a->ref_hz, memory_order_relaxed),
+    ae_corrector_set_edo             (ps, atomic_load_explicit (&a->edo, memory_order_relaxed));
+    ae_corrector_set_retune_ms       (ps, atomic_load_explicit (&a->retune_ms, memory_order_relaxed));
+    ae_corrector_set_transition_ms   (ps, atomic_load_explicit (&a->transition_ms, memory_order_relaxed));
+    ae_corrector_set_amount          (ps, atomic_load_explicit (&a->amount, memory_order_relaxed));
+    ae_corrector_set_tolerance_cents (ps, atomic_load_explicit (&a->tolerance_cents, memory_order_relaxed));
+    ae_corrector_set_stickiness      (ps, atomic_load_explicit (&a->stickiness, memory_order_relaxed));
+    ae_corrector_set_humanize        (ps, atomic_load_explicit (&a->humanize, memory_order_relaxed));
+    ae_corrector_set_reference       (ps, atomic_load_explicit (&a->ref_hz, memory_order_relaxed),
                                       atomic_load_explicit (&a->period_cents, memory_order_relaxed));
 
     const uint64_t lo = atomic_load_explicit (&a->deg_lo, memory_order_relaxed);
@@ -103,7 +103,7 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AePsola *ps,
     bool mask[AE_MAX_EDO];
     for (int d = 0; d < AE_MAX_EDO; ++d)
         mask[d] = d < 64 ? ((lo >> d) & 1u) != 0 : ((hi >> (d - 64)) & 1u) != 0;
-    ae_psola_set_enabled_degrees (ps, mask, AE_MAX_EDO);
+    ae_corrector_set_enabled_degrees (ps, mask, AE_MAX_EDO);
 
     AeHarmVoice voices[AE_HARM_VOICES];
     const uint32_t mute = atomic_load_explicit (&a->harm_mute, memory_order_relaxed);
@@ -117,7 +117,7 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AePsola *ps,
         voices[v].mute     = ((mute >> v) & 1u) != 0;
         voices[v].solo     = ((solo >> v) & 1u) != 0;
     }
-    ae_psola_set_harmony (ps,
+    ae_corrector_set_harmony (ps,
                           atomic_load_explicit (&a->harm_on, memory_order_relaxed),
                           atomic_load_explicit (&a->harm_lock, memory_order_relaxed),
                           voices);
