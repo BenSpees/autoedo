@@ -126,6 +126,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);
+    out->trace_len = ae_corrector_trace (&e->corrector, &out->trace_seq,
+                                         out->trace_det, out->trace_tgt, AE_TRACE_MAX);
     out->midi_held_lo = atomic_load_explicit (&e->params.vmidi_lo, memory_order_relaxed);
     out->midi_held_hi = atomic_load_explicit (&e->params.vmidi_hi, memory_order_relaxed);
     snprintf (out->input_name,  sizeof (out->input_name),  "Stub Test Tone (input)");

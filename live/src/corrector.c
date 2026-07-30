@@ -435,6 +435,20 @@ static void run_detection (AeCorrector *p)
 
     p->voiced = now_voiced;
     atomic_store_explicit (&p->voiced_out, now_voiced, memory_order_relaxed);
+
+    /* Pitch-trace ring: one point per detection (~200/s), packed into a
+       single atomic so a reader can never tear a pair. Unvoiced stores 0 Hz
+       detected, which is also the reader's "no note here" marker. The seq
+       release-store publishes the slot write above it. */
+    {
+        union { float f; uint32_t u; } det, tgt;
+        det.f = now_voiced ? ae_corrector_detected_hz (p) : 0.0f;
+        tgt.f = ae_corrector_target_hz (p);
+        const uint32_t s = atomic_load_explicit (&p->trace_seq, memory_order_relaxed);
+        atomic_store_explicit (&p->trace_slots[s % AE_TRACE_SLOTS],
+                               ((uint64_t) det.u << 32) | tgt.u, memory_order_relaxed);
+        atomic_store_explicit (&p->trace_seq, s + 1, memory_order_release);
+    }
 }
 
 /* Tonality limit for large shifts: frequencies above this are mapped

@@ -119,6 +119,14 @@ down. Both carry the identical string, serialized once per tick server-side.
   "detectedHz": 224.49,       // last detected input f0 (stale when !voiced)
   "targetHz": 220.0,          // current correction target
   "voiced": true,             // false = dry passthrough (show readouts dimmed)
+  "traceSeq": 12345,          // detections ever made; stitch frames by this
+  "trace": [[224.4,220.0], ...],
+                              // pitch trace, oldest first: one [detected,
+                              // target] pair per detection hop (~200/s, ~48
+                              // per frame; detected 0 = unvoiced). Frames
+                              // overlap — a consumer keeps the last traceSeq
+                              // it drew and appends only the new tail. This
+                              // is what a pitch-graph view renders from
   "harmDeg": [52, null, null, null, null],
                               // per-voice live ghost degree (signed steps re
                               // root octave 0); null = voice silent. Muted /

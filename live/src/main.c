@@ -66,9 +66,10 @@ typedef struct
 
     /* Status is serialized once per pump tick (or config change) and every
        consumer — each WebSocket push and each /api/status GET — is handed
-       the same cached string. */
+       the same cached string. Sized for the config echo plus the pitch
+       trace (~48 pairs). */
     pthread_mutex_t status_lock;
-    char            status_json[8192];
+    char            status_json[12288];
 } App;
 
 /* Detection-range presets (min/max Hz of the tracking window). */
@@ -491,7 +492,7 @@ static void engine_restart_locked (App *app)
    pattern: one serialization per tick, shared by all consumers). */
 static void status_refresh (App *app)
 {
-    char buf[8192];
+    char buf[12288];
 
     pthread_mutex_lock (&app->lock);
 
@@ -524,6 +525,17 @@ static void status_refresh (App *app)
     }
     snprintf (hdeg + hn, sizeof (hdeg) - hn, "]");
 
+    /* pitch trace: [[detected, target], ...] oldest first, with the absolute
+       detection count so a consumer can stitch frames without duplicates. */
+    char trace[AE_TRACE_MAX * 24 + 32];
+    size_t tn = 0;
+    tn += (size_t) snprintf (trace + tn, sizeof (trace) - tn, "[");
+    for (int i = 0; i < st.trace_len && tn < sizeof (trace) - 26; ++i)
+        tn += (size_t) snprintf (trace + tn, sizeof (trace) - tn, "%s[%.1f,%.1f]",
+                                 i ? "," : "",
+                                 (double) st.trace_det[i], (double) st.trace_tgt[i]);
+    snprintf (trace + tn, sizeof (trace) - tn, "]");
+
     /* held MIDI notes as note numbers */
     char midi[512];
     size_t mn = 0;
@@ -544,6 +556,7 @@ static void status_refresh (App *app)
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,"
         "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"voiced\":%s,"
+        "\"traceSeq\":%u,\"trace\":%s,"
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
@@ -552,6 +565,7 @@ static void status_refresh (App *app)
         st.input_rate, st.output_rate,
         st.latency_samples, lat_ms,
         (double) st.detected_hz, (double) st.target_hz, st.voiced ? "true" : "false",
+        st.trace_seq, trace,
         hdeg, midi,
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",

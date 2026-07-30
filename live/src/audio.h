@@ -82,6 +82,11 @@ typedef struct
     AeLiveParams params;
 } AeEngineConfig;
 
+/* How many pitch-trace points a status snapshot carries. The corrector logs
+   one per detection hop (~200/s) and status ticks at ~10 Hz, so 48 covers a
+   tick twice over -- consumers stitch ticks together with trace_seq. */
+#define AE_TRACE_MAX 48
+
 typedef struct
 {
     bool   running;
@@ -91,6 +96,12 @@ typedef struct
     float  detected_hz;     /* live read-out from the corrector */
     float  target_hz;
     bool   voiced;
+    /* Pitch trace, oldest first: detected (0 = unvoiced) and target per
+       detection hop, ending at absolute detection count trace_seq. */
+    int      trace_len;
+    uint32_t trace_seq;
+    float    trace_det[AE_TRACE_MAX];
+    float    trace_tgt[AE_TRACE_MAX];
     int    harm_deg[5];     /* live ghost degrees (signed, re root); INT_MIN = silent */
     uint64_t midi_held_lo;  /* currently held MIDI notes (hardware + virtual) */
     uint64_t midi_held_hi;

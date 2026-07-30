@@ -127,6 +127,14 @@ typedef struct
     _Atomic float detected_hz_out;
     _Atomic float target_hz_out;
     _Atomic bool  voiced_out;
+
+    /* Pitch-trace ring: one (detected, target) pair per detection hop
+       (~200/s), for the graph view. Each slot is one atomic u64 (two packed
+       float32s) so a pair can never tear; trace_seq counts detections ever
+       made and its release-store publishes the slot. */
+#define AE_TRACE_SLOTS 64
+    _Atomic uint64_t trace_slots[AE_TRACE_SLOTS];
+    _Atomic uint32_t trace_seq;
 } AeCorrector;
 
 /* Allocate buffers and pitch shifters for a sample rate / block size. Call
@@ -235,6 +243,35 @@ static inline float ae_corrector_target_hz (const AeCorrector *p)
 static inline bool ae_corrector_voiced (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->voiced_out, memory_order_relaxed);
+}
+
+/* Copy the most recent trace points, oldest first: det[i] is the detected
+   pitch (0 = unvoiced) and tgt[i] the correction target of one detection
+   hop. Fills *seq_out with the count of detections ever made -- a consumer
+   dedupes overlapping reads by remembering the seq it last drew. Safe
+   against the audio thread; a slot the writer laps mid-read yields a
+   newer-generation point, never a torn one. */
+static inline int ae_corrector_trace (const AeCorrector *p, uint32_t *seq_out,
+                                      float *det, float *tgt, int max)
+{
+    AeCorrector *c = (AeCorrector *) p;
+    const uint32_t seq = atomic_load_explicit (&c->trace_seq, memory_order_acquire);
+    int n = max < AE_TRACE_SLOTS ? max : AE_TRACE_SLOTS;
+    if ((uint32_t) n > seq)
+        n = (int) seq;
+    for (int i = 0; i < n; ++i)
+    {
+        const uint32_t s = seq - (uint32_t) n + (uint32_t) i;
+        const uint64_t packed =
+            atomic_load_explicit (&c->trace_slots[s % AE_TRACE_SLOTS], memory_order_relaxed);
+        union { uint32_t u; float f; } d, t;
+        d.u = (uint32_t) (packed >> 32);
+        t.u = (uint32_t) (packed & 0xffffffffu);
+        det[i] = d.f;
+        tgt[i] = t.f;
+    }
+    *seq_out = seq;
+    return n;
 }
 
 #endif /* AUTOEDO_CORRECTOR_H */
