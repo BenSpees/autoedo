@@ -455,17 +455,37 @@ static void test_engine_channels (void)
     hz = engine_settled_hz (2);
     CHECK (hz > 280.0 && hz < 308.0, "channel 2 detects D4: got %.1f Hz", hz);
 
-    /* A channel past the device's count refuses to start, with a message. */
+    /* A channel past the device's count refuses to start, with a message —
+       on either side of the engine. */
     AeEngineConfig cfg;
     memset (&cfg, 0, sizeof (cfg));
     cfg.input_channel = 3;
     cfg.params.edo    = 12;
     char err[256] = "";
     AeAudioEngine *e = ae_audio_engine_start (&cfg, err, sizeof (err));
-    CHECK (e == NULL, "channel 3 on a 2-channel device fails to start");
+    CHECK (e == NULL, "input channel 3 on a 2-channel device fails to start");
     CHECK (strstr (err, "no input channel 3") != NULL, "error names the channel: '%s'", err);
     if (e != NULL)
         ae_audio_engine_stop (e);
+
+    memset (&cfg, 0, sizeof (cfg));
+    cfg.output_channel = 3;
+    cfg.params.edo     = 12;
+    err[0] = '\0';
+    e = ae_audio_engine_start (&cfg, err, sizeof (err));
+    CHECK (e == NULL, "output channel 3 on a 2-channel sink fails to start");
+    CHECK (strstr (err, "no output channel 3") != NULL, "error names the channel: '%s'", err);
+    if (e != NULL)
+        ae_audio_engine_stop (e);
+
+    /* A valid output channel runs; the stub sink is silent either way. */
+    memset (&cfg, 0, sizeof (cfg));
+    cfg.output_channel = 2;
+    cfg.params.edo     = 12;
+    err[0] = '\0';
+    e = ae_audio_engine_start (&cfg, err, sizeof (err));
+    CHECK (e != NULL, "output channel 2 starts: %s", err);
+    ae_audio_engine_stop (e);
 }
 
 int main (void)

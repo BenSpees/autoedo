@@ -250,6 +250,9 @@
           <select id="in-ch"><option value="0">Device default</option></select>
         </div>
         <div class="prow"><label>Output</label><select id="out-dev"></select></div>
+        <div class="prow"><label>Output channel</label>
+          <select id="out-ch"><option value="0">Stereo (channels 1–2)</option></select>
+        </div>
         <div class="prow"><label>Buffer</label>
           <select id="bufsize" style="flex:0 0 90px">
             <option>64</option><option>128</option><option selected>256</option>
@@ -1490,7 +1493,11 @@ $('in-dev').onchange = e => {
   fillChannelSelect(); // the channel list follows the newly picked device
 };
 $('in-ch').onchange = e => schedulePost({ inputChannel: +e.target.value });
-$('out-dev').onchange = e => schedulePost({ outputUid: e.target.value });
+$('out-dev').onchange = e => {
+  schedulePost({ outputUid: e.target.value }); // updates the cfg mirror too
+  fillChannelSelect(); // the channel list follows the newly picked device
+};
+$('out-ch').onchange = e => schedulePost({ outputChannel: +e.target.value });
 $('refresh-dev').onclick = () => loadDevices();
 $('gain').oninput = e => {
   $('gain-val').textContent = `${(+e.target.value).toFixed(1)} dB`;
@@ -1532,23 +1539,20 @@ function fillDeviceSelect(sel, devices, wantInput, currentUid) {
   sel.value = currentUid || '';
   if (sel.value !== (currentUid || '')) sel.value = '';
 }
-// The channel picker offers the selected input device's capture channels
-// ("" = the system default input device, marked defaultInput in the list).
+// The channel pickers offer the selected devices' channels ("" = the system
+// default device, marked defaultInput/defaultOutput in the list).
 let inputDevices = [];
-function fillChannelSelect() {
-  const sel = $('in-ch');
-  const uid = cfg ? (cfg.inputUid || '') : '';
-  const dev = uid === '' ? inputDevices.find(d => d.defaultInput)
-                         : inputDevices.find(d => d.uid === uid);
-  const count = dev ? Math.min(dev.inputs, 32) : 0;
-  const want = cfg ? (cfg.inputChannel || 0) : 0;
+let outputDevices = [];
+function fillChannelPick(sel, devs, uid, defFlag, countKey, want, zeroLabel) {
+  const dev = uid === '' ? devs.find(d => d[defFlag]) : devs.find(d => d.uid === uid);
+  const count = dev ? Math.min(dev[countKey], 32) : 0;
   // Rebuild only when something the list depends on changed: this runs from
   // every status frame via setControls, and tearing the select down 10x/s
   // would fight the user's open dropdown.
   const shape = `${uid}|${count}|${want}`;
   if (sel.dataset.shape === shape) return;
   sel.dataset.shape = shape;
-  sel.innerHTML = '<option value="0">Device default</option>';
+  sel.innerHTML = `<option value="0">${zeroLabel}</option>`;
   for (let ch = 1; ch <= count; ++ch) {
     const o = document.createElement('option');
     o.value = String(ch);
@@ -1566,11 +1570,20 @@ function fillChannelSelect() {
   }
   sel.value = String(want);
 }
+function fillChannelSelect() {
+  fillChannelPick($('in-ch'), inputDevices, cfg ? (cfg.inputUid || '') : '',
+                  'defaultInput', 'inputs', cfg ? (cfg.inputChannel || 0) : 0,
+                  'Device default');
+  fillChannelPick($('out-ch'), outputDevices, cfg ? (cfg.outputUid || '') : '',
+                  'defaultOutput', 'outputs', cfg ? (cfg.outputChannel || 0) : 0,
+                  'Stereo (channels 1–2)');
+}
 async function loadDevices() {
   try {
     const r = await fetch('/api/devices');
     const j = await r.json();
     inputDevices = (j.devices || []).filter(d => d.inputs > 0);
+    outputDevices = (j.devices || []).filter(d => d.outputs > 0);
     fillDeviceSelect($('in-dev'), j.devices || [], true, cfg ? cfg.inputUid : '');
     fillDeviceSelect($('out-dev'), j.devices || [], false, cfg ? cfg.outputUid : '');
     fillChannelSelect();

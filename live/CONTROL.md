@@ -196,6 +196,7 @@ UI behavior you may want to replicate).
 |---|---|---|---|
 | `inputUid`, `outputUid` | string | **restart** | device UIDs from `/api/devices`; `""` = system default |
 | `inputChannel` | int 0–32 | **restart** | which capture channel of the input device feeds the (mono) engine, 1-based. `0` = backend default: the device's first channel on macOS, a mix of all channels on Windows. A channel past the device's count fails engine start with `error` naming the channel. This is how a per-channel rig binds one instance to input 1 (voice) and another to input 2 (guitar) of the same interface (§10) |
+| `outputChannel` | int 0–32 | **restart** | which playback channel of the output device carries the engine's output, 1-based. `0` = default: stereo on the device's first two channels (harmony panned). `N` = ALL output — corrected voice plus harmony, mono-folded — on that one channel, silence elsewhere, so an instance can own a single bus of a multi-out interface (voice → out 3, guitar → out 4). A channel past the device's count fails engine start with `error` naming the channel |
 | `bufferFrames` | int 32–2048 | **restart** | preferred hardware block size |
 
 ### Instance identity
@@ -323,8 +324,11 @@ Per instance, give it:
 - **its own settings file** — `--config ~/.autoedo-guitar.json`
   (`AUTOEDO_CONFIG` via the launcher). Without this, both instances load
   and rewrite `~/.autoedo.json` and the channels' settings cross-contaminate;
-- **its channel binding** — `POST /api/config {"inputChannel": 1}` (voice)
-  vs `{"inputChannel": 2}` (guitar), same `inputUid`;
+- **its channel bindings** — `POST /api/config {"inputChannel": 1}` (voice)
+  vs `{"inputChannel": 2}` (guitar), same `inputUid`; add `outputChannel`
+  to give each instance its own playback bus of the shared interface
+  (mono-folded — e.g. voice → out 3, guitar → out 4) instead of both
+  stacking on channels 1–2;
 - optionally **a label** — `{"label": "Voice"}` — so the built-in UIs read
   apart.
 
@@ -347,4 +351,6 @@ Shared-device fine print:
   `midiSource` unset both instances try to open everything and only one
   gets each source. Bind `midiSource` deliberately, or drive MIDI Harmony
   over `POST /api/midi` (virtual notes need no device).
-- The processed outputs of both instances mix at the output device.
+- The processed outputs of both instances mix at the output device —
+  give each its own `outputChannel` when they should stay on separate
+  jacks instead.

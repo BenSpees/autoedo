@@ -169,6 +169,7 @@ static void config_defaults (App *app)
     c->params.midi_mode = false;
     c->midi_source[0]   = '\0'; /* all MIDI inputs */
     c->input_channel    = 0;    /* backend default channel handling */
+    c->output_channel   = 0;    /* stereo on the device's first two channels */
     app->label[0]       = '\0';
 }
 
@@ -197,14 +198,15 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"bypass\":%s,\"outputGainDb\":%.6g,"
-              "\"bufferFrames\":%d,\"inputChannel\":%d,\"inputUid\":\"",
+              "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
               c->params.humanize,
               app->root_note, app->root_cents, app->ref_a4,
               app->stretch_cents, app->range_name, app->quality_name,
               c->params.bypass ? "true" : "false",
-              c->params.output_gain_db, c->buffer_frames, c->input_channel);
+              c->params.output_gain_db, c->buffer_frames, c->input_channel,
+              c->output_channel);
     ae_json_escape_append (out, cap, c->input_uid);
     strncat (out, "\",\"outputUid\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->output_uid);
@@ -426,6 +428,15 @@ static bool config_apply_json (App *app, const char *json)
         {
             c->input_channel = ch;
             restart = true; /* the capture binding is fixed at engine start */
+        }
+    }
+    if (ae_json_get_number (json, "outputChannel", &num))
+    {
+        const int ch = (int) num_clamp (num, 0.0, 32.0);
+        if (ch != c->output_channel)
+        {
+            c->output_channel = ch;
+            restart = true; /* the playback binding is fixed at engine start */
         }
     }
     if (ae_json_get_string (json, "inputUid", str, sizeof (str))

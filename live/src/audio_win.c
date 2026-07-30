@@ -312,8 +312,9 @@ struct AeAudioEngine
     bool     prefilled;
     uint64_t prefill_target;
 
-    float *cap_scratch; /* mono capture block */
-    int    cap_channel; /* 0-based capture channel to keep; -1 = mix all */
+    float *cap_scratch;    /* mono capture block */
+    int    cap_channel;    /* 0-based capture channel to keep; -1 = mix all */
+    int    out_channel_sel; /* 0-based playback channel for the mono fold; -1 = stereo 1-2 */
     float *proc;
     float *dry;
     float *harm_l;
@@ -520,6 +521,7 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
 
     const float *src = bypass ? e->dry : e->proc;
     const int    ch  = e->out_fmt.channels;
+    const int    sel = e->out_channel_sel; /* -1 = stereo on channels 1-2 */
 
     if (e->out_fmt.is_float)
     {
@@ -529,7 +531,8 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
             const float l = (src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
             const float r = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
             for (int c = 0; c < ch; ++c)
-                d[i * ch + c] = ch >= 2 ? (c == 0 ? l : (c == 1 ? r : 0.5f * (l + r)))
+                d[i * ch + c] = sel >= 0 ? (c == sel ? 0.5f * (l + r) : 0.0f)
+                              : ch >= 2 ? (c == 0 ? l : (c == 1 ? r : 0.5f * (l + r)))
                                         : 0.5f * (l + r);
         }
     }
@@ -542,7 +545,8 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
             const float r = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
             for (int c = 0; c < ch; ++c)
             {
-                float v = ch >= 2 ? (c == 0 ? l : (c == 1 ? r : 0.5f * (l + r)))
+                float v = sel >= 0 ? (c == sel ? 0.5f * (l + r) : 0.0f)
+                        : ch >= 2 ? (c == 0 ? l : (c == 1 ? r : 0.5f * (l + r)))
                                   : 0.5f * (l + r);
                 if (v > 1.0f)  v = 1.0f;
                 if (v < -1.0f) v = -1.0f;
@@ -783,6 +787,20 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
             return NULL;
         }
         e->cap_channel = cfg->input_channel - 1;
+    }
+    /* Same for playback: a bound channel gets the mono fold, the rest get
+       silence; the default keeps stereo on the first two. */
+    e->out_channel_sel = -1;
+    if (cfg->output_channel > 0)
+    {
+        if (cfg->output_channel > e->out_fmt.channels)
+        {
+            snprintf (err, err_len, "device \"%s\" has no output channel %d (%d available)",
+                      e->out_name, cfg->output_channel, e->out_fmt.channels);
+            engine_teardown (e);
+            return NULL;
+        }
+        e->out_channel_sel = cfg->output_channel - 1;
     }
 
     if (FAILED (IAudioClient_GetService (e->in_ac, &k_IID_IAudioCaptureClient,

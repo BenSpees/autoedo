@@ -566,7 +566,16 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     e->out_rate = device_nominal_rate (out_dev);
     if (e->in_rate <= 0.0)  e->in_rate  = 44100.0;
     if (e->out_rate <= 0.0) e->out_rate = 44100.0;
-    e->out_channels  = out_ch < 2 ? out_ch : 2;
+    /* A bound output channel renders mono (voice + harmony folded) onto that
+       one device channel; the default is stereo on the first two. */
+    if (cfg->output_channel > 0 && cfg->output_channel > out_ch)
+    {
+        snprintf (err, err_len, "device \"%s\" has no output channel %d (%d available)",
+                  e->out_name, cfg->output_channel, out_ch);
+        free (e);
+        return NULL;
+    }
+    e->out_channels  = cfg->output_channel > 0 ? 1 : (out_ch < 2 ? out_ch : 2);
     e->buffer_frames = cfg->buffer_frames >= 32 && cfg->buffer_frames <= 2048
                          ? cfg->buffer_frames : 256;
 
@@ -705,6 +714,29 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         snprintf (err, err_len, "output format not accepted (%d)", (int) st);
         engine_teardown (e);
         return NULL;
+    }
+
+    /* Route the mono client onto the one requested device channel. The output
+       map has one entry PER DEVICE CHANNEL, each naming the client channel
+       that feeds it (-1 = silence) -- the mirror of the input map's shape. */
+    if (cfg->output_channel > 0)
+    {
+        SInt32 map[64];
+        int n_map = out_ch;
+        if (n_map > 64)
+            n_map = 64;
+        for (int i = 0; i < n_map; ++i)
+            map[i] = -1;
+        map[cfg->output_channel - 1] = 0;
+        if ((st = AudioUnitSetProperty (e->out_unit, kAudioOutputUnitProperty_ChannelMap,
+                                        kAudioUnitScope_Output, 0, map,
+                                        (UInt32) (n_map * (int) sizeof (SInt32)))) != noErr)
+        {
+            snprintf (err, err_len, "output channel %d not accepted (%d)",
+                      cfg->output_channel, (int) st);
+            engine_teardown (e);
+            return NULL;
+        }
     }
 
     AURenderCallbackStruct out_cb = { render_cb, e };

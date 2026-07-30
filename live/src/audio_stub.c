@@ -151,6 +151,12 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
                                 "channel %d (2 available)", cfg->input_channel);
         return NULL;
     }
+    if (cfg->output_channel > 2)
+    {
+        snprintf (err, err_len, "device \"Stub Null Sink (output)\" has no output "
+                                "channel %d (2 available)", cfg->output_channel);
+        return NULL;
+    }
 
     AeAudioEngine *e = calloc (1, sizeof (*e));
     if (e == NULL)

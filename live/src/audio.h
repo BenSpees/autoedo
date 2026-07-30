@@ -71,6 +71,10 @@ typedef struct
     int          input_channel;          /* 1-based capture channel of the input
                                             device; 0 = backend default (mac:
                                             first channel, win: mix of all) */
+    int          output_channel;         /* 1-based playback channel: ALL output
+                                            (voice + harmony, mono-folded) lands
+                                            on that one device channel; 0 =
+                                            default stereo on channels 1-2 */
     int          buffer_frames;          /* preferred device I/O block size */
     double       det_min_hz;             /* detection range (0 = default) */
     double       det_max_hz;
