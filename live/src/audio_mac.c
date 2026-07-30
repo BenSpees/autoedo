@@ -640,6 +640,31 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         return NULL;
     }
 
+    /* Bind a specific device capture channel to the mono client stream.
+       Without a map AUHAL folds in the device's first channel — fine for a
+       microphone, wrong for a multi-input interface where each instance of
+       the engine owns one input (e.g. 1 = voice, 2 = guitar). */
+    if (cfg->input_channel > 0)
+    {
+        const int in_ch = device_channels (in_dev, kAudioObjectPropertyScopeInput);
+        if (cfg->input_channel > in_ch)
+        {
+            snprintf (err, err_len, "device \"%s\" has no input channel %d (%d available)",
+                      e->in_name, cfg->input_channel, in_ch);
+            engine_teardown (e);
+            return NULL;
+        }
+        const SInt32 map[1] = { (SInt32) (cfg->input_channel - 1) };
+        if ((st = AudioUnitSetProperty (e->in_unit, kAudioOutputUnitProperty_ChannelMap,
+                                        kAudioUnitScope_Output, 1, map, sizeof (map))) != noErr)
+        {
+            snprintf (err, err_len, "input channel %d not accepted (%d)",
+                      cfg->input_channel, (int) st);
+            engine_teardown (e);
+            return NULL;
+        }
+    }
+
     AURenderCallbackStruct in_cb = { input_cb, e };
     AudioUnitSetProperty (e->in_unit, kAudioOutputUnitProperty_SetInputCallback,
                           kAudioUnitScope_Global, 0, &in_cb, sizeof (in_cb));

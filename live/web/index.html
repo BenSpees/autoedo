@@ -238,7 +238,7 @@
 
   <!-- header: 1 line -->
   <div id="header" class="band">
-    <h1>AutoEDO <span class="live">Live</span></h1>
+    <h1>AutoEDO <span class="live">Live</span><span id="inst-label" class="live" style="margin-left:.4em;opacity:.75"></span></h1>
     <div class="popwrap">
       <button id="statusbtn" class="ghost" title="engine status — click for audio settings">
         <span class="dot" id="dot"></span><span id="lat" class="tab">…</span>
@@ -246,6 +246,9 @@
       </button>
       <div class="pop" id="pop-engine">
         <div class="prow"><label>Input</label><select id="in-dev"></select></div>
+        <div class="prow"><label>Input channel</label>
+          <select id="in-ch"><option value="0">Device default</option></select>
+        </div>
         <div class="prow"><label>Output</label><select id="out-dev"></select></div>
         <div class="prow"><label>Buffer</label>
           <select id="bufsize" style="flex:0 0 90px">
@@ -1482,7 +1485,11 @@ $('midi-mode').onclick = () => {
   $('midi-mode').classList.toggle('on', on);
   schedulePost({ midiMode: on });
 };
-$('in-dev').onchange = e => schedulePost({ inputUid: e.target.value });
+$('in-dev').onchange = e => {
+  schedulePost({ inputUid: e.target.value }); // updates the cfg mirror too
+  fillChannelSelect(); // the channel list follows the newly picked device
+};
+$('in-ch').onchange = e => schedulePost({ inputChannel: +e.target.value });
 $('out-dev').onchange = e => schedulePost({ outputUid: e.target.value });
 $('refresh-dev').onclick = () => loadDevices();
 $('gain').oninput = e => {
@@ -1525,12 +1532,48 @@ function fillDeviceSelect(sel, devices, wantInput, currentUid) {
   sel.value = currentUid || '';
   if (sel.value !== (currentUid || '')) sel.value = '';
 }
+// The channel picker offers the selected input device's capture channels
+// ("" = the system default input device, marked defaultInput in the list).
+let inputDevices = [];
+function fillChannelSelect() {
+  const sel = $('in-ch');
+  const uid = cfg ? (cfg.inputUid || '') : '';
+  const dev = uid === '' ? inputDevices.find(d => d.defaultInput)
+                         : inputDevices.find(d => d.uid === uid);
+  const count = dev ? Math.min(dev.inputs, 32) : 0;
+  const want = cfg ? (cfg.inputChannel || 0) : 0;
+  // Rebuild only when something the list depends on changed: this runs from
+  // every status frame via setControls, and tearing the select down 10x/s
+  // would fight the user's open dropdown.
+  const shape = `${uid}|${count}|${want}`;
+  if (sel.dataset.shape === shape) return;
+  sel.dataset.shape = shape;
+  sel.innerHTML = '<option value="0">Device default</option>';
+  for (let ch = 1; ch <= count; ++ch) {
+    const o = document.createElement('option');
+    o.value = String(ch);
+    o.textContent = `Channel ${ch}`;
+    sel.appendChild(o);
+  }
+  if (want > count) {
+    // A saved channel this device does not have (interface unplugged?):
+    // show the truth — the engine start is failing on exactly this value —
+    // rather than pretending the default is selected.
+    const o = document.createElement('option');
+    o.value = String(want);
+    o.textContent = `Channel ${want} (not on this device)`;
+    sel.appendChild(o);
+  }
+  sel.value = String(want);
+}
 async function loadDevices() {
   try {
     const r = await fetch('/api/devices');
     const j = await r.json();
+    inputDevices = (j.devices || []).filter(d => d.inputs > 0);
     fillDeviceSelect($('in-dev'), j.devices || [], true, cfg ? cfg.inputUid : '');
     fillDeviceSelect($('out-dev'), j.devices || [], false, cfg ? cfg.outputUid : '');
+    fillChannelSelect();
     const ms = $('midi-src');
     ms.innerHTML = '<option value="">All inputs</option>';
     for (const name of j.midiSources || []) {
@@ -1671,7 +1714,13 @@ function setControls(c) {
   $('bypass').classList.toggle('on', c.bypass);
   $('bufsize').value = String(c.bufferFrames);
   if ($('in-dev').value !== (c.inputUid || '')) $('in-dev').value = c.inputUid || '';
+  fillChannelSelect(); // memoized: rebuilds only when device/count/channel change
   if ($('out-dev').value !== (c.outputUid || '')) $('out-dev').value = c.outputUid || '';
+  const label = c.label || '';
+  if ($('inst-label').textContent !== label) {
+    $('inst-label').textContent = label;
+    document.title = label ? `AutoEDO Live — ${label}` : 'AutoEDO Live';
+  }
 }
 
 // ---- status stream ---------------------------------------------------------

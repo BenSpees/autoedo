@@ -1,6 +1,8 @@
-/* Self-tests for the C port: tuning math, YIN detection, pitch correction
-   and the JSON helpers. Pure POSIX — runs anywhere (`make test`). */
+/* Self-tests for the C port: tuning math, YIN detection, pitch correction,
+   the JSON helpers and the stub audio engine. Pure POSIX — runs anywhere
+   (`make test`). */
 
+#include "../src/audio.h"
 #include "../src/json.h"
 #include "../src/corrector.h"
 #include "../src/tuning.h"
@@ -10,6 +12,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Same portability split as main.c's ae_sleep_ms: mingw-w64 under strict
+   C11 hides nanosleep, and Sleep() is always there on Windows. */
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+  static void st_sleep_ms (int ms) { Sleep ((DWORD) ms); }
+#else
+  #include <time.h>
+  static void st_sleep_ms (int ms)
+  {
+      struct timespec ts = { ms / 1000, (long) (ms % 1000) * 1000000L };
+      nanosleep (&ts, NULL);
+  }
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -379,6 +396,78 @@ static void test_json (void)
     CHECK (strcmp (esc, "a\\\"b\\\\c\\u000ad") == 0, "escape: '%s'", esc);
 }
 
+/* Run a stub engine and report the pitch it settles on. The stub backend
+   sings a different note per capture channel (A3 on 1, D4 on 2), so the
+   settled pitch tells us which channel `input_channel` bound. Returns 0.0
+   if the engine never reports a voiced detection. */
+static double engine_settled_hz (int input_channel)
+{
+    AeEngineConfig cfg;
+    memset (&cfg, 0, sizeof (cfg));
+    cfg.input_channel      = input_channel;
+    cfg.buffer_frames      = 256;
+    cfg.params.edo         = 12;
+    cfg.params.amount      = 0.0; /* detection is what we probe, not correction */
+    cfg.params.degrees_lo  = ~0ull;
+    cfg.params.degrees_hi  = 0xffull;
+
+    char err[256] = "";
+    AeAudioEngine *e = ae_audio_engine_start (&cfg, err, sizeof (err));
+    if (e == NULL)
+    {
+        printf ("engine start failed: %s\n", err);
+        return 0.0;
+    }
+
+    /* Wait for the first voiced detection, then let it settle for ~250 ms
+       more so an onset octave-glitch can't decide the reading. */
+    double hz = 0.0;
+    int settle = -1;
+    for (int tick = 0; tick < 100 && settle != 0; ++tick) /* ≤ ~5 s */
+    {
+        st_sleep_ms (50);
+        AeEngineStatus st;
+        ae_audio_engine_get_status (e, &st);
+        if (st.voiced && st.detected_hz > 0.0f)
+        {
+            hz = st.detected_hz;
+            if (settle < 0)
+                settle = 5;
+            else
+                --settle;
+        }
+    }
+    ae_audio_engine_stop (e);
+    return hz;
+}
+
+static void test_engine_channels (void)
+{
+    /* Default channel handling: the stub tone is A3 (220 Hz ± 35-cent wobble). */
+    double hz = engine_settled_hz (0);
+    CHECK (hz > 210.0 && hz < 230.0, "default channel detects A3: got %.1f Hz", hz);
+
+    /* Channel 1 is the same voice as the default. */
+    hz = engine_settled_hz (1);
+    CHECK (hz > 210.0 && hz < 230.0, "channel 1 detects A3: got %.1f Hz", hz);
+
+    /* Channel 2 carries a different note (D4, 293.66 Hz). */
+    hz = engine_settled_hz (2);
+    CHECK (hz > 280.0 && hz < 308.0, "channel 2 detects D4: got %.1f Hz", hz);
+
+    /* A channel past the device's count refuses to start, with a message. */
+    AeEngineConfig cfg;
+    memset (&cfg, 0, sizeof (cfg));
+    cfg.input_channel = 3;
+    cfg.params.edo    = 12;
+    char err[256] = "";
+    AeAudioEngine *e = ae_audio_engine_start (&cfg, err, sizeof (err));
+    CHECK (e == NULL, "channel 3 on a 2-channel device fails to start");
+    CHECK (strstr (err, "no input channel 3") != NULL, "error names the channel: '%s'", err);
+    if (e != NULL)
+        ae_audio_engine_stop (e);
+}
+
 int main (void)
 {
     test_tuning();
@@ -388,6 +477,7 @@ int main (void)
     test_harmony();
     test_midi_harmony();
     test_json();
+    test_engine_channels();
 
     if (failures == 0)
     {

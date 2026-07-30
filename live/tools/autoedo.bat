@@ -6,8 +6,9 @@ rem
 rem   autoedo.bat            build (if possible) + relaunch + open browser
 rem   autoedo.bat --no-ui    same, but never touch the browser (for use by
 rem                          an external controller app)
-rem   autoedo.bat --stop     stop a running instance
-rem   set AUTOEDO_PORT=9000 first to use another port
+rem   autoedo.bat --stop     stop the instance on this port
+rem   set AUTOEDO_PORT=9000 first to use another port; set AUTOEDO_CONFIG to
+rem   give the instance its own settings file (multi-instance rigs need both)
 rem
 rem Building needs the MSYS2 mingw-w64 toolchain (pacman -S make
 rem mingw-w64-x86_64-gcc) — run from an "MSYS2 MinGW x64" shell with `make`,
@@ -15,10 +16,12 @@ rem or put mingw32-make/make on PATH and double-click this.
 
 set PORT=%AUTOEDO_PORT%
 if "%PORT%"=="" set PORT=8017
+set CFGARG=
+if not "%AUTOEDO_CONFIG%"=="" set CFGARG=--config "%AUTOEDO_CONFIG%"
 cd /d "%~dp0.."
 
 if "%~1"=="--stop" (
-    taskkill /F /IM autoedo.exe >nul 2>&1
+    call :stopport
     echo stopped.
     exit /b 0
 )
@@ -47,9 +50,12 @@ if not exist build\autoedo.exe (
     exit /b 1
 )
 
-rem ── 2. Stop what's running, relaunch detached ───────────────────────────
-taskkill /F /IM autoedo.exe >nul 2>&1
-start "" /B build\autoedo.exe --port %PORT%
+rem ── 2. Stop what's running ON THIS PORT, relaunch detached ──────────────
+rem A rig can run several instances (voice on 8017, guitar on 8018, ...);
+rem killing by image name would take the other channel's engine down too,
+rem so the stop is scoped to whatever is listening on our port.
+call :stopport
+start "" /B build\autoedo.exe --port %PORT% %CFGARG%
 
 rem ── 3. Wait for the web UI (curl ships with Windows 10 1803+) ───────────
 set UP=
@@ -75,3 +81,15 @@ exit /b 0
 :buildfail
 echo ERROR: build failed - nothing was relaunched.
 exit /b 1
+
+:stopport
+rem Kill only the process listening on %PORT% (per-instance stop). The
+rem state word is localized ("LISTENING" is "ABHOEREN" on a German
+rem system), so match the listener's SHAPE instead: a TCP listen row is
+rem the only one whose foreign address port is 0 (0.0.0.0:0 or [::]:0).
+rem An established row to/from the port never carries ":0 ", so clients
+rem of the engine (health checks, controllers) are never touched.
+for /f "tokens=5" %%p in ('netstat -ano -p TCP ^| findstr /C:":%PORT% " ^| findstr /C:":0 "') do (
+    taskkill /F /PID %%p >nul 2>&1
+)
+goto :eof

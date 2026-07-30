@@ -72,13 +72,15 @@ $(BUILD)/autoedo$(EXE): $(OBJ)
 $(OBJ): $(wildcard src/*.h)
 
 $(BUILD)/selftest: tests/selftest.c src/yin.c src/corrector.c src/json.c \
-                   $(BUILD)/shifter.opp | $(BUILD)
+                   src/audio_stub.c $(BUILD)/shifter.opp | $(BUILD)
 	$(CC) $(CFLAGS) -c tests/selftest.c -o $(BUILD)/selftest-main.o
 	$(CC) $(CFLAGS) -c src/yin.c -o $(BUILD)/t-yin.o
 	$(CC) $(CFLAGS) -c src/corrector.c -o $(BUILD)/t-corrector.o
 	$(CC) $(CFLAGS) -c src/json.c -o $(BUILD)/t-json.o
+	$(CC) $(CFLAGS) -c src/audio_stub.c -o $(BUILD)/t-stub.o
 	$(CXX) $(CXXFLAGS) $(BUILD)/selftest-main.o $(BUILD)/t-yin.o \
-	    $(BUILD)/t-corrector.o $(BUILD)/t-json.o $(BUILD)/shifter.opp -lm -o $@
+	    $(BUILD)/t-corrector.o $(BUILD)/t-json.o $(BUILD)/t-stub.o \
+	    $(BUILD)/shifter.opp -lm -lpthread -o $@
 
 test: $(BUILD)/selftest
 	$(BUILD)/selftest

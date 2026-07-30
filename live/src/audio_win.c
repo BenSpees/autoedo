@@ -155,6 +155,27 @@ static double device_rate (IMMDevice *dev)
     return rate;
 }
 
+/* Channel count of the endpoint's shared-mode mix format — the channels a
+   capture client actually receives, and so the range `inputChannel` can
+   select from. */
+static int device_mix_channels (IMMDevice *dev)
+{
+    IAudioClient *ac = NULL;
+    int channels = 0;
+    if (SUCCEEDED (IMMDevice_Activate (dev, &k_IID_IAudioClient, CLSCTX_ALL,
+                                       NULL, (void **) &ac)))
+    {
+        WAVEFORMATEX *fx = NULL;
+        if (SUCCEEDED (IAudioClient_GetMixFormat (ac, &fx)) && fx != NULL)
+        {
+            channels = fx->nChannels;
+            CoTaskMemFree (fx);
+        }
+        IAudioClient_Release (ac);
+    }
+    return channels;
+}
+
 static int list_flow (IMMDeviceEnumerator *enu, EDataFlow flow, bool as_input,
                       AeDeviceInfo *out, int off, int max)
 {
@@ -185,14 +206,15 @@ static int list_flow (IMMDeviceEnumerator *enu, EDataFlow flow, bool as_input,
         {
             device_name (dev, d->name, sizeof (d->name));
             d->nominal_rate = device_rate (dev);
+            const int mix_ch = device_mix_channels (dev);
             if (as_input)
             {
-                d->input_channels   = 2; /* WASAPI mixes to the shared format */
+                d->input_channels   = mix_ch > 0 ? mix_ch : 2;
                 d->is_default_input = strcmp (d->uid, def_uid) == 0;
             }
             else
             {
-                d->output_channels   = 2;
+                d->output_channels   = mix_ch > 0 ? mix_ch : 2;
                 d->is_default_output = strcmp (d->uid, def_uid) == 0;
             }
             ++off;
@@ -291,6 +313,7 @@ struct AeAudioEngine
     uint64_t prefill_target;
 
     float *cap_scratch; /* mono capture block */
+    int    cap_channel; /* 0-based capture channel to keep; -1 = mix all */
     float *proc;
     float *dry;
     float *harm_l;
@@ -413,7 +436,8 @@ static void *capture_thread (void *arg)
                 UINT32 n = frames - done;
                 if (n > MAX_FRAMES)
                     n = MAX_FRAMES;
-                const int ch = e->in_fmt.channels;
+                const int ch  = e->in_fmt.channels;
+                const int sel = e->cap_channel; /* -1 = mix all channels */
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == NULL)
                 {
                     memset (e->cap_scratch, 0, n * sizeof (float));
@@ -421,24 +445,32 @@ static void *capture_thread (void *arg)
                 else if (e->in_fmt.is_float)
                 {
                     const float *s = (const float *) data + (size_t) done * ch;
-                    for (UINT32 i = 0; i < n; ++i)
-                    {
-                        float m = 0.0f;
-                        for (int c = 0; c < ch; ++c)
-                            m += s[i * ch + c];
-                        e->cap_scratch[i] = m / (float) ch;
-                    }
+                    if (sel >= 0)
+                        for (UINT32 i = 0; i < n; ++i)
+                            e->cap_scratch[i] = s[i * ch + sel];
+                    else
+                        for (UINT32 i = 0; i < n; ++i)
+                        {
+                            float m = 0.0f;
+                            for (int c = 0; c < ch; ++c)
+                                m += s[i * ch + c];
+                            e->cap_scratch[i] = m / (float) ch;
+                        }
                 }
                 else /* 16-bit PCM */
                 {
                     const short *s = (const short *) data + (size_t) done * ch;
-                    for (UINT32 i = 0; i < n; ++i)
-                    {
-                        int m = 0;
-                        for (int c = 0; c < ch; ++c)
-                            m += s[i * ch + c];
-                        e->cap_scratch[i] = (float) m / (float) ch / 32768.0f;
-                    }
+                    if (sel >= 0)
+                        for (UINT32 i = 0; i < n; ++i)
+                            e->cap_scratch[i] = (float) s[i * ch + sel] / 32768.0f;
+                    else
+                        for (UINT32 i = 0; i < n; ++i)
+                        {
+                            int m = 0;
+                            for (int c = 0; c < ch; ++c)
+                                m += s[i * ch + c];
+                            e->cap_scratch[i] = (float) m / (float) ch / 32768.0f;
+                        }
                 }
                 ae_ring_write (&e->ring, e->cap_scratch, n);
                 done += n;
@@ -737,6 +769,21 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     }
     e->in_rate  = e->in_fmt.rate;
     e->out_rate = e->out_fmt.rate;
+
+    /* Bind a specific capture channel of the shared-mode mix format; the
+       default keeps the old mix-to-mono behaviour. */
+    e->cap_channel = -1;
+    if (cfg->input_channel > 0)
+    {
+        if (cfg->input_channel > e->in_fmt.channels)
+        {
+            snprintf (err, err_len, "device \"%s\" has no input channel %d (%d available)",
+                      e->in_name, cfg->input_channel, e->in_fmt.channels);
+            engine_teardown (e);
+            return NULL;
+        }
+        e->cap_channel = cfg->input_channel - 1;
+    }
 
     if (FAILED (IAudioClient_GetService (e->in_ac, &k_IID_IAudioCaptureClient,
                                          (void **) &e->cap))

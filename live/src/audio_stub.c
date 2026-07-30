@@ -30,7 +30,7 @@ int ae_audio_list_devices (AeDeviceInfo **out, int *count)
         return -1;
     snprintf (d[0].uid,  sizeof (d[0].uid),  "stub-in");
     snprintf (d[0].name, sizeof (d[0].name), "Stub Test Tone (input)");
-    d[0].input_channels = 1;
+    d[0].input_channels = 2; /* ch 1 = 220 Hz, ch 2 = 293.66 Hz (see stub_thread) */
     d[0].nominal_rate = STUB_RATE;
     d[0].is_default_input = true;
     snprintf (d[1].uid,  sizeof (d[1].uid),  "stub-out");
@@ -49,6 +49,7 @@ struct AeAudioEngine
     volatile bool stopping;
 
     AeCorrector corrector;
+    double  base_hz;
     double  phase;
     double  wobble_phase;
 
@@ -62,12 +63,14 @@ static void *stub_thread (void *arg)
 
     while (! e->stopping)
     {
-        /* A 220 Hz tone with harmonics, wobbling ~±35 cents at 0.5 Hz, so
-           the corrector always has something to fix. */
+        /* A tone with harmonics, wobbling ~±35 cents at 0.5 Hz, so the
+           corrector always has something to fix. The base frequency is per
+           capture channel (220 / 293.66 Hz) so tests can tell which channel
+           an engine bound. */
         for (int i = 0; i < STUB_BLOCK; ++i)
         {
             const double wobble = 35.0 * sin (e->wobble_phase);
-            const double f = 220.0 * pow (2.0, wobble / 1200.0);
+            const double f = e->base_hz * pow (2.0, wobble / 1200.0);
             e->phase        += 2.0 * M_PI * f / STUB_RATE;
             e->wobble_phase += 2.0 * M_PI * 0.5 / STUB_RATE;
             block[i] = (float) (0.4 * sin (e->phase)
@@ -142,6 +145,12 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         snprintf (err, err_len, "output device not found: %s", cfg->output_uid);
         return NULL;
     }
+    if (cfg->input_channel > 2)
+    {
+        snprintf (err, err_len, "device \"Stub Test Tone (input)\" has no input "
+                                "channel %d (2 available)", cfg->input_channel);
+        return NULL;
+    }
 
     AeAudioEngine *e = calloc (1, sizeof (*e));
     if (e == NULL)
@@ -149,6 +158,8 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         snprintf (err, err_len, "out of memory");
         return NULL;
     }
+    /* Channel 2 sings a different note (D4) than channels 0/1 (A3). */
+    e->base_hz = cfg->input_channel == 2 ? 293.66 : 220.0;
     ae_corrector_prepare (&e->corrector, STUB_RATE, STUB_BLOCK,
                           cfg->det_min_hz, cfg->det_max_hz, cfg->quality);
     ae_audio_engine_set_params (e, &cfg->params);

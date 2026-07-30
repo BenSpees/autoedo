@@ -195,7 +195,9 @@ real total.
 compensation, fed the detected fundamental as its base), so transposed
 harmony voices still sound like the same singer rather than chipmunking.
 
-All settings apply live and persist to `~/.autoedo.json`. Not in this build
+All settings apply live and persist to `~/.autoedo.json` (`--config PATH`
+relocates the file — run one instance per capture channel, each with its own
+port, config file and `inputChannel`; see CONTROL.md §10). Not in this build
 (future work): the pitch-trace lane, MIDI target/out, per-degree gravity
 weights, and ruler zoom/minimap. Formant preservation needs no toggle —
 TD-PSOLA preserves formants inherently.

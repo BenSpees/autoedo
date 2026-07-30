@@ -15,14 +15,16 @@ cd "$REPO" || exit 1
 
 # ═══ EDIT ME ═════════════════════════════════════════════════════════════════
 APP_NAME="AutoEDO"        # dialog/notification title
-PROC_NAMES=(autoedo)      # process names to stop before relaunching (pkill -x)
+PROC_NAMES=(autoedo)      # process names this launcher manages (per-port match)
 PORT="${AUTOEDO_PORT:-8017}"  # localhost web UI port; health check and tab match
+CONFIG_FILE="${AUTOEDO_CONFIG:-}" # per-instance settings file ("" = ~/.autoedo.json)
 needs_build() {           # exit 0 if a build is required (else skip straight to run)
     ! make -q >/dev/null 2>&1
 }
 do_build() { make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"; }
 run_cmd()  { echo "build/autoedo"; }               # binary to exec
 run_args=(--port "$PORT")                          # its arguments
+[ -n "$CONFIG_FILE" ] && run_args+=(--config "$CONFIG_FILE")
 # ═════════════════════════════════════════════════════════════════════════════
 
 HEADLESS=0
@@ -129,15 +131,20 @@ OSA
     command -v open >/dev/null 2>&1 && open "$URL"
 }
 
-# ── 1. Stop what's running ───────────────────────────────────────────────────
+# ── 1. Stop what's running ── ON THIS PORT ONLY ──────────────────────────────
+# A rig can run several instances (one per input channel: voice on 8017,
+# guitar on 8018, …), so stopping is scoped to $PORT: match the command line
+# we launch with, never the bare process name — a name-wide pkill would take
+# the other channel's engine down with ours.
 for name in "${PROC_NAMES[@]}"; do
-    if pkill -x "$name" 2>/dev/null; then
-        say "stopped running $name"
+    if pkill -f "$name --port $PORT( |\$)" 2>/dev/null; then
+        say "stopped running $name (port $PORT)"
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-            pgrep -x "$name" >/dev/null 2>&1 || break
+            pgrep -f "$name --port $PORT( |\$)" >/dev/null 2>&1 || break
             sleep 0.3
         done
-        pgrep -x "$name" >/dev/null 2>&1 && pkill -9 -x "$name" 2>/dev/null
+        pgrep -f "$name --port $PORT( |\$)" >/dev/null 2>&1 \
+            && pkill -9 -f "$name --port $PORT( |\$)" 2>/dev/null
     fi
 done
 # Belt and braces: whatever else is still holding our port (an instance

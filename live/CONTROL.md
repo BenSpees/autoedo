@@ -19,12 +19,16 @@ open, but two controllers will fight over the same knobs.
   `build\autoedo.exe`) that serves HTTP + WebSocket on
   **`127.0.0.1:<port>`** (default **8017**, `--port N` to change). It binds
   loopback only; a controller must run on the same machine (or tunnel).
+  `--config PATH` relocates the settings file (default `~/.autoedo.json`) —
+  required when running more than one instance (§10).
 - **Launching — two options.**
 
   **(a) Spawn the binary directly** and own its lifetime:
   `./build/autoedo --port 8017`. Readiness = `GET /api/status` answering
-  200 (poll ~2/s, allow ~10 s). Stop with SIGTERM (POSIX) / `taskkill /IM
-  autoedo.exe` (Windows); it shuts down cleanly.
+  200 (poll ~2/s, allow ~10 s). Stop with SIGTERM (POSIX) / `taskkill /PID
+  <the pid you spawned>` (Windows); it shuts down cleanly. Kill by PID, not
+  by image name — `taskkill /IM autoedo.exe` takes down every instance of a
+  multi-instance rig (§10), not just yours.
 
   **(b) Run the repo launcher** — it handles rebuild-if-changed,
   stop-what's-running (including port eviction), relaunch detached, and
@@ -50,9 +54,13 @@ open, but two controllers will fight over the same knobs.
   browser-open/tab-focus step (mandatory when your app provides the UI);
   `--headless` (macOS) writes progress to `logs/launcher.log` instead of a
   terminal and reports failures via a dialog; `--stop` stops the engine and
-  exits. The launcher is idempotent — calling it while the engine runs
+  exits. `AUTOEDO_CONFIG=<path>` makes the launcher pass `--config <path>`.
+  The launcher is idempotent — calling it while the engine runs
   restarts it (rebuild included), so "launch" and "relaunch after update"
-  are the same call. `run.sh` is a thin alias for `autoedo.command` with
+  are the same call. Stopping is **scoped to `AUTOEDO_PORT`**: only the
+  instance launched on that port (or whatever else holds the port) is
+  stopped, so per-channel instances (§10) never take each other down.
+  `run.sh` is a thin alias for `autoedo.command` with
   the same flags. Note the Windows launcher only rebuilds when a
   `make`/`mingw32-make` is on PATH; otherwise it reuses the existing exe.
 - **An engine failure is not fatal to the server.** If audio can't start
@@ -66,11 +74,12 @@ open, but two controllers will fight over the same knobs.
   any local page can too — the server trusts the loopback boundary, not
   origins.) The WebSocket does not check `Origin`.
 - **Persistence:** every successful `POST /api/config` writes the full
-  config to `~/.autoedo.json` (`%USERPROFILE%\.autoedo.json` on Windows),
-  and the process reloads it on start. `POST /api/midi` is runtime-only,
-  never persisted. If your app owns all state itself, either mirror it into
-  the engine at startup with one full config POST, or treat the engine's
-  saved file as the truth and hydrate from `GET /api/status`.
+  config to `~/.autoedo.json` (`%USERPROFILE%\.autoedo.json` on Windows) —
+  or to the `--config PATH` when given — and the process reloads it on
+  start. `POST /api/midi` is runtime-only, never persisted. If your app
+  owns all state itself, either mirror it into the engine at startup with
+  one full config POST, or treat the engine's saved file as the truth and
+  hydrate from `GET /api/status`.
 
 ## 2. Endpoints
 
@@ -186,7 +195,13 @@ UI behavior you may want to replicate).
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
 | `inputUid`, `outputUid` | string | **restart** | device UIDs from `/api/devices`; `""` = system default |
+| `inputChannel` | int 0–32 | **restart** | which capture channel of the input device feeds the (mono) engine, 1-based. `0` = backend default: the device's first channel on macOS, a mix of all channels on Windows. A channel past the device's count fails engine start with `error` naming the channel. This is how a per-channel rig binds one instance to input 1 (voice) and another to input 2 (guitar) of the same interface (§10) |
 | `bufferFrames` | int 32–2048 | **restart** | preferred hardware block size |
+
+### Instance identity
+| Key | Type | Applies | Meaning |
+|---|---|---|---|
+| `label` | string ≤ 63 | live | cosmetic instance name ("Voice", "Guitar"). The built-in UI shows it in the header and tab title so two instances read apart; the engine itself ignores it |
 
 ### Harmony (Xentar `hm`/`hx` packing)
 | Key | Type | Applies | Meaning |
@@ -228,7 +243,9 @@ up ≈ octave 4); each semitone = one EDO step: `j = 4·edo + (note − 60)`.
 
 Enumerated fresh per call (cheap; refresh on demand, not on a timer). Filter
 by `inputs`/`outputs` > 0 for the respective pickers. UIDs are the stable
-handles to persist; names are display-only.
+handles to persist; names are display-only. `inputs` is the channel count
+`inputChannel` selects from (on Windows it is the shared-mode mix format's
+channel count — what a capture client actually receives).
 
 ## 6. `GET /api/scales`
 
@@ -291,3 +308,43 @@ a dirty-window guard · surfaces `running:false` + `error` with a restart
 affordance · batches restart-triggering keys · handles the chromatic
 fallback and largest-gap warning · re-clamps `hm` and re-labels intervals on
 EDO change · re-sends virtual MIDI after restarts.
+
+## 10. Multi-instance rigs (one engine per input channel)
+
+The engine is mono by design. To process several inputs of one interface
+independently (e.g. MOTU M4: input 1 = voice, input 2 = guitar), run one
+instance per channel. Each instance is the full API of this spec on its own
+port; nothing about the wire contract changes.
+
+Per instance, give it:
+
+- **its own port** — `--port 8017` / `--port 8018` (`AUTOEDO_PORT` via the
+  launcher);
+- **its own settings file** — `--config ~/.autoedo-guitar.json`
+  (`AUTOEDO_CONFIG` via the launcher). Without this, both instances load
+  and rewrite `~/.autoedo.json` and the channels' settings cross-contaminate;
+- **its channel binding** — `POST /api/config {"inputChannel": 1}` (voice)
+  vs `{"inputChannel": 2}` (guitar), same `inputUid`;
+- optionally **a label** — `{"label": "Voice"}` — so the built-in UIs read
+  apart.
+
+Launcher calls are per-instance and per-port (stop included):
+
+```bash
+AUTOEDO_PORT=8017 <repo>/live/tools/autoedo.command --headless --no-ui
+AUTOEDO_PORT=8018 AUTOEDO_CONFIG="$HOME/.autoedo-guitar.json" \
+    <repo>/live/tools/autoedo.command --headless --no-ui
+```
+
+Shared-device fine print:
+
+- Both instances may open the same audio device; macOS AUHAL and
+  shared-mode WASAPI both allow concurrent clients.
+- macOS: the preferred hardware buffer size is a device-wide property —
+  instances sharing a device should use the same `bufferFrames` (last
+  writer wins, best-effort, non-fatal).
+- Windows: winmm grants a hardware MIDI input to **one** process; with
+  `midiSource` unset both instances try to open everything and only one
+  gets each source. Bind `midiSource` deliberately, or drive MIDI Harmony
+  over `POST /api/midi` (virtual notes need no device).
+- The processed outputs of both instances mix at the output device.

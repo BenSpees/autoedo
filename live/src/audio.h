@@ -68,6 +68,9 @@ typedef struct
     char         input_uid[AE_UID_MAX];  /* "" => system default input */
     char         output_uid[AE_UID_MAX]; /* "" => system default output */
     char         midi_source[AE_NAME_MAX]; /* "" => all MIDI inputs */
+    int          input_channel;          /* 1-based capture channel of the input
+                                            device; 0 = backend default (mac:
+                                            first channel, win: mix of all) */
     int          buffer_frames;          /* preferred device I/O block size */
     double       det_min_hz;             /* detection range (0 = default) */
     double       det_max_hz;

@@ -11,7 +11,8 @@
                        device selection or buffer size changed
      POST /api/restart force an engine restart
 
-   Config persists to ~/.autoedo.json. */
+   Config persists to ~/.autoedo.json (or the --config PATH; each instance
+   of a multi-instance rig gets its own file). */
 
 #include "audio.h"
 #include "httpd.h"
@@ -55,6 +56,9 @@ typedef struct
     char            quality_name[16];/* pitch-shifter quality/latency preset */
     char            scale_cat[64]; /* last-loaded catalog scale (cosmetic; */
     char            scale_name[64];/* the mask itself is the real state)   */
+    char            label[64];     /* instance name ("Voice", "Guitar"); the
+                                      UI shows it so two instances read apart */
+    char            config_file[1024]; /* "" => ~/.autoedo.json */
     int             port;
     pthread_mutex_t lock;      /* guards engine + engine_cfg */
     AeAudioEngine  *engine;
@@ -108,8 +112,13 @@ static void on_signal (int sig)
 
 /* ------------------------------------------------------------------ config */
 
-static void config_path (char *out, size_t cap)
+static void config_path (const App *app, char *out, size_t cap)
 {
+    if (app->config_file[0] != '\0')
+    {
+        snprintf (out, cap, "%s", app->config_file);
+        return;
+    }
     const char *home = getenv ("HOME");
 #ifdef _WIN32
     if (home == NULL || home[0] == '\0')
@@ -159,6 +168,8 @@ static void config_defaults (App *app)
     c->params.harm_solo = 0;
     c->params.midi_mode = false;
     c->midi_source[0]   = '\0'; /* all MIDI inputs */
+    c->input_channel    = 0;    /* backend default channel handling */
+    app->label[0]       = '\0';
 }
 
 /* Derive the engine-facing reference/period/detection-range values from the
@@ -186,17 +197,19 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"bypass\":%s,\"outputGainDb\":%.6g,"
-              "\"bufferFrames\":%d,\"inputUid\":\"",
+              "\"bufferFrames\":%d,\"inputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
               c->params.humanize,
               app->root_note, app->root_cents, app->ref_a4,
               app->stretch_cents, app->range_name, app->quality_name,
               c->params.bypass ? "true" : "false",
-              c->params.output_gain_db, c->buffer_frames);
+              c->params.output_gain_db, c->buffer_frames, c->input_channel);
     ae_json_escape_append (out, cap, c->input_uid);
     strncat (out, "\",\"outputUid\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->output_uid);
+    strncat (out, "\",\"label\":\"", cap - strlen (out) - 1);
+    ae_json_escape_append (out, cap, app->label);
     strncat (out, "\",\"scaleCat\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, app->scale_cat);
     strncat (out, "\",\"scaleName\":\"", cap - strlen (out) - 1);
@@ -252,7 +265,7 @@ static void config_json (const App *app, char *out, size_t cap)
 static void config_save (const App *app)
 {
     char path[1024];
-    config_path (path, sizeof (path));
+    config_path (app, path, sizeof (path));
     FILE *f = fopen (path, "w");
     if (f == NULL)
     {
@@ -366,6 +379,8 @@ static bool config_apply_json (App *app, const char *json)
         snprintf (app->scale_cat, sizeof (app->scale_cat), "%.63s", str);
     if (ae_json_get_string (json, "scaleName", str, sizeof (str)))
         snprintf (app->scale_name, sizeof (app->scale_name), "%.63s", str);
+    if (ae_json_get_string (json, "label", str, sizeof (str)))
+        snprintf (app->label, sizeof (app->label), "%.63s", str);
 
     /* MIDI Harmony: the mode is live; the source binding needs a restart. */
     if (ae_json_get_bool (json, "midiMode", &b))
@@ -404,6 +419,15 @@ static bool config_apply_json (App *app, const char *json)
             restart = true;
         }
     }
+    if (ae_json_get_number (json, "inputChannel", &num))
+    {
+        const int ch = (int) num_clamp (num, 0.0, 32.0);
+        if (ch != c->input_channel)
+        {
+            c->input_channel = ch;
+            restart = true; /* the capture binding is fixed at engine start */
+        }
+    }
     if (ae_json_get_string (json, "inputUid", str, sizeof (str))
         && strcmp (str, c->input_uid) != 0)
     {
@@ -422,7 +446,7 @@ static bool config_apply_json (App *app, const char *json)
 static void config_load (App *app)
 {
     char path[1024];
-    config_path (path, sizeof (path));
+    config_path (app, path, sizeof (path));
     FILE *f = fopen (path, "r");
     if (f == NULL)
         return;
@@ -696,19 +720,23 @@ int main (int argc, char **argv)
     pthread_mutex_init (&app.status_lock, NULL);
     app.port = DEFAULT_PORT;
     config_defaults (&app);
-    config_load (&app);
-    config_sync (&app);
 
+    /* Flags before config_load: --config decides where to load from. */
     for (int i = 1; i < argc; ++i)
     {
         if (strcmp (argv[i], "--port") == 0 && i + 1 < argc)
             app.port = atoi (argv[++i]);
+        else if (strcmp (argv[i], "--config") == 0 && i + 1 < argc)
+            snprintf (app.config_file, sizeof (app.config_file), "%s", argv[++i]);
         else
         {
-            fprintf (stderr, "usage: %s [--port N]\n", argv[0]);
+            fprintf (stderr, "usage: %s [--port N] [--config PATH]\n", argv[0]);
             return 2;
         }
     }
+
+    config_load (&app);
+    config_sync (&app);
 
     signal (SIGINT,  on_signal);
     signal (SIGTERM, on_signal);
