@@ -26,6 +26,13 @@ int ae_json_get_flag_array (const char *json, const char *key, unsigned char *ou
    missing / not an array. */
 int ae_json_get_num_array (const char *json, const char *key, double *out, int max);
 
+/* Array of short string tokens (enum-ish values like "voice"/"synth").
+   Returns the count written, or -1 when the key is absent or not an array;
+   a non-string element yields an empty string in its slot. */
+#define AE_JSON_STR_MAX 16
+int ae_json_get_str_array (const char *json, const char *key,
+                           char out[][AE_JSON_STR_MAX], int max);
+
 /* Appends src to dst (a buffer of cap bytes, already NUL-terminated) with
    JSON string escaping applied. Returns dst. */
 char *ae_json_escape_append (char *dst, size_t cap, const char *src);

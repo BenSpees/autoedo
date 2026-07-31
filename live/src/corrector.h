@@ -38,8 +38,21 @@
    Phase 1: the source applies to all five voices at once. */
 #define AE_HARM_SRC_VOICE 0
 #define AE_HARM_SRC_SYNTH 1
+/* Per-voice sentinel: "whatever the global harmSource says". Voices default
+   to this, so the single global switch keeps working untouched and a chart
+   only names the voices it actually wants to differ. */
+#define AE_HARM_SRC_DEFAULT (-1)
 
 #define AE_SYNTH_PARTIALS 6
+
+/* Formant (vowel) transfer: a channel vocoder that lifts the live voice's
+   spectral envelope onto the synth, so a sung "ah" -> "oo" moves the synth
+   with it. Band count is the resolution/cost trade: 16 log-spaced bands
+   across the vowel range resolve F1/F2 comfortably. */
+#define AE_VOC_BANDS 16
+/* Signals filtered independently: harmony L, harmony R, and the lead when it
+   is synth. */
+#define AE_VOC_SIGNALS 3
 
 typedef struct
 {
@@ -121,10 +134,16 @@ typedef struct
     _Atomic int h_deg_out[AE_HARM_VOICES]; /* live ghost degree (UI) */
 
     /* Synth harmony source ------------------------------------------------- */
-    int    harm_source;      /* AE_HARM_SRC_* */
+    int    harm_source;      /* AE_HARM_SRC_*: the DEFAULT for every voice */
+    int    h_source[AE_HARM_VOICES]; /* per-voice override, AE_HARM_SRC_DEFAULT
+                                        = follow harm_source */
+    int    lead_source;      /* the corrected LEAD voice: shifted input, or the
+                                synth playing its corrected pitch */
     int    synth_patch;      /* index into the built-in patch table */
     double synth_attack_ms;
     double synth_release_ms;
+    double ensemble_depth;   /* 0..1 scaling on the ensemble's wet blend */
+    double synth_vowel;      /* 0..1 formant transfer from the live voice */
 
     double in_level;                  /* smoothed voiced input RMS; frozen
                                          while unvoiced so release tails hold
@@ -138,6 +157,13 @@ typedef struct
     double s_phase[AE_HARM_VOICES][AE_SYNTH_PARTIALS]; /* 0..1 per partial */
     double s_lfo[AE_HARM_VOICES][AE_SYNTH_PARTIALS];   /* vibrato phase, rad */
 
+    /* The LEAD as a synth voice (lead_source == AE_HARM_SRC_SYNTH): its own
+       oscillator state, playing the corrected pitch the shifter would have
+       produced. */
+    double lead_phase[AE_SYNTH_PARTIALS];
+    double lead_lfo[AE_SYNTH_PARTIALS];
+    double lead_lp;
+
     /* Ensemble (string-machine chorus): a stereo pair of delay lines the
        whole synth harmony bus runs through when the patch asks for it.
        Allocated in prepare (fs-sized), so the audio thread never allocates. */
@@ -147,6 +173,20 @@ typedef struct
     int     ens_mask;
     int     ens_write;
     double  ens_lfo[6]; /* tap LFO phases (3 slow + 3 fast), radians */
+
+    /* Vowel/formant transfer. One shared analysis of the live input drives
+       per-signal synthesis filters; every state here is plain scalars, so
+       the whole stage is allocation-free. */
+    double voc_a1[AE_VOC_BANDS], voc_a2[AE_VOC_BANDS]; /* shared bandpass */
+    double voc_b0[AE_VOC_BANDS];                       /* (b1 = 0, b2 = -b0) */
+    double voc_env[AE_VOC_BANDS];                      /* input band levels */
+    double voc_ax1[AE_VOC_BANDS], voc_ax2[AE_VOC_BANDS]; /* analysis state */
+    double voc_ay1[AE_VOC_BANDS], voc_ay2[AE_VOC_BANDS];
+    double voc_sx1[AE_VOC_SIGNALS][AE_VOC_BANDS], voc_sx2[AE_VOC_SIGNALS][AE_VOC_BANDS];
+    double voc_sy1[AE_VOC_SIGNALS][AE_VOC_BANDS], voc_sy2[AE_VOC_SIGNALS][AE_VOC_BANDS];
+    double voc_norm[AE_VOC_SIGNALS]; /* smoothed level match, per signal */
+    double voc_atk, voc_rel; /* envelope follower coefficients */
+    bool   voc_ready;        /* coefficients built for the current fs */
 
     /* Parameters (set from the audio thread between blocks) ---------------- */
     int    edo;
@@ -206,6 +246,25 @@ void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
    blocks). Out-of-range patch indices clamp into the table. */
 void ae_corrector_set_synth (AeCorrector *p, int source, int patch,
                              double attack_ms, double release_ms);
+
+/* Per-voice source overrides plus the lead's own source (audio thread,
+   between blocks). `sources` entries are AE_HARM_SRC_DEFAULT (follow the
+   global switch), _VOICE or _SYNTH; `lead` is _VOICE or _SYNTH. */
+void ae_corrector_set_voice_sources (AeCorrector *p,
+                                     const int sources[AE_HARM_VOICES], int lead);
+
+/* Ensemble depth (0..1, scaling the wet blend of patches that use it) and
+   vowel transfer amount (0..1). Both live. */
+void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
+                                   double vowel);
+
+/* The source actually in force for a harmony voice, resolving the
+   per-voice sentinel against the global switch. */
+static inline int ae_corrector_voice_source (const AeCorrector *p, int v)
+{
+    const int s = p->h_source[v];
+    return s == AE_HARM_SRC_DEFAULT ? p->harm_source : s;
+}
 
 /* The built-in synth patch table (any thread; the table is static). */
 int         ae_synth_patch_count (void);

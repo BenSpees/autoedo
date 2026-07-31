@@ -173,6 +173,41 @@ int ae_json_get_flag_array (const char *json, const char *key, unsigned char *ou
     return n < max ? n : max;
 }
 
+int ae_json_get_str_array (const char *json, const char *key,
+                           char out[][AE_JSON_STR_MAX], int max)
+{
+    const char *v = find_key (json, key);
+    if (v == NULL || *v != '[')
+        return -1;
+
+    int n = 0;
+    const char *p = skip_ws (v + 1);
+    while (*p && *p != ']')
+    {
+        if (n < max)
+        {
+            out[n][0] = '\0';
+            if (*p == '"')
+            {
+                /* Plain copy: these are short enum-ish tokens, and any
+                   escape in one is a caller error, not a value. */
+                const char *s = p + 1;
+                int k = 0;
+                while (*s && *s != '"' && k < AE_JSON_STR_MAX - 1)
+                    out[n][k++] = *s++;
+                out[n][k] = '\0';
+            }
+        }
+        ++n;
+
+        p = skip_value (p);
+        p = skip_ws (p);
+        if (*p == ',')
+            p = skip_ws (p + 1);
+    }
+    return n < max ? n : max;
+}
+
 int ae_json_get_num_array (const char *json, const char *key, double *out, int max)
 {
     const char *v = find_key (json, key);

@@ -137,8 +137,8 @@ down. Both carry the identical string, serialized once per tick server-side.
   "outputName": "External Headphones",
   "shifter": "Signalsmith Stretch 1.3.2",  // the vendored pitch-shift engine
   "formantSupport": true,     // formants held still under pitch shift
-  "synthPatches": ["pad","warm","glass","organ","sine",
-                   "strings","choir","brass"],
+  "synthPatches": ["pad","warm","glass","organ","sine","strings",
+                   "choir","brass","solina bright","bass"],
                               // the engine's synth-harmony patch table, in
                               // order — build a `synthPatch` picker from this
   "stepCents": 100.0,         // period / edo, stretch-adjusted
@@ -222,9 +222,13 @@ UI behavior you may want to replicate).
 |---|---|---|---|
 | `harmOn` | bool | live | master harmony switch |
 | `harmSource` | `"voice"` \| `"synth"` | live | what the ghosts are made of: pitch-shifted copies of the live input (classic harmonizer) or the built-in synth at the same target degrees. Applies to all five voices (phase 1). Synth ghosts are volume-matched to the sung level — `hg` trims from parity — and, unlike shifted ghosts, ring past the end of the sung note by the release time, holding their last pitch and level |
-| `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list. Simple ranks: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). String-machine voices, with per-partial vibrato and the shared **ensemble** (three delay taps swept in opposite senses per side — the Solina/Eminent trick that turns a rank of saws into a wide, breathing section): `strings` (saw ranks at 8'/4'/2'), `choir` (vox-humana square/saw blend, rounded down), `brass` (bright detuned saw pair, no ensemble — a section pad that cuts). Unknown names are ignored |
+| `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list. Simple ranks: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). String-machine voices, with per-partial vibrato and the shared **ensemble** (three delay taps swept in opposite senses per side — the Solina/Eminent trick that turns a rank of saws into a wide, breathing section): `strings` (saw ranks at 8'/4'/2'), `solina bright` (the same ranks with the tone control open, for sitting on top of a band), `choir` (vox-humana square/saw blend, rounded down), `brass` (bright detuned saw pair, no ensemble — a section pad that cuts), `bass` (sub-octave rank, filtered down, no ensemble — a wandering bass is a tuning problem, not an effect). Unknown names are ignored |
+| `hSrc` | string[5] | live | **per-voice** source override: `"voice"`, `"synth"`, or `"default"` (follow `harmSource`, the default). Mixed rigs work — voice 1 on the shifter for a real double, voices 2–3 on the synth for a pad — because the shifted and synth passes render independently into one bus |
+| `leadSource` | `"voice"` \| `"synth"` | live | what the **lead** is: the shifter's corrected vocal (default) or the synth playing that same corrected pitch. A synth lead has no dry component — unvoiced is silence, not the raw microphone — so it is a synth lead, not a passthrough with occasional synth. `leadOn` still decides whether it reaches the output at all |
 | `synthAttackMs` | float 0–5000 | live | synth envelope attack (default 80) |
 | `synthReleaseMs` | float 0–10000 | live | synth envelope release (default 500) |
+| `ensembleDepth` | float 0–1 | live | how much of the ensemble the patches that have one get (default 1). 0 leaves the dry ranks; patches without an ensemble ignore it |
+| `synthVowel` | float 0–1 | live | **vowel transfer**: a 16-band channel vocoder lifts the live voice's spectral envelope onto the synth, so a sung "ah" → "oo" moves the synth with it (default 0 = off). It applies to synth harmony voices and to a synth lead. A vocoder *filters* the carrier — it cannot invent partials — so it needs a harmonically rich patch: `strings`, `solina bright`, `pad`, `organ` and `choir` all work; `sine` barely changes. Level is held where the volume match put it |
 | `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward, up first per distance) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |
 | `hm` | int[5], each −72…72 | live | voice intervals in EDO steps; 0 = voice off. Keep within ±`edo` (the pool is ±equave); intervals are *steps*, so re-clamp when you lower the EDO |
 | `hx` | int[5], 0–2 | live | per-voice octave extension, stacking in the voice's direction: `eff = hm + sign(hm)·hx·edo` |

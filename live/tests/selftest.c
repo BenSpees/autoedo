@@ -689,6 +689,165 @@ static void test_synth_string_machine (void)
     free (in); free (hl); free (hr);
 }
 
+/* Build a corrector with one P5 harmony voice on a 220 Hz input, run it,
+   and hand back the buses. Shared by the source-routing tests below. */
+static void run_synth_case_ex (int sources[AE_HARM_VOICES], int lead, double vowel,
+                               const char *patch, int bright, float *out_mono,
+                               float *out_hl, float *out_hr, int total)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;  /* P5 above */
+    voices[1].interval = 4;  /* M3 above */
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH, ae_synth_patch_find (patch),
+                            5.0, 200.0);
+    ae_corrector_set_voice_sources (p, sources, lead);
+    ae_corrector_set_synth_shape (p, 1.0, vowel);
+
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        /* Two "vowels" at the same pitch: a dark one whose energy sits on
+           the low harmonics, and a bright one with a high formant cluster.
+           Same f0, so correction and the ghosts are identical -- only the
+           timbre the vocoder can transfer differs. */
+        out_mono[i] = bright
+            ? (float) (0.35 * sin (phase) + 0.30 * sin (8.0 * phase)
+                     + 0.30 * sin (10.0 * phase))
+            : (float) (0.45 * sin (phase) + 0.30 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, out_mono + off, out_hl + off, out_hr + off, n);
+    }
+    ae_corrector_free (p);
+    free (p);
+}
+
+static void run_synth_case (int sources[AE_HARM_VOICES], int lead, double vowel,
+                            const char *patch, float *out_mono,
+                            float *out_hl, float *out_hr, int total)
+{
+    run_synth_case_ex (sources, lead, vowel, patch, /*bright=*/0,
+                       out_mono, out_hl, out_hr, total);
+}
+
+static void test_synth_sources_and_vowel (void)
+{
+    CHECK (ae_synth_patch_find ("bass") >= 0, "bass patch exists");
+    CHECK (ae_synth_patch_find ("solina bright") >= 0, "solina bright exists");
+
+    const int total = 48000;
+    float *mono = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    int src[AE_HARM_VOICES];
+
+    /* Per-voice routing: voice 1 shifted, voice 2 synth. Both must sound --
+       the shifter pass and the synth pass each render their own and add to
+       one bus, so neither can silence the other. */
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        src[v] = AE_HARM_SRC_DEFAULT;
+    src[0] = AE_HARM_SRC_VOICE;
+    src[1] = AE_HARM_SRC_SYNTH;
+    run_synth_case (src, AE_HARM_SRC_VOICE, 0.0, "sine", mono, hl, hr, total);
+    const int tail = 24000;
+    const double p5 = goertzel (hl + total - tail, tail, 329.63, 48000.0);  /* +7 */
+    const double m3 = goertzel (hl + total - tail, tail, 277.18, 48000.0);  /* +4 */
+    CHECK (p5 > 1.0, "mixed sources: the shifted voice sounds (%.3g)", p5);
+    CHECK (m3 > 1.0, "mixed sources: the synth voice sounds (%.3g)", m3);
+
+    /* All voices explicitly shifted: the synth adds nothing, so the harmony
+       bus has no energy at a degree only the synth would have produced. */
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        src[v] = AE_HARM_SRC_VOICE;
+    run_synth_case (src, AE_HARM_SRC_VOICE, 0.0, "sine", mono, hl, hr, total);
+    const double p5_all_shift = goertzel (hl + total - tail, tail, 329.63, 48000.0);
+    CHECK (p5_all_shift > 1.0, "all-shifted still harmonises (%.3g)", p5_all_shift);
+
+    /* The LEAD as a synth: the corrected output is an oscillator at the
+       target, and the input's own timbre is gone -- the sung 3rd and 4th
+       harmonics do not survive into a sine-patch lead. */
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        src[v] = AE_HARM_SRC_DEFAULT;
+    run_synth_case (src, AE_HARM_SRC_SYNTH, 0.0, "sine", mono, hl, hr, total);
+    const double lead_f0 = goertzel (mono + total - tail, tail, 220.0, 48000.0);
+    const double lead_h3 = goertzel (mono + total - tail, tail, 660.0, 48000.0);
+    CHECK (lead_f0 > 1.0, "synth lead sounds at the corrected pitch (%.3g)", lead_f0);
+    CHECK (lead_h3 < lead_f0 * 0.05,
+           "synth lead replaces the singer's timbre (h3 %.3g vs f0 %.3g)",
+           lead_h3, lead_f0);
+
+    /* Vowel transfer reshapes the carrier's spectrum, so it needs a carrier
+       with harmonics to reshape -- a channel vocoder filters, it cannot
+       invent partials (a `sine` carrier barely changes, which is worth
+       knowing and is why the docs say so).
+
+       The definitional test: sing two different vowels at the SAME pitch.
+       With the transfer off the synth is identical either way (same notes,
+       same patch); with it on, a bright vowel must make a brighter synth.
+       `organ` is the carrier -- rich harmonics, no filter of its own to
+       fight. */
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        src[v] = AE_HARM_SRC_DEFAULT;
+    /* Band energies of the harmony bus, low (around the ghosts' own
+       fundamentals) against high (the bright vowel's formant region). */
+    double tilt[2][2]; /* [vowel off/on][dark/bright] */
+    double level[2];
+    for (int on = 0; on < 2; ++on)
+        for (int b = 0; b < 2; ++b)
+        {
+            run_synth_case_ex (src, AE_HARM_SRC_VOICE, on ? 1.0 : 0.0, "organ", b,
+                               mono, hl, hr, total);
+            double hi = 0.0, lo = 0.0, sq = 0.0;
+            for (double f = 1400.0; f <= 2600.0; f += 200.0)
+                hi += goertzel (hl + total - tail, tail, f, 48000.0);
+            for (double f = 260.0; f <= 700.0; f += 60.0)
+                lo += goertzel (hl + total - tail, tail, f, 48000.0);
+            for (int i = total - tail; i < total; ++i)
+                sq += (double) hl[i] * hl[i];
+            tilt[on][b] = hi / (lo + 1e-12);
+            if (b == 0)
+                level[on] = sq;
+        }
+    /* Off: the vowel cannot reach the synth, so both vowels give the same
+       spectrum. */
+    CHECK (fabs (tilt[0][1] - tilt[0][0]) < 0.15 * (tilt[0][0] + 1e-12),
+           "vowel off: the synth ignores the sung vowel (%.4g vs %.4g)",
+           tilt[0][0], tilt[0][1]);
+    /* On: the bright vowel makes a measurably brighter synth. */
+    CHECK (tilt[1][1] > tilt[1][0] * 2.0,
+           "vowel on: a brighter vowel brightens the synth (%.4g vs %.4g)",
+           tilt[1][1], tilt[1][0]);
+    /* And it does not run away with the level: the normaliser holds the bus
+       within a couple of dB of where it was. */
+    CHECK (level[1] > level[0] * 0.25 && level[1] < level[0] * 4.0,
+           "vowel transfer keeps the level sane (%.4g vs %.4g)", level[1], level[0]);
+
+    /* Ensemble depth 0 collapses the effect back to the dry ranks. */
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_synth_shape (p, 0.0, 0.0);
+    CHECK (p->ensemble_depth == 0.0, "ensemble depth takes 0");
+    ae_corrector_set_synth_shape (p, 2.0, -1.0);
+    CHECK (p->ensemble_depth == 1.0 && p->synth_vowel == 0.0,
+           "synth shape clamps out of range");
+    ae_corrector_free (p);
+    free (p);
+
+    free (mono); free (hl); free (hr);
+}
+
 static void test_96k (void)
 {
     /* The 96 kHz latency halving: shifter blocks are fixed SAMPLE counts
@@ -785,6 +944,7 @@ int main (void)
     test_harmony();
     test_synth_harmony();
     test_synth_string_machine();
+    test_synth_sources_and_vowel();
     test_midi_harmony();
     test_json();
     test_engine_channels();

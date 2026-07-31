@@ -170,7 +170,12 @@ static void config_defaults (App *app)
     c->params.harm_mute = 0;
     c->params.harm_solo = 0;
     c->params.harm_source      = 0;     /* pitch-shifted live audio */
+    c->params.lead_source      = 0;     /* the shifter's corrected voice */
+    for (int v = 0; v < 5; ++v)
+        c->params.harm_voice_source[v] = -1; /* follow harmSource */
     c->params.synth_patch      = 0;     /* "pad" */
+    c->params.ensemble_depth   = 1.0;
+    c->params.synth_vowel      = 0.0;
     c->params.synth_attack_ms  = 80.0;
     c->params.synth_release_ms = 500.0;
     c->params.midi_mode = false;
@@ -239,12 +244,23 @@ static void config_json (const App *app, char *out, size_t cap)
     char harm[512];
     static const char *lock_names[] = { "off", "mask", "ji" };
     snprintf (harm, sizeof (harm),
-              ",\"harmSource\":\"%s\",\"synthPatch\":\"%s\","
-              "\"synthAttackMs\":%.6g,\"synthReleaseMs\":%.6g",
+              ",\"harmSource\":\"%s\",\"leadSource\":\"%s\",\"synthPatch\":\"%s\","
+              "\"synthAttackMs\":%.6g,\"synthReleaseMs\":%.6g,"
+              "\"ensembleDepth\":%.6g,\"synthVowel\":%.6g,\"hSrc\":[",
               c->params.harm_source == 1 ? "synth" : "voice",
+              c->params.lead_source == 1 ? "synth" : "voice",
               ae_synth_patch_name (c->params.synth_patch),
-              c->params.synth_attack_ms, c->params.synth_release_ms);
+              c->params.synth_attack_ms, c->params.synth_release_ms,
+              c->params.ensemble_depth, c->params.synth_vowel);
     strncat (out, harm, cap - strlen (out) - 1);
+    for (int v = 0; v < 5; ++v)
+    {
+        const int s = c->params.harm_voice_source[v];
+        snprintf (harm, sizeof (harm), "%s\"%s\"", v ? "," : "",
+                  s == 0 ? "voice" : s == 1 ? "synth" : "default");
+        strncat (out, harm, cap - strlen (out) - 1);
+    }
+    strncat (out, "]", cap - strlen (out) - 1);
     snprintf (harm, sizeof (harm), ",\"harmOn\":%s,\"harmLock\":\"%s\",\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
@@ -364,6 +380,22 @@ static bool config_apply_json (App *app, const char *json)
         c->params.harm_on = b;
     if (ae_json_get_string (json, "harmSource", str, sizeof (str)))
         c->params.harm_source = strcmp (str, "synth") == 0 ? 1 : 0;
+    if (ae_json_get_string (json, "leadSource", str, sizeof (str)))
+        c->params.lead_source = strcmp (str, "synth") == 0 ? 1 : 0;
+    if (ae_json_get_number (json, "ensembleDepth", &num))
+        c->params.ensemble_depth = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "synthVowel", &num))
+        c->params.synth_vowel = num_clamp (num, 0.0, 1.0);
+    /* Per-voice sources: "voice" / "synth", anything else (including
+       "default" and an empty slot) means follow harmSource. */
+    {
+        char srcs[5][AE_JSON_STR_MAX];
+        const int ns = ae_json_get_str_array (json, "hSrc", srcs, 5);
+        for (int v = 0; v < ns; ++v)
+            c->params.harm_voice_source[v] =
+                strcmp (srcs[v], "synth") == 0 ? 1
+              : strcmp (srcs[v], "voice") == 0 ? 0 : -1;
+    }
     if (ae_json_get_string (json, "synthPatch", str, sizeof (str)))
     {
         const int idx = ae_synth_patch_find (str);

@@ -67,7 +67,11 @@ typedef struct
        voice (1), which adds a patch and an attack/release envelope. Applies
        to all five voices. */
     int      harm_source;
+    int      harm_voice_source[5];   /* per voice; -1 = follow harm_source */
+    int      lead_source;            /* the corrected lead: 0 shifted, 1 synth */
     int      synth_patch;            /* index into the engine's patch table */
+    double   ensemble_depth;         /* 0..1 */
+    double   synth_vowel;            /* 0..1 formant transfer */
     double   synth_attack_ms;        /* 0..5000 */
     double   synth_release_ms;       /* 0..10000 */
 } AeLiveParams;
