@@ -147,6 +147,7 @@ static void config_defaults (App *app)
     c->params.degrees_lo      = ~0ull;   /* every degree enabled */
     c->params.degrees_hi      = 0xffull;
     c->params.bypass          = false;
+    c->params.lead_on         = true;
     c->params.output_gain_db  = 0.0;
 
     app->root_note     = 0;      /* C */
@@ -203,7 +204,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"humanize\":%.6g,"
               "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
-              "\"bypass\":%s,\"outputGainDb\":%.6g,"
+              "\"bypass\":%s,\"leadOn\":%s,\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
@@ -211,6 +212,7 @@ static void config_json (const App *app, char *out, size_t cap)
               app->root_note, app->root_cents, app->ref_a4,
               app->stretch_cents, app->range_name, app->quality_name,
               c->params.bypass ? "true" : "false",
+              c->params.lead_on ? "true" : "false",
               c->params.output_gain_db, c->buffer_frames, c->input_channel,
               c->output_channel);
     ae_json_escape_append (out, cap, c->input_uid);
@@ -352,6 +354,8 @@ static bool config_apply_json (App *app, const char *json)
     }
     if (ae_json_get_bool (json, "bypass", &b))
         c->params.bypass = b;
+    if (ae_json_get_bool (json, "leadOn", &b))
+        c->params.lead_on = b;
     if (ae_json_get_number (json, "outputGainDb", &num))
         c->params.output_gain_db = num_clamp (num, -60.0, 12.0);
 

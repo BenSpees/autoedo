@@ -391,11 +391,12 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
 
     /* Apply live parameters, then correct. */
     bool  bypass = false;
+    bool  lead   = true;
     float gain   = 1.0f;
     ae_atomic_params_apply (&e->params, &e->corrector,
                             atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
                             atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
-                            &bypass, &gain);
+                            &bypass, &lead, &gain);
     ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
     const float *src = bypass ? e->dry : e->proc;
@@ -409,7 +410,9 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
         for (UInt32 i = 0; i < n_frames && i < cap; ++i)
         {
             if (i >= n) { dst[i] = 0.0f; continue; }
-            float s = src[i];
+            /* Lead mute is harmony-only output; bypass still wins (a dry
+               passthrough with the lead "muted" would be silence). */
+            float s = (bypass || lead) ? src[i] : 0.0f;
             if (! bypass)
                 s += harm != NULL ? harm[i]
                                   : 0.5f * (e->harm_l[i] + e->harm_r[i]); /* mono out */

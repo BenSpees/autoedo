@@ -79,9 +79,12 @@ static void *stub_thread (void *arg)
         }
 
         bool  bypass = false;
+        bool  lead   = true;
         float gain   = 1.0f;
         float harm_l[STUB_BLOCK], harm_r[STUB_BLOCK];
-        ae_atomic_params_apply (&e->params, &e->corrector, 0, 0, &bypass, &gain);
+        ae_atomic_params_apply (&e->params, &e->corrector, 0, 0,
+                                &bypass, &lead, &gain);
+        (void) lead; /* the stub discards its output */
         ae_corrector_process (&e->corrector, block, harm_l, harm_r, STUB_BLOCK);
 
         struct timespec ts = { 0, (long) (1e9 * STUB_BLOCK / STUB_RATE) };

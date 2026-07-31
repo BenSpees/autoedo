@@ -46,6 +46,8 @@ typedef struct
     uint64_t degrees_hi;      /* degrees 64..71 in bits 0..7 */
     bool     bypass;          /* true = pass input through uncorrected */
     double   output_gain_db;  /* -60..+12 */
+    bool     lead_on;         /* corrected lead voice in the mix; false =
+                                 harmony only (bypass still wins) */
 
     /* MIDI Harmony: held notes override the mask (middle C = degree 4*edo,
        one EDO step per semitone). Off = held notes are ignored. */

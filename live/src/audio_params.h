@@ -42,6 +42,7 @@ typedef struct
     _Atomic uint64_t deg_lo;
     _Atomic uint64_t deg_hi;
     _Atomic bool     bypass;
+    _Atomic bool     lead_on;
     _Atomic double   gain_lin;
 
     _Atomic bool     midi_mode;
@@ -81,6 +82,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->deg_lo,          p->degrees_lo,      memory_order_relaxed);
     atomic_store_explicit (&a->deg_hi,          p->degrees_hi,      memory_order_relaxed);
     atomic_store_explicit (&a->bypass,          p->bypass,          memory_order_relaxed);
+    atomic_store_explicit (&a->lead_on,         p->lead_on,         memory_order_relaxed);
     atomic_store_explicit (&a->gain_lin, pow (10.0, p->output_gain_db / 20.0),
                            memory_order_relaxed);
 
@@ -105,11 +107,12 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
 }
 
 /* Audio thread, once per block: push the current parameters into the
-   corrector and report bypass/gain for the output stage. hw_midi_lo/hi are
-   the backend's hardware held-note bits (0 if it has no MIDI input). */
+   corrector and report bypass/lead/gain for the output stage. hw_midi_lo/hi
+   are the backend's hardware held-note bits (0 if it has no MIDI input). */
 static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                                            uint64_t hw_midi_lo, uint64_t hw_midi_hi,
-                                           bool *bypass_out, float *gain_out)
+                                           bool *bypass_out, bool *lead_out,
+                                           float *gain_out)
 {
     ae_corrector_set_midi (ps,
                        atomic_load_explicit (&a->midi_mode, memory_order_relaxed),
@@ -155,6 +158,7 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                         atomic_load_explicit (&a->synth_release_ms, memory_order_relaxed));
 
     *bypass_out = atomic_load_explicit (&a->bypass, memory_order_relaxed);
+    *lead_out   = atomic_load_explicit (&a->lead_on, memory_order_relaxed);
     *gain_out   = (float) atomic_load_explicit (&a->gain_lin, memory_order_relaxed);
 }
 

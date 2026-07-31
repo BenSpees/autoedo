@@ -512,14 +512,18 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
     memcpy (e->dry, e->proc, n * sizeof (float));
 
     bool  bypass = false;
+    bool  lead   = true;
     float gain   = 1.0f;
     ae_atomic_params_apply (&e->params, &e->corrector,
                             atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
                             atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
-                            &bypass, &gain);
+                            &bypass, &lead, &gain);
     ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
+    /* Lead mute is harmony-only output; bypass still wins (a dry passthrough
+       with the lead "muted" would be silence). */
     const float *src = bypass ? e->dry : e->proc;
+    const float  lg  = (bypass || lead) ? 1.0f : 0.0f;
     const int    ch  = e->out_fmt.channels;
     const int    sel = e->out_channel_sel; /* -1 = stereo on channels 1-2 */
 
@@ -528,8 +532,8 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
         float *d = (float *) out;
         for (UINT32 i = 0; i < n; ++i)
         {
-            const float l  = (src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
-            const float r  = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float l  = (lg * src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
+            const float r  = (lg * src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
             const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
             const float mc = ae_soft_clip (0.5f * (l + r));
             for (int c = 0; c < ch; ++c)
@@ -543,8 +547,8 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
         short *d = (short *) out;
         for (UINT32 i = 0; i < n; ++i)
         {
-            const float l  = (src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
-            const float r  = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float l  = (lg * src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
+            const float r  = (lg * src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
             const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
             const float mc = ae_soft_clip (0.5f * (l + r));
             for (int c = 0; c < ch; ++c)
