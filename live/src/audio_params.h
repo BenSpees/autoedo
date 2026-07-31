@@ -11,6 +11,23 @@
 #include "audio.h"
 #include "corrector.h"
 
+/* Output-stage soft clip: transparent below the knee, then a smooth
+   saturation that approaches (never reaches) full scale. The corrected
+   voice plus five near-unity harmony voices can sum well past 1.0 --
+   folded onto a single bound channel they otherwise hit the converter as
+   hard digital clipping, heard as crackle that gets worse per voice
+   added. Monotonic and C1 at the knee; the fast path is one compare. */
+static inline float ae_soft_clip (float x)
+{
+    const float knee = 0.8f; /* linear below ~ -1.9 dBFS */
+    const float ax = fabsf (x);
+    if (ax <= knee)
+        return x;
+    const float t = (ax - knee) / (1.0f - knee);
+    const float y = knee + (1.0f - knee) * (t / (1.0f + t));
+    return x < 0.0f ? -y : y;
+}
+
 typedef struct
 {
     _Atomic int      edo;

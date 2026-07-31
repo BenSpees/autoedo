@@ -528,12 +528,14 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
         float *d = (float *) out;
         for (UINT32 i = 0; i < n; ++i)
         {
-            const float l = (src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
-            const float r = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float l  = (src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
+            const float r  = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
+            const float mc = ae_soft_clip (0.5f * (l + r));
             for (int c = 0; c < ch; ++c)
-                d[i * ch + c] = sel >= 0 ? (c == sel ? 0.5f * (l + r) : 0.0f)
-                              : ch >= 2 ? (c == 0 ? l : (c == 1 ? r : 0.5f * (l + r)))
-                                        : 0.5f * (l + r);
+                d[i * ch + c] = sel >= 0 ? (c == sel ? mc : 0.0f)
+                              : ch >= 2 ? (c == 0 ? lc : (c == 1 ? rc : mc))
+                                        : mc;
         }
     }
     else /* 16-bit PCM */
@@ -541,15 +543,15 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
         short *d = (short *) out;
         for (UINT32 i = 0; i < n; ++i)
         {
-            const float l = (src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
-            const float r = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float l  = (src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
+            const float r  = (src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
+            const float mc = ae_soft_clip (0.5f * (l + r));
             for (int c = 0; c < ch; ++c)
             {
-                float v = sel >= 0 ? (c == sel ? 0.5f * (l + r) : 0.0f)
-                        : ch >= 2 ? (c == 0 ? l : (c == 1 ? r : 0.5f * (l + r)))
-                                  : 0.5f * (l + r);
-                if (v > 1.0f)  v = 1.0f;
-                if (v < -1.0f) v = -1.0f;
+                const float v = sel >= 0 ? (c == sel ? mc : 0.0f)
+                              : ch >= 2 ? (c == 0 ? lc : (c == 1 ? rc : mc))
+                                        : mc;
                 d[i * ch + c] = (short) lrintf (v * 32767.0f);
             }
         }

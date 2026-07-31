@@ -3,6 +3,7 @@
    (`make test`). */
 
 #include "../src/audio.h"
+#include "../src/audio_params.h"
 #include "../src/json.h"
 #include "../src/corrector.h"
 #include "../src/tuning.h"
@@ -488,6 +489,30 @@ static void test_engine_channels (void)
     ae_audio_engine_stop (e);
 }
 
+static void test_soft_clip (void)
+{
+    /* Transparent below the knee: exact passthrough, sign included. */
+    CHECK (ae_soft_clip (0.0f) == 0.0f, "soft clip: zero is zero");
+    CHECK (ae_soft_clip (0.5f) == 0.5f, "soft clip: below knee passes through");
+    CHECK (ae_soft_clip (-0.5f) == -0.5f, "soft clip: negative passthrough");
+    CHECK (ae_soft_clip (0.8f) == 0.8f, "soft clip: continuous at the knee");
+
+    /* Bounded: a five-voice pile-up must stay inside full scale. */
+    CHECK (ae_soft_clip (4.5f) < 1.0f, "soft clip: bounded above");
+    CHECK (ae_soft_clip (-4.5f) > -1.0f, "soft clip: bounded below");
+    CHECK (fabsf (ae_soft_clip (5.0f) + ae_soft_clip (-5.0f)) < 1e-7f,
+           "soft clip: symmetric");
+
+    /* Monotonic through the knee (no fold-back distortion). */
+    float prev = -2.0f;
+    for (float x = -1.99f; x < 2.0f; x += 0.01f)
+    {
+        const float y = ae_soft_clip (x);
+        CHECK (y > ae_soft_clip (prev) - 1e-7f, "soft clip: monotonic at %.2f", x);
+        prev = x;
+    }
+}
+
 int main (void)
 {
     test_tuning();
@@ -498,6 +523,7 @@ int main (void)
     test_midi_harmony();
     test_json();
     test_engine_channels();
+    test_soft_clip();
 
     if (failures == 0)
     {

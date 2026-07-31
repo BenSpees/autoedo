@@ -413,7 +413,7 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
             if (! bypass)
                 s += harm != NULL ? harm[i]
                                   : 0.5f * (e->harm_l[i] + e->harm_r[i]); /* mono out */
-            dst[i] = s * gain;
+            dst[i] = ae_soft_clip (s * gain);
         }
     }
     return noErr;
