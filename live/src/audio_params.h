@@ -71,6 +71,12 @@ typedef struct
     _Atomic double   synth_release_ms;
     _Atomic bool     drone_on;
     _Atomic int      drone_deg;
+    _Atomic double   ir_lead_mix;
+    _Atomic double   ir_lead_gain_db;
+    _Atomic bool     ir_lead_on;
+    _Atomic double   ir_harm_mix;
+    _Atomic double   ir_harm_gain_db;
+    _Atomic bool     ir_harm_on;
 } AeAtomicParams;
 
 static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams *p)
@@ -122,6 +128,12 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->synth_release_ms, p->synth_release_ms, memory_order_relaxed);
     atomic_store_explicit (&a->drone_on,         p->drone_on,         memory_order_relaxed);
     atomic_store_explicit (&a->drone_deg,        p->drone_deg,        memory_order_relaxed);
+    atomic_store_explicit (&a->ir_lead_mix,      p->ir_lead_mix,      memory_order_relaxed);
+    atomic_store_explicit (&a->ir_lead_gain_db,  p->ir_lead_gain_db,  memory_order_relaxed);
+    atomic_store_explicit (&a->ir_lead_on,       p->ir_lead_on,       memory_order_relaxed);
+    atomic_store_explicit (&a->ir_harm_mix,      p->ir_harm_mix,      memory_order_relaxed);
+    atomic_store_explicit (&a->ir_harm_gain_db,  p->ir_harm_gain_db,  memory_order_relaxed);
+    atomic_store_explicit (&a->ir_harm_on,       p->ir_harm_on,       memory_order_relaxed);
 }
 
 /* Audio thread, once per block: push the current parameters into the
@@ -187,6 +199,14 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
     ae_corrector_set_drone (ps,
                         atomic_load_explicit (&a->drone_on, memory_order_relaxed),
                         atomic_load_explicit (&a->drone_deg, memory_order_relaxed));
+    ae_corrector_set_ir_params (ps, 0,
+                        atomic_load_explicit (&a->ir_lead_mix, memory_order_relaxed),
+                        atomic_load_explicit (&a->ir_lead_gain_db, memory_order_relaxed),
+                        atomic_load_explicit (&a->ir_lead_on, memory_order_relaxed));
+    ae_corrector_set_ir_params (ps, 1,
+                        atomic_load_explicit (&a->ir_harm_mix, memory_order_relaxed),
+                        atomic_load_explicit (&a->ir_harm_gain_db, memory_order_relaxed),
+                        atomic_load_explicit (&a->ir_harm_on, memory_order_relaxed));
 
     *bypass_out = atomic_load_explicit (&a->bypass, memory_order_relaxed);
     *lead_out   = atomic_load_explicit (&a->lead_on, memory_order_relaxed);

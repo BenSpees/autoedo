@@ -82,6 +82,17 @@ typedef struct
        root"). Gated by harm_on; edges use the synth attack/release. */
     bool     drone_on;
     int      drone_deg;              /* absolute degree, 0..8*edo */
+
+    /* IR points (v0.4-delta B7), the lock-free live three per point --
+       path/hash/predelay ride the load call instead. Lead = the corrected
+       voice (zero added latency); harm = the stereo harmony bus,
+       post-ensemble pre-tilt. */
+    double   ir_lead_mix;            /* 0..1 */
+    double   ir_lead_gain_db;        /* -24..+12 */
+    bool     ir_lead_on;
+    double   ir_harm_mix;
+    double   ir_harm_gain_db;
+    bool     ir_harm_on;
 } AeLiveParams;
 
 /* Parameters that require an engine restart to change. */
@@ -151,5 +162,13 @@ void ae_audio_engine_set_midi_notes (AeAudioEngine *e, uint64_t lo, uint64_t hi)
 
 /* Enumerate MIDI input source names into out[0..max-1]. Returns the count. */
 int ae_audio_list_midi_sources (char out[][AE_NAME_MAX], int max);
+
+/* Load {path, hash} into an IR point (0 = lead, 1 = harmony) -- control
+   thread; file read, hash verify and FFT fills happen here, the audio
+   thread crossfades to the result over ~30 ms. An empty path clears the
+   point. Returns false with a reason in err. */
+bool ae_audio_engine_load_ir (AeAudioEngine *e, int point, const char *path,
+                              const char *hash, double predelay_ms,
+                              char *err, size_t err_len);
 
 #endif /* AUTOEDO_AUDIO_H */

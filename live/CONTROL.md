@@ -233,6 +233,21 @@ UI behavior you may want to replicate).
 | `vowelMode` | `"vocoder"` \| `"lpc"` | live | how the vowel transfer estimates the voice. `vocoder` (default): a 16-band channel vocoder — robust, band-quantized, the classic robot-choir color. `lpc`: **formant-corrected resynthesis** — an order-18 all-pole (LPC) fit of the vocal tract, resolved continuously rather than in bands, driven by the voice's own whitened excitation so consonants ride through. Sharper vowels, more "a person singing through the synth", slightly more sensitive to noisy input. Reflection coefficients are interpolated between frames, which keeps the filter stable while the tract moves; a peak-aware normaliser and safety saturator hold the level where the volume match put it. Ignored while `synthVowel` is 0 |
 | `droneOn` | bool | live | **drone**: one synth voice pinned to an ABSOLUTE degree, sustained while on regardless of what the singer does (a root-only chart chord means "drone that root"). Uses the current `synthPatch` and attack/release, volume-matched like the ghosts (level rides the frozen input RMS, so it breathes with the set instead of blasting before the first note), centred on the harmony bus, through the ensemble and the tilt but deliberately NOT the vowel transfer (a drone has no mouth to follow — the vocoder's gating would mute it between phrases). `harmOn` still gates it |
 | `droneDeg` | int 0–8·edo | live | the drone's absolute engine degree (`4·edo` = the middle-C-region root, like the MIDI-harmony mapping) |
+
+### IR points (convolution spaces)
+
+Two convolution points from the shared `irconv` library (vendored byte-identical with Treebrain): **lead** — the corrected voice, whose first partition is direct time-domain so the live monitored path gains ZERO samples of latency — and **harm** — the stereo harmony bus, sitting post-ensemble and **pre-tilt** (the tilt stays the performer's final tone trim over whatever space the IR imposes). The spec's `irLead {…}` / `irHarm {…}` objects are spoken as flat keys here (this parser's shape); substitute `Harm` for `Lead` throughout:
+
+| Key | Type | Applies | Meaning |
+|---|---|---|---|
+| `irLeadPath` | string | live* | WAV to load (PCM 16/24 or float32, mono/stereo, **at the engine rate** — Treebrain's librarian keeps per-rate caches; a mismatch is refused, never resampled). `""` clears the point. *Applied by a ~30 ms instance crossfade — no zipper, no dropout — with the file read and FFT fills on the control thread |
+| `irLeadHash` | string | live* | FNV-1a 64-bit of the file bytes, 16 lowercase hex digits (the librarian's manifest convention). Verified before a byte is trusted; a mismatch refuses the load and lands in status `irError`. `""` skips verification |
+| `irLeadPredelayMs` | float 0–50 | live* | pre-delay before the space; changes ride the same crossfade |
+| `irLeadMix` | float 0–1 | live | wet/dry blend, smoothed (~10 ms) |
+| `irLeadGainDb` | float −24…+12 | live | wet gain, smoothed |
+| `irLeadOn` | bool | live | off = dry passthrough (the tail rides out through the mix smoothing); a fully faded-off point costs a copy, not a convolution |
+
+A stereo WAV into the mono lead folds to mid; into the harm point its channels convolve L/R independently. IRs cap at 2 s (the engine's prepare ceiling). Status echoes every key plus `irError` (the last load failure, cleared by a success), and a fresh engine reloads the persisted points on start. |
 | `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward, up first per distance) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |
 | `hm` | int[5], each −72…72 | live | voice intervals in EDO steps; 0 = voice off. Keep within ±`edo` (the pool is ±equave); intervals are *steps*, so re-clamp when you lower the EDO |
 | `hx` | int[5], 0–2 | live | per-voice octave extension, stacking in the voice's direction: `eff = hm + sign(hm)·hx·edo` |

@@ -592,6 +592,15 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->ens_buf_l = calloc ((size_t) p->ens_len, sizeof (float));
     p->ens_buf_r = calloc ((size_t) p->ens_len, sizeof (float));
 
+    /* IR points: the 2 s ceiling at the engine rate. Created once per
+       prepare; irc_point_process is allocation-free from here on. */
+    irc_point_destroy (p->ir_lead);
+    irc_point_destroy (p->ir_harm[0]);
+    irc_point_destroy (p->ir_harm[1]);
+    p->ir_lead    = irc_point_create ((int) (2.0 * p->fs), p->max_block, p->fs);
+    p->ir_harm[0] = irc_point_create ((int) (2.0 * p->fs), p->max_block, p->fs);
+    p->ir_harm[1] = irc_point_create ((int) (2.0 * p->fs), p->max_block, p->fs);
+
     voc_prepare (p); /* bandpass coefficients follow the sample rate */
     /* Tilt pivot: 700 Hz, the crossover a "darker/brighter" control wants --
        low enough that dropping the top keeps the fundamentals, high enough
@@ -673,6 +682,9 @@ void ae_corrector_reset (AeCorrector *p)
         p->drone_phase[k] = (double) k / (double) AE_SYNTH_PARTIALS;
         p->drone_lfo[k]   = 2.0 * AE_PI * p->drone_phase[k];
     }
+    if (p->ir_lead != NULL)    irc_point_reset (p->ir_lead);
+    if (p->ir_harm[0] != NULL) irc_point_reset (p->ir_harm[0]);
+    if (p->ir_harm[1] != NULL) irc_point_reset (p->ir_harm[1]);
 
     for (int b = 0; b < AE_VOC_BANDS; ++b)
     {
@@ -744,7 +756,44 @@ void ae_corrector_free (AeCorrector *p)
     p->ens_buf_l = p->ens_buf_r = NULL;
     p->ens_len = p->ens_mask = 0;
     ae_corrector_free_shifters (p);
+    irc_point_destroy (p->ir_lead);
+    irc_point_destroy (p->ir_harm[0]);
+    irc_point_destroy (p->ir_harm[1]);
+    p->ir_lead = p->ir_harm[0] = p->ir_harm[1] = NULL;
     ae_yin_free (&p->detector);
+}
+
+bool ae_corrector_load_ir (AeCorrector *p, int point, const float *ir_l,
+                           const float *ir_r, int len, double predelay_ms)
+{
+    if (point == 0)
+        return p->ir_lead != NULL
+            && irc_point_load (p->ir_lead, ir_l, len, predelay_ms);
+    if (p->ir_harm[0] == NULL || p->ir_harm[1] == NULL)
+        return false;
+    if (irc_point_busy (p->ir_harm[0]) || irc_point_busy (p->ir_harm[1]))
+        return false;
+    /* Both sides must take the swap, or the stereo image would smear one
+       space against another for 30 ms. */
+    const bool a = irc_point_load (p->ir_harm[0], ir_l, len, predelay_ms);
+    const bool b = irc_point_load (p->ir_harm[1],
+                                   ir_r != NULL ? ir_r : ir_l, len, predelay_ms);
+    return a && b;
+}
+
+void ae_corrector_set_ir_params (AeCorrector *p, int point, double mix,
+                                 double gain_db, bool on)
+{
+    if (point == 0)
+    {
+        if (p->ir_lead != NULL)
+            irc_point_set (p->ir_lead, mix, gain_db, on);
+        return;
+    }
+    if (p->ir_harm[0] != NULL)
+        irc_point_set (p->ir_harm[0], mix, gain_db, on);
+    if (p->ir_harm[1] != NULL)
+        irc_point_set (p->ir_harm[1], mix, gain_db, on);
 }
 
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
@@ -1437,6 +1486,12 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     }
     p->v_gain = v_gain;
 
+    /* The LEAD IR point: on the finished corrected voice. Zero added
+       latency by construction (direct first partition) -- this is the live
+       monitored path the whole scheme exists for. */
+    if (p->ir_lead != NULL)
+        irc_point_process (p->ir_lead, mono, mono, num_samples);
+
     if (harm_l == NULL)
         return;
 
@@ -1460,8 +1515,14 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         render_synth_harmony (p, harm_l, harm_r, num_samples);
     if (! any_shift)
     {
-        /* Tilt is a property of the harmony BUS, so it applies however the
-           voices on it were made. */
+        /* The harmony IR point (post-ensemble), then the tilt: the tilt
+           stays the performer's final tone trim over whatever space the IR
+           imposes. */
+        if (p->ir_harm[0] != NULL)
+        {
+            irc_point_process (p->ir_harm[0], harm_l, harm_l, num_samples);
+            irc_point_process (p->ir_harm[1], harm_r, harm_r, num_samples);
+        }
         if (p->harm_tilt_db != 0.0)
             render_tilt (p, harm_l, harm_r, num_samples);
         return;
@@ -1507,6 +1568,12 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         p->h_mix[v] = mix;
     }
 
+    /* Harmony IR before the tilt, same order as the synth-only path. */
+    if (p->ir_harm[0] != NULL)
+    {
+        irc_point_process (p->ir_harm[0], harm_l, harm_l, num_samples);
+        irc_point_process (p->ir_harm[1], harm_r, harm_r, num_samples);
+    }
     if (p->harm_tilt_db != 0.0)
         render_tilt (p, harm_l, harm_r, num_samples);
 }

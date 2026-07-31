@@ -1061,6 +1061,112 @@ static void test_drone (void)
     free (mono); free (hl); free (hr);
 }
 
+static void test_ir_points (void)
+{
+    /* The IR points in the ENGINE chain (v0.4-delta B7): a unit-impulse IR
+       at mix 1 must be transparent through the whole corrector -- which is
+       simultaneously the zero-added-latency proof on the lead's monitored
+       path -- and a delayed-impulse IR on the harmony point must shift the
+       bus by exactly its delay. The convolver's own math is proven in its
+       shared library tests; THIS pins the wiring. */
+    const int fs = 48000, total = 3 * fs;
+    float *mono  = malloc ((size_t) total * sizeof (float));
+    float *m_ref = malloc ((size_t) total * sizeof (float));
+    float *hl    = malloc ((size_t) total * sizeof (float));
+    float *hr    = malloc ((size_t) total * sizeof (float));
+    float *h_ref = malloc ((size_t) total * sizeof (float));
+    float *in    = malloc ((size_t) total * sizeof (float));
+
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / fs;
+        in[i] = (float) (0.4 * sin (phase) + 0.25 * sin (2.0 * phase));
+    }
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, (double) fs, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("organ"), 5.0, 200.0);
+    int src[AE_HARM_VOICES];
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        src[v] = AE_HARM_SRC_DEFAULT;
+    ae_corrector_set_voice_sources (p, src, AE_HARM_SRC_VOICE);
+    ae_corrector_set_synth_shape (p, 0.0, 0.0, 0.0, AE_VOWEL_MODE_VOCODER);
+
+    /* Reference pass: no IR anywhere. */
+    memcpy (mono, in, (size_t) total * sizeof (float));
+    for (int off = 0; off < total; off += 512)
+        ae_corrector_process (p, mono + off, hl + off, hr + off,
+                              total - off < 512 ? total - off : 512);
+    memcpy (m_ref, mono, (size_t) total * sizeof (float));
+    memcpy (h_ref, hl, (size_t) total * sizeof (float));
+
+    /* Unit impulses on BOTH points at mix 1: bit-transparent -- the same
+       output to the sample, which is also the lead's zero-latency proof. */
+    ae_corrector_reset (p);
+    float imp = 1.0f;
+    CHECK (ae_corrector_load_ir (p, 0, &imp, NULL, 1, 0.0), "IR: lead load");
+    CHECK (ae_corrector_load_ir (p, 1, &imp, NULL, 1, 0.0), "IR: harm load");
+    /* A second load while the first still fades must refuse. */
+    CHECK (! ae_corrector_load_ir (p, 0, &imp, NULL, 1, 0.0),
+           "IR: a swap in flight refuses another");
+    ae_corrector_set_ir_params (p, 0, 1.0, 0.0, true);
+    ae_corrector_set_ir_params (p, 1, 1.0, 0.0, true);
+    memcpy (mono, in, (size_t) total * sizeof (float));
+    for (int off = 0; off < total; off += 512)
+        ae_corrector_process (p, mono + off, hl + off, hr + off,
+                              total - off < 512 ? total - off : 512);
+    /* Past the 30 ms swap fade and the 10 ms mix smoothing, the output must
+       BE the reference. */
+    double worst = 0.0;
+    for (int i = fs / 2; i < total; ++i)
+    {
+        const double dm = fabs ((double) mono[i] - m_ref[i]);
+        const double dh = fabs ((double) hl[i] - h_ref[i]);
+        if (dm > worst) worst = dm;
+        if (dh > worst) worst = dh;
+    }
+    CHECK (worst < 1e-5, "IR: unit impulse transparent through the chain "
+           "(worst %.3g)", worst);
+
+    /* A delayed impulse on the HARMONY point: the bus arrives exactly
+       delay samples late, proving the point actually convolves the bus. */
+    const int delay = 4800; /* 100 ms */
+    float *dimp = calloc ((size_t) (delay + 1), sizeof (float));
+    dimp[delay] = 1.0f;
+    ae_corrector_reset (p);
+    CHECK (ae_corrector_load_ir (p, 1, dimp, NULL, delay + 1, 0.0),
+           "IR: delayed impulse load");
+    ae_corrector_set_ir_params (p, 0, 1.0, 0.0, false); /* lead back to dry */
+    memcpy (mono, in, (size_t) total * sizeof (float));
+    for (int off = 0; off < total; off += 512)
+        ae_corrector_process (p, mono + off, hl + off, hr + off,
+                              total - off < 512 ? total - off : 512);
+    double err = 0.0, ref_e = 0.0;
+    for (int i = fs; i < total; ++i)
+    {
+        const double want = h_ref[i - delay];
+        err   += (hl[i] - want) * ((double) hl[i] - want);
+        ref_e += want * want;
+    }
+    CHECK (ref_e > 1e-6 && sqrt (err / (ref_e + 1e-30)) < 1e-4,
+           "IR: harmony bus shifted by exactly the IR's delay (rel %.3g)",
+           sqrt (err / (ref_e + 1e-30)));
+
+    free (dimp);
+    ae_corrector_free (p);
+    free (p);
+    free (mono); free (m_ref); free (hl); free (hr); free (h_ref); free (in);
+}
+
 static void test_harmony_formant_preservation (void)
 {
     /* The harmony shifters go through the same set_shift() as the lead,
@@ -1312,6 +1418,7 @@ int main (void)
     test_harmony_tilt();
     test_lpc_vowel_mode();
     test_drone();
+    test_ir_points();
     test_harmony_formant_preservation();
     test_midi_harmony();
     test_json();

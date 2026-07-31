@@ -26,6 +26,7 @@
 #include "audio.h"
 #include "audio_params.h"
 #include "corrector.h"
+#include "ir_load.h"
 #include "ring.h"
 
 #define MAX_FRAMES 4096
@@ -636,6 +637,20 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)
 {
     if (e != NULL)
         ae_atomic_params_store (&e->params, p);
+}
+
+
+bool ae_audio_engine_load_ir (AeAudioEngine *e, int point, const char *path,
+                              const char *hash, double predelay_ms,
+                              char *err, size_t err_len)
+{
+    if (e == NULL)
+    {
+        snprintf (err, err_len, "engine not running");
+        return false;
+    }
+    return ae_ir_load_point (&e->corrector, point, path, hash, predelay_ms,
+                             e->corrector.fs, err, err_len);
 }
 
 void ae_audio_engine_set_midi_notes (AeAudioEngine *e, uint64_t lo, uint64_t hi)

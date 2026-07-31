@@ -22,6 +22,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "irconv.h"
 #include "shifter.h"
 #include "tuning.h"
 #include "yin.h"
@@ -201,6 +202,18 @@ typedef struct
     double    drone_lfo[AE_SYNTH_PARTIALS];
     double    drone_lp;
 
+    /* IR points (v0.4-delta B7): convolution spaces from the shared irconv
+       library (vendored byte-identical with Treebrain). The LEAD point sits
+       on the corrected voice -- a live monitored path, which is why the
+       convolver's first partition is direct time-domain: ZERO added
+       latency. The HARMONY point is the one stereo point (L/R convolved
+       independently) and sits post-ensemble, PRE-tilt: the tilt stays the
+       performer's final tone trim over whatever space the IR imposes.
+       Created in prepare (2 s ceiling at the engine rate); loading runs on
+       the control thread and crossfades in over ~30 ms. */
+    IrcPoint *ir_lead;
+    IrcPoint *ir_harm[2];
+
     /* Ensemble (string-machine chorus): a stereo pair of delay lines the
        whole synth harmony bus runs through when the patch asks for it.
        Allocated in prepare (fs-sized), so the audio thread never allocates. */
@@ -316,6 +329,18 @@ void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
    above the reference anchor). Live; the synth attack/release envelope
    shapes the edges, and the master harmony switch still gates it. */
 void ae_corrector_set_drone (AeCorrector *p, bool on, long long degree);
+
+/* IR points: 0 = lead, 1 = harmony. Loading (CONTROL thread -- FFT fills)
+   arms a ~30 ms crossfade to the new impulse; ir_r NULL uses ir_l on both
+   sides of the stereo harmony point; ir_l NULL/len 0 fades to bypass.
+   Returns false while a previous swap is still fading. */
+bool ae_corrector_load_ir (AeCorrector *p, int point, const float *ir_l,
+                           const float *ir_r, int len, double predelay_ms);
+
+/* Live IR parameters for a point: wet mix 0..1, wet gain dB, on/off (off
+   lets the tail ride out through the mix smoothing). Lock-free. */
+void ae_corrector_set_ir_params (AeCorrector *p, int point, double mix,
+                                 double gain_db, bool on);
 
 /* The source actually in force for a harmony voice, resolving the
    per-voice sentinel against the global switch. */

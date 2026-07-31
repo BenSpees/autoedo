@@ -65,12 +65,25 @@ typedef struct
     AeAudioEngine  *engine;
     char            engine_err[256];
 
+    /* IR points (v0.4-delta B7): the librarian's {path, hash} plus the
+       predelay, per point (0 lead, 1 harmony). Persisted with the config
+       so a relaunch reloads the same spaces; ir_err carries the last load
+       failure into status (cleared by a success). */
+    struct
+    {
+        char   path[1024];
+        char   hash[24];
+        double predelay_ms;
+    } ir_cfg[2];
+    bool            ir_dirty[2]; /* changed since last (re)load */
+    char            ir_err[256];
+
     /* Status is serialized once per pump tick (or config change) and every
        consumer — each WebSocket push and each /api/status GET — is handed
        the same cached string. Sized for the config echo plus the pitch
        trace (~48 pairs). */
     pthread_mutex_t status_lock;
-    char            status_json[12288];
+    char            status_json[16384];
 } App;
 
 /* Detection-range presets (min/max Hz of the tracking window). */
@@ -182,6 +195,14 @@ static void config_defaults (App *app)
     c->params.synth_release_ms = 500.0;
     c->params.drone_on  = false;
     c->params.drone_deg = 0;
+    c->params.ir_lead_mix     = 0.25; /* a space, not a wash, when enabled */
+    c->params.ir_lead_gain_db = 0.0;
+    c->params.ir_lead_on      = false;
+    c->params.ir_harm_mix     = 0.25;
+    c->params.ir_harm_gain_db = 0.0;
+    c->params.ir_harm_on      = false;
+    memset (app->ir_cfg, 0, sizeof (app->ir_cfg));
+    app->ir_err[0] = '\0';
     c->params.midi_mode = false;
     c->midi_source[0]   = '\0'; /* all MIDI inputs */
     c->input_channel    = 0;    /* backend default channel handling */
@@ -293,7 +314,7 @@ static void config_json (const App *app, char *out, size_t cap)
         strncat (out, harm, cap - strlen (out) - 1);
     }
     snprintf (harm, sizeof (harm),
-              ",\"hMute\":[%d,%d,%d,%d,%d],\"hSolo\":[%d,%d,%d,%d,%d]}",
+              ",\"hMute\":[%d,%d,%d,%d,%d],\"hSolo\":[%d,%d,%d,%d,%d]",
               (c->params.harm_mute >> 0) & 1, (c->params.harm_mute >> 1) & 1,
               (c->params.harm_mute >> 2) & 1, (c->params.harm_mute >> 3) & 1,
               (c->params.harm_mute >> 4) & 1,
@@ -301,6 +322,28 @@ static void config_json (const App *app, char *out, size_t cap)
               (c->params.harm_solo >> 2) & 1, (c->params.harm_solo >> 3) & 1,
               (c->params.harm_solo >> 4) & 1);
     strncat (out, harm, cap - strlen (out) - 1);
+
+    /* IR points -- the spec's irLead{}/irHarm{} objects as flat keys (the
+       shape this parser speaks; documented in CONTROL.md §IR). */
+    static const char *ir_pfx[2] = { "irLead", "irHarm" };
+    for (int pt = 0; pt < 2; ++pt)
+    {
+        const double mix  = pt == 0 ? c->params.ir_lead_mix : c->params.ir_harm_mix;
+        const double gain = pt == 0 ? c->params.ir_lead_gain_db : c->params.ir_harm_gain_db;
+        const bool   on   = pt == 0 ? c->params.ir_lead_on : c->params.ir_harm_on;
+        snprintf (harm, sizeof (harm), ",\"%sPath\":\"", ir_pfx[pt]);
+        strncat (out, harm, cap - strlen (out) - 1);
+        ae_json_escape_append (out, cap, app->ir_cfg[pt].path);
+        snprintf (harm, sizeof (harm),
+                  "\",\"%sHash\":\"%s\",\"%sPredelayMs\":%.4g,"
+                  "\"%sMix\":%.4g,\"%sGainDb\":%.4g,\"%sOn\":%s",
+                  ir_pfx[pt], app->ir_cfg[pt].hash,
+                  ir_pfx[pt], app->ir_cfg[pt].predelay_ms,
+                  ir_pfx[pt], mix, ir_pfx[pt], gain,
+                  ir_pfx[pt], on ? "true" : "false");
+        strncat (out, harm, cap - strlen (out) - 1);
+    }
+    strncat (out, "}", cap - strlen (out) - 1);
 }
 
 static void config_save (const App *app)
@@ -313,7 +356,7 @@ static void config_save (const App *app)
         fprintf (stderr, "autoedo: cannot write %s: %s\n", path, strerror (errno));
         return;
     }
-    char body[4096] = "";
+    char body[8192] = "";
     config_json (app, body, sizeof (body));
     fprintf (f, "%s\n", body);
     fclose (f);
@@ -405,6 +448,51 @@ static bool config_apply_json (App *app, const char *json)
         const int deg = (int) num;
         c->params.drone_deg = deg < 0 ? 0
                             : deg > 8 * AE_MAX_EDO ? 8 * AE_MAX_EDO : deg;
+    }
+
+    /* IR points: the live three go to the params; path/hash/predelay mark
+       the point dirty and the caller reloads it (file + FFT work). */
+    if (ae_json_get_number (json, "irLeadMix", &num))
+        c->params.ir_lead_mix = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "irLeadGainDb", &num))
+        c->params.ir_lead_gain_db = num_clamp (num, -24.0, 12.0);
+    if (ae_json_get_bool (json, "irLeadOn", &b))
+        c->params.ir_lead_on = b;
+    if (ae_json_get_number (json, "irHarmMix", &num))
+        c->params.ir_harm_mix = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "irHarmGainDb", &num))
+        c->params.ir_harm_gain_db = num_clamp (num, -24.0, 12.0);
+    if (ae_json_get_bool (json, "irHarmOn", &b))
+        c->params.ir_harm_on = b;
+    {
+        static const char *pfx[2] = { "irLead", "irHarm" };
+        char key[32], val[1024];
+        for (int pt = 0; pt < 2; ++pt)
+        {
+            snprintf (key, sizeof (key), "%sPath", pfx[pt]);
+            if (ae_json_get_string (json, key, val, sizeof (val))
+                && strcmp (val, app->ir_cfg[pt].path) != 0)
+            {
+                snprintf (app->ir_cfg[pt].path, sizeof (app->ir_cfg[pt].path),
+                          "%s", val);
+                app->ir_dirty[pt] = true;
+            }
+            snprintf (key, sizeof (key), "%sHash", pfx[pt]);
+            if (ae_json_get_string (json, key, val, sizeof (val))
+                && strcmp (val, app->ir_cfg[pt].hash) != 0)
+            {
+                snprintf (app->ir_cfg[pt].hash, sizeof (app->ir_cfg[pt].hash),
+                          "%.23s", val); /* 16 hex digits + headroom */
+                app->ir_dirty[pt] = true;
+            }
+            snprintf (key, sizeof (key), "%sPredelayMs", pfx[pt]);
+            if (ae_json_get_number (json, key, &num)
+                && num_clamp (num, 0.0, 50.0) != app->ir_cfg[pt].predelay_ms)
+            {
+                app->ir_cfg[pt].predelay_ms = num_clamp (num, 0.0, 50.0);
+                app->ir_dirty[pt] = true;
+            }
+        }
     }
     /* Per-voice sources: "voice" / "synth", anything else (including
        "default" and an empty slot) means follow harmSource. */
@@ -552,6 +640,36 @@ static void config_load (App *app)
 /* ------------------------------------------------------------------ engine */
 
 /* Caller must hold app->lock. */
+/* (Re)load configured IR points into the running engine. A fresh engine
+   needs everything; a config edit only what it dirtied. Failures land in
+   ir_err for the status echo -- an IR that cannot load must be a visible
+   fact, not a silently dry point. */
+static void ir_reload_locked (App *app, bool only_dirty)
+{
+    if (app->engine == NULL)
+        return;
+    for (int pt = 0; pt < 2; ++pt)
+    {
+        if (only_dirty && ! app->ir_dirty[pt])
+            continue;
+        const bool had = app->ir_dirty[pt];
+        app->ir_dirty[pt] = false;
+        if (app->ir_cfg[pt].path[0] == '\0' && ! had)
+            continue; /* nothing configured; a fresh corrector is clear */
+        char err[256];
+        if (ae_audio_engine_load_ir (app->engine, pt, app->ir_cfg[pt].path,
+                                     app->ir_cfg[pt].hash,
+                                     app->ir_cfg[pt].predelay_ms,
+                                     err, sizeof (err)))
+            app->ir_err[0] = '\0';
+        else
+        {
+            snprintf (app->ir_err, sizeof (app->ir_err), "%s", err);
+            fprintf (stderr, "autoedo: IR load: %s\n", err);
+        }
+    }
+}
+
 static void engine_restart_locked (App *app)
 {
     if (app->engine != NULL)
@@ -564,6 +682,7 @@ static void engine_restart_locked (App *app)
                                          sizeof (app->engine_err));
     if (app->engine == NULL)
         fprintf (stderr, "autoedo: engine start failed: %s\n", app->engine_err);
+    ir_reload_locked (app, false); /* a fresh corrector needs its spaces back */
 }
 
 /* --------------------------------------------------------------------- api */
@@ -572,7 +691,7 @@ static void engine_restart_locked (App *app)
    pattern: one serialization per tick, shared by all consumers). */
 static void status_refresh (App *app)
 {
-    char buf[12288];
+    char buf[16384];
 
     pthread_mutex_lock (&app->lock);
 
@@ -581,13 +700,15 @@ static void status_refresh (App *app)
     if (app->engine != NULL)
         ae_audio_engine_get_status (app->engine, &st);
 
-    char cfg[4096] = "";
+    char cfg[8192] = "";
     config_json (app, cfg, sizeof (cfg));
 
     char in_name[2 * AE_NAME_MAX] = "", out_name[2 * AE_NAME_MAX] = "", err[2 * 256] = "";
+    char ir_err[2 * 256] = "";
     ae_json_escape_append (in_name,  sizeof (in_name),  st.input_name);
     ae_json_escape_append (out_name, sizeof (out_name), st.output_name);
     ae_json_escape_append (err,      sizeof (err),      app->engine_err);
+    ae_json_escape_append (ir_err,   sizeof (ir_err),   app->ir_err);
 
     const double lat_ms = st.output_rate > 0.0
                             ? 1000.0 * st.latency_samples / st.output_rate : 0.0;
@@ -649,7 +770,7 @@ static void status_refresh (App *app)
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
-        "\"synthPatches\":%s,"
+        "\"synthPatches\":%s,\"irError\":\"%s\","
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", err,
         st.input_rate, st.output_rate,
@@ -659,7 +780,7 @@ static void status_refresh (App *app)
         hdeg, midi,
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
-        patches,
+        patches, ir_err,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),
@@ -744,9 +865,12 @@ static void api_config_post (App *app, const char *body, AeHttpResponse *resp)
     const bool restart = config_apply_json (app, body);
     config_sync (app);
     if (restart || app->engine == NULL)
-        engine_restart_locked (app);
-    else if (app->engine != NULL)
+        engine_restart_locked (app); /* reloads every configured IR too */
+    else
+    {
         ae_audio_engine_set_params (app->engine, &app->engine_cfg.params);
+        ir_reload_locked (app, true); /* only what this edit dirtied */
+    }
 
     config_save (app);
     pthread_mutex_unlock (&app->lock);
