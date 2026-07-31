@@ -60,6 +60,14 @@ typedef struct
     double   harm_pan[5];            /* -1..1 */
     uint32_t harm_mute;              /* bit v */
     uint32_t harm_solo;              /* bit v */
+
+    /* Harmony source: pitch-shifted live audio (0) or the built-in synth
+       voice (1), which adds a patch and an attack/release envelope. Applies
+       to all five voices. */
+    int      harm_source;
+    int      synth_patch;            /* index into the engine's patch table */
+    double   synth_attack_ms;        /* 0..5000 */
+    double   synth_release_ms;       /* 0..10000 */
 } AeLiveParams;
 
 /* Parameters that require an engine restart to change. */

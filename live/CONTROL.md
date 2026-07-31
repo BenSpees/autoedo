@@ -137,6 +137,9 @@ down. Both carry the identical string, serialized once per tick server-side.
   "outputName": "External Headphones",
   "shifter": "Signalsmith Stretch 1.3.2",  // the vendored pitch-shift engine
   "formantSupport": true,     // formants held still under pitch shift
+  "synthPatches": ["pad","warm","glass","organ","sine"],
+                              // the engine's synth-harmony patch table, in
+                              // order — build a `synthPatch` picker from this
   "stepCents": 100.0,         // period / edo, stretch-adjusted
   "config": { ... }           // the FULL config object of §4 — the echo your
                               // UI syncs its controls from
@@ -216,6 +219,10 @@ UI behavior you may want to replicate).
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
 | `harmOn` | bool | live | master harmony switch |
+| `harmSource` | `"voice"` \| `"synth"` | live | what the ghosts are made of: pitch-shifted copies of the live input (classic harmonizer) or the built-in synth at the same target degrees. Applies to all five voices (phase 1). Synth ghosts are volume-matched to the sung level — `hg` trims from parity — and, unlike shifted ghosts, ring past the end of the sung note by the release time, holding their last pitch and level |
+| `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). Unknown names are ignored |
+| `synthAttackMs` | float 0–5000 | live | synth envelope attack (default 80) |
+| `synthReleaseMs` | float 0–10000 | live | synth envelope release (default 500) |
 | `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward, up first per distance) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |
 | `hm` | int[5], each −72…72 | live | voice intervals in EDO steps; 0 = voice off. Keep within ±`edo` (the pool is ±equave); intervals are *steps*, so re-clamp when you lower the EDO |
 | `hx` | int[5], 0–2 | live | per-voice octave extension, stacking in the voice's direction: `eff = hm + sign(hm)·hx·edo` |

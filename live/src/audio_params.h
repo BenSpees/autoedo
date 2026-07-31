@@ -57,6 +57,11 @@ typedef struct
     _Atomic double   harm_pan[AE_HARM_VOICES];
     _Atomic uint32_t harm_mute;
     _Atomic uint32_t harm_solo;
+
+    _Atomic int      harm_source;
+    _Atomic int      synth_patch;
+    _Atomic double   synth_attack_ms;
+    _Atomic double   synth_release_ms;
 } AeAtomicParams;
 
 static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams *p)
@@ -92,6 +97,11 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     }
     atomic_store_explicit (&a->harm_mute, p->harm_mute, memory_order_relaxed);
     atomic_store_explicit (&a->harm_solo, p->harm_solo, memory_order_relaxed);
+
+    atomic_store_explicit (&a->harm_source,      p->harm_source,      memory_order_relaxed);
+    atomic_store_explicit (&a->synth_patch,      p->synth_patch,      memory_order_relaxed);
+    atomic_store_explicit (&a->synth_attack_ms,  p->synth_attack_ms,  memory_order_relaxed);
+    atomic_store_explicit (&a->synth_release_ms, p->synth_release_ms, memory_order_relaxed);
 }
 
 /* Audio thread, once per block: push the current parameters into the
@@ -138,6 +148,11 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->harm_on, memory_order_relaxed),
                           atomic_load_explicit (&a->harm_lock, memory_order_relaxed),
                           voices);
+    ae_corrector_set_synth (ps,
+                        atomic_load_explicit (&a->harm_source, memory_order_relaxed),
+                        atomic_load_explicit (&a->synth_patch, memory_order_relaxed),
+                        atomic_load_explicit (&a->synth_attack_ms, memory_order_relaxed),
+                        atomic_load_explicit (&a->synth_release_ms, memory_order_relaxed));
 
     *bypass_out = atomic_load_explicit (&a->bypass, memory_order_relaxed);
     *gain_out   = (float) atomic_load_explicit (&a->gain_lin, memory_order_relaxed);

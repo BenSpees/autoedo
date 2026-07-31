@@ -32,6 +32,15 @@
 #define AE_HARM_VOICES 5
 #define AE_HARM_DEG_OFF INT_MIN /* live-readout sentinel: voice silent */
 
+/* Harmony source: ghosts as pitch-shifted copies of the live input (the
+   classic harmonizer) or as synthesized voices at the same target degrees
+   (a backing pad that rings past the sung note by its release time).
+   Phase 1: the source applies to all five voices at once. */
+#define AE_HARM_SRC_VOICE 0
+#define AE_HARM_SRC_SYNTH 1
+
+#define AE_SYNTH_PARTIALS 4
+
 typedef struct
 {
     int    interval; /* signed EDO steps, 0 = voice off */
@@ -111,6 +120,23 @@ typedef struct
     double    h_gr[AE_HARM_VOICES];
     _Atomic int h_deg_out[AE_HARM_VOICES]; /* live ghost degree (UI) */
 
+    /* Synth harmony source ------------------------------------------------- */
+    int    harm_source;      /* AE_HARM_SRC_* */
+    int    synth_patch;      /* index into the built-in patch table */
+    double synth_attack_ms;
+    double synth_release_ms;
+
+    double in_level;                  /* smoothed voiced input RMS; frozen
+                                         while unvoiced so release tails hold
+                                         their level like they hold pitch */
+    double h_cents_t[AE_HARM_VOICES]; /* ghost target, absolute cents re ref;
+                                         holds its last value while unvoiced
+                                         so the release tail keeps its pitch */
+    double s_cents[AE_HARM_VOICES];   /* smoothed (glided) synth pitch */
+    double s_env[AE_HARM_VOICES];     /* attack/release envelope */
+    double s_lp[AE_HARM_VOICES];      /* one-pole low-pass state */
+    double s_phase[AE_HARM_VOICES][AE_SYNTH_PARTIALS]; /* 0..1 per partial */
+
     /* Parameters (set from the audio thread between blocks) ---------------- */
     int    edo;
     double retune_ms;
@@ -164,6 +190,16 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
 /* Configure the harmony voices (audio thread, between blocks). */
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES]);
+
+/* Configure the harmony source and synth voice (audio thread, between
+   blocks). Out-of-range patch indices clamp into the table. */
+void ae_corrector_set_synth (AeCorrector *p, int source, int patch,
+                             double attack_ms, double release_ms);
+
+/* The built-in synth patch table (any thread; the table is static). */
+int         ae_synth_patch_count (void);
+const char *ae_synth_patch_name (int i);
+int         ae_synth_patch_find (const char *name); /* -1 = unknown */
 
 /* Configure MIDI Harmony (audio thread, between blocks). */
 static inline void ae_corrector_set_midi (AeCorrector *p, bool mode,

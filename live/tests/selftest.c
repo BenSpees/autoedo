@@ -297,6 +297,98 @@ static void test_harmony (void)
     free (in); free (hl); free (hr);
 }
 
+static void test_synth_harmony (void)
+{
+    CHECK (ae_synth_patch_count() >= 5, "synth: patch table populated");
+    CHECK (ae_synth_patch_find ("pad") == 0, "synth: pad is the default patch");
+    CHECK (ae_synth_patch_find ("sine") >= 0, "synth: sine patch exists");
+    CHECK (ae_synth_patch_find ("nope") == -1, "synth: unknown patch is -1");
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7; /* P5: A3 in -> ghost at E4, 329.63 Hz */
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("sine"), 5.0, 200.0);
+
+    /* One second of A3, then silence long enough to watch the release. */
+    const int sung = 48000, quiet = 72000, total = sung + quiet;
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < sung; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
+    }
+
+    /* While sung: the harmony bus is the synth ghost at the fifth, and only
+       the ghost -- the synth adds nothing at the sung root. */
+    const double p_fifth = goertzel (hl + sung - 24000, 24000, 329.63, 48000.0);
+    const double p_root  = goertzel (hl + sung - 24000, 24000, 220.0, 48000.0);
+    CHECK (p_fifth > 10.0 * p_root,
+           "synth ghost is the fifth (P5 %.3g vs root %.3g)", p_fifth, p_root);
+
+    /* Volume match: the ghost sits at the sung level, like a shifted copy
+       would -- harm_l carries the constant-power pan share (cos pi/4) of a
+       ghost driven to the input's RMS. */
+    double in_sq = 0.0, gl_sq = 0.0;
+    for (int i = sung - 24000; i < sung; ++i)
+    {
+        in_sq += (double) in[i] * in[i];
+        gl_sq += (double) hl[i] * hl[i];
+    }
+    const double want_rms = sqrt (in_sq / 24000.0) * 0.7071;
+    const double got_rms  = sqrt (gl_sq / 24000.0);
+    CHECK (got_rms > want_rms * 0.6 && got_rms < want_rms * 1.6,
+           "synth volume-matches the voice (got %.3g want %.3g)",
+           got_rms, want_rms);
+
+    /* Release: the pad keeps ringing at its pitch just after the voice
+       stops (200 ms release), and has died out by the end. Equal windows --
+       Goertzel power scales with window length. */
+    const double p_sung = goertzel (hl + sung - 4800, 4800, 329.63, 48000.0);
+    const double p_tail = goertzel (hl + sung + 2400, 4800, 329.63, 48000.0);
+    CHECK (p_tail > p_sung * 0.05,
+           "synth rings into the release (%.3g vs sung %.3g)", p_tail, p_sung);
+    const double p_gone = goertzel (hl + total - 4800, 4800, 329.63, 48000.0);
+    CHECK (p_gone < p_sung * 0.001,
+           "synth release dies out (%.3g vs sung %.3g)", p_gone, p_sung);
+
+    /* Switching back to the shifter source still produces the fifth (the
+       idled shifters refill). */
+    ae_corrector_set_synth (p, AE_HARM_SRC_VOICE, 0, 80.0, 500.0);
+    phase = 0.0;
+    for (int i = 0; i < sung; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < sung; off += 512)
+        ae_corrector_process (p, in + off, hl + off, hr + off, 512);
+    const double p_back = goertzel (hl + sung - 24000, 24000, 329.63, 48000.0);
+    CHECK (p_back > 10.0 * goertzel (hl + sung - 24000, 24000, 220.0, 48000.0) || p_back > 1.0,
+           "voice source works after synth (P5 %.3g)", p_back);
+
+    ae_corrector_free (p);
+    free (p);
+    free (in); free (hl); free (hr);
+}
+
 static void test_midi_harmony (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -520,6 +612,7 @@ int main (void)
     test_correction();
     test_walk();
     test_harmony();
+    test_synth_harmony();
     test_midi_harmony();
     test_json();
     test_engine_channels();

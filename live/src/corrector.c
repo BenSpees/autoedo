@@ -46,6 +46,90 @@ static double ji_snap_cents (double cents, double period)
     return cents + best_diff;
 }
 
+/* ---- synth harmony patches ------------------------------------------------
+   Small additive/subtractive recipes tuned to sit behind a voice: partial
+   levels sum to ~1, detuned saw pairs give pads their slow chorus movement,
+   and an optional one-pole low-pass (cutoff = lp_mult x fundamental) keeps
+   saws soft. Waves: 0 = sine, 1 = polyBLEP saw. */
+typedef struct { float ratio, level, detune_cents; int wave; } AeSynthPartial;
+typedef struct
+{
+    const char    *name;
+    int            n;
+    AeSynthPartial part[AE_SYNTH_PARTIALS];
+    float          lp_mult; /* 0 = no filter */
+} AeSynthPatch;
+
+static const AeSynthPatch k_synth_patches[] = {
+    { "pad",   3, { { 1.0f, 0.40f, -6.0f, 1 }, { 1.0f, 0.40f, +6.0f, 1 },
+                    { 2.0f, 0.14f, +3.0f, 1 } },                          2.5f },
+    { "warm",  3, { { 1.0f, 0.72f,  0.0f, 0 }, { 2.0f, 0.22f, +2.0f, 0 },
+                    { 3.0f, 0.07f,  0.0f, 0 } },                          0.0f },
+    { "glass", 3, { { 1.0f, 0.55f,  0.0f, 0 }, { 2.0f, 0.30f, +4.0f, 0 },
+                    { 4.0f, 0.16f, -3.0f, 0 } },                          0.0f },
+    { "organ", 4, { { 1.0f, 0.52f,  0.0f, 0 }, { 2.0f, 0.28f,  0.0f, 0 },
+                    { 3.0f, 0.16f,  0.0f, 0 }, { 4.0f, 0.09f,  0.0f, 0 } }, 0.0f },
+    { "sine",  1, { { 1.0f, 0.90f,  0.0f, 0 } },                          0.0f },
+};
+#define K_SYNTH_PATCHES ((int) (sizeof (k_synth_patches) / sizeof (k_synth_patches[0])))
+
+/* A patch's intrinsic RMS per unit amplitude (independent partial phases:
+   sine contributes level^2/2, saw level^2/3). Dividing by this lets the
+   synth be driven to the same RMS as the sung input, so ghosts sit at the
+   vocal's own level exactly like the pitch-shifted ones do -- hg then trims
+   from parity, not from an arbitrary synth loudness. */
+static double synth_patch_rms (const AeSynthPatch *pat)
+{
+    double sum = 0.0;
+    for (int k = 0; k < pat->n; ++k)
+        sum += (double) pat->part[k].level * pat->part[k].level
+             * (pat->part[k].wave == 1 ? 1.0 / 3.0 : 0.5);
+    const double rms = sqrt (sum);
+    return rms > 1e-6 ? rms : 1.0;
+}
+
+int ae_synth_patch_count (void) { return K_SYNTH_PATCHES; }
+
+const char *ae_synth_patch_name (int i)
+{
+    return i >= 0 && i < K_SYNTH_PATCHES ? k_synth_patches[i].name : "";
+}
+
+int ae_synth_patch_find (const char *name)
+{
+    for (int i = 0; i < K_SYNTH_PATCHES; ++i)
+        if (strcmp (name, k_synth_patches[i].name) == 0)
+            return i;
+    return -1;
+}
+
+void ae_corrector_set_synth (AeCorrector *p, int source, int patch,
+                             double attack_ms, double release_ms)
+{
+    p->harm_source = source == AE_HARM_SRC_SYNTH ? AE_HARM_SRC_SYNTH
+                                                 : AE_HARM_SRC_VOICE;
+    p->synth_patch = patch < 0 ? 0
+                   : patch >= K_SYNTH_PATCHES ? K_SYNTH_PATCHES - 1 : patch;
+    p->synth_attack_ms  = dclamp (attack_ms, 0.0, 5000.0);
+    p->synth_release_ms = dclamp (release_ms, 0.0, 10000.0);
+}
+
+/* polyBLEP residual: subtracted at a saw's wrap to band-limit the edge. */
+static inline double poly_blep (double t, double dt)
+{
+    if (t < dt)
+    {
+        t /= dt;
+        return t + t - t * t - 1.0;
+    }
+    if (t > 1.0 - dt)
+    {
+        t = (t - 1.0) / dt;
+        return t * t + t + t + 1.0;
+    }
+    return 0.0;
+}
+
 void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_size,
                            double min_hz, double max_hz, int quality)
 {
@@ -135,6 +219,7 @@ void ae_corrector_reset (AeCorrector *p)
     p->primed         = false;
     p->out_cents      = 0.0;
     p->v_gain         = 0.0;
+    p->in_level       = 0.0;
     p->target_j       = 0;
     p->target_valid   = false;
     p->in_transition  = false;
@@ -151,6 +236,12 @@ void ae_corrector_reset (AeCorrector *p)
         p->h_active[v]    = false;
         p->h_fed[v]       = false;
         p->h_mix[v]       = 0.0;
+        p->h_cents_t[v]   = 0.0;
+        p->s_cents[v]     = 0.0;
+        p->s_env[v]       = 0.0;
+        p->s_lp[v]        = 0.0;
+        for (int k = 0; k < AE_SYNTH_PARTIALS; ++k)
+            p->s_phase[v][k] = 0.0;
         atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
     }
 
@@ -221,6 +312,12 @@ static void run_detection (AeCorrector *p)
 
     const AeYinResult res = ae_yin_process (&p->detector, p->frame, p->frame_size);
     const bool now_voiced = res.voiced && res.frequency_hz > 0.0 && rms > AE_GATE_RMS;
+
+    /* Sung loudness for the synth ghosts (~80 ms smoothing); frozen while
+       unvoiced so a release tail holds its level like it holds its pitch. */
+    if (now_voiced)
+        p->in_level += (rms - p->in_level)
+                     * (1.0 - exp (-elapsed / 0.08));
 
     if (now_voiced)
     {
@@ -414,6 +511,7 @@ static void run_detection (AeCorrector *p)
                         const double voice_cents = p->out_cents + (ghost_cents - target_cents);
                         p->h_semitones[v] = dclamp ((voice_cents - detected_cents) / 100.0,
                                                     -36.0, 36.0);
+                        p->h_cents_t[v] = ghost_cents; /* synth target pitch */
                         p->h_active[v] = true;
                     }
                 }
@@ -472,6 +570,102 @@ static void set_shift (AeShifter *s, double semitones, double base_hz)
     ae_shifter_set_formant_base (s, base_hz);
 }
 
+/* 4b. Synth harmony: oscillator ghosts at the same target degrees the
+   shifter voices would sing, each through the shared attack/release
+   envelope. Unlike the shifter path there is no voiced crossfade -- a
+   released note rings out for the release time at its last pitch, which is
+   what makes a pad feel like backing rather than an echo of the singer.
+   Allocation-free; voice_buf is reused as the per-voice scratch. */
+static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
+                                  int num_samples)
+{
+    const AeSynthPatch *pat = &k_synth_patches[p->synth_patch];
+    /* Volume-match to the singer: drive the patch to the sung RMS (capped
+       against a pathological match on near-silent gated input). */
+    const double match = dclamp (p->in_level / synth_patch_rms (pat), 0.0, 4.0);
+    const double atk_a = p->synth_attack_ms <= 0.0 ? 1.0
+        : 1.0 - exp (-1.0 / (p->synth_attack_ms * 0.001 * p->fs));
+    const double rel_a = p->synth_release_ms <= 0.0 ? 1.0
+        : 1.0 - exp (-1.0 / (p->synth_release_ms * 0.001 * p->fs));
+    /* Note-to-note glide, stepped once per block (~25 ms time constant). */
+    const double glide_a = 1.0 - exp (-num_samples / (0.025 * p->fs));
+
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        p->h_fed[v] = false; /* shifters idle here; refill on switch back */
+
+        const bool gate = p->h_active[v];
+        double env = p->s_env[v];
+        if (! gate && env < 1e-4)
+        {
+            p->s_env[v] = 0.0;
+            continue;
+        }
+
+        /* A fresh attack starts on pitch; a sounding voice glides. */
+        if (gate && env < 1e-3)
+            p->s_cents[v] = p->h_cents_t[v];
+        else
+            p->s_cents[v] += (p->h_cents_t[v] - p->s_cents[v]) * glide_a;
+        const double hz = p->ref_hz * pow (2.0, p->s_cents[v] / 1200.0);
+
+        float *buf = p->voice_buf;
+        for (int i = 0; i < num_samples; ++i)
+            buf[i] = 0.0f;
+
+        for (int k = 0; k < pat->n; ++k)
+        {
+            const AeSynthPartial *pp = &pat->part[k];
+            const double inc = hz * pp->ratio
+                             * pow (2.0, pp->detune_cents / 1200.0) / p->fs;
+            if (inc >= 0.45) /* partial would alias; leave it out */
+                continue;
+            double ph = p->s_phase[v][k];
+            if (pp->wave == 1)
+                for (int i = 0; i < num_samples; ++i)
+                {
+                    ph += inc;
+                    if (ph >= 1.0) ph -= 1.0;
+                    buf[i] += (float) (pp->level
+                                       * (2.0 * ph - 1.0 - poly_blep (ph, inc)));
+                }
+            else
+                for (int i = 0; i < num_samples; ++i)
+                {
+                    ph += inc;
+                    if (ph >= 1.0) ph -= 1.0;
+                    buf[i] += (float) (pp->level * sin (2.0 * AE_PI * ph));
+                }
+            p->s_phase[v][k] = ph;
+        }
+
+        if (pat->lp_mult > 0.0f)
+        {
+            const double cut = dclamp (hz * pat->lp_mult, 500.0, 8000.0);
+            const double a = 1.0 - exp (-2.0 * AE_PI * cut / p->fs);
+            double lp = p->s_lp[v];
+            for (int i = 0; i < num_samples; ++i)
+            {
+                lp += (buf[i] - lp) * a;
+                buf[i] = (float) lp;
+            }
+            p->s_lp[v] = lp;
+        }
+
+        const double gl = p->h_gl[v], gr = p->h_gr[v];
+        const double want = gate ? 1.0 : 0.0;
+        const double a = gate ? atk_a : rel_a;
+        for (int i = 0; i < num_samples; ++i)
+        {
+            env += (want - env) * a;
+            const double s = buf[i] * env * match;
+            harm_l[i] += (float) (gl * s);
+            harm_r[i] += (float) (gr * s);
+        }
+        p->s_env[v] = env;
+    }
+}
+
 static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                            float *harm_r, int num_samples)
 {
@@ -520,6 +714,12 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     {
         harm_l[i] = 0.0f;
         harm_r[i] = 0.0f;
+    }
+
+    if (p->harm_source == AE_HARM_SRC_SYNTH)
+    {
+        render_synth_harmony (p, harm_l, harm_r, num_samples);
+        return;
     }
 
     /* 4. Harmony voices: one shifter each, mixed through their own smoothed

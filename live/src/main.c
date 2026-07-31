@@ -15,6 +15,7 @@
    of a multi-instance rig gets its own file). */
 
 #include "audio.h"
+#include "corrector.h" /* synth patch table names */
 #include "httpd.h"
 #include "json.h"
 #include "tuning.h"
@@ -167,6 +168,10 @@ static void config_defaults (App *app)
     }
     c->params.harm_mute = 0;
     c->params.harm_solo = 0;
+    c->params.harm_source      = 0;     /* pitch-shifted live audio */
+    c->params.synth_patch      = 0;     /* "pad" */
+    c->params.synth_attack_ms  = 80.0;
+    c->params.synth_release_ms = 500.0;
     c->params.midi_mode = false;
     c->midi_source[0]   = '\0'; /* all MIDI inputs */
     c->input_channel    = 0;    /* backend default channel handling */
@@ -231,6 +236,13 @@ static void config_json (const App *app, char *out, size_t cap)
     /* Harmony (Xentar hm/hx field packing, plus gains/pans/mute/solo). */
     char harm[512];
     static const char *lock_names[] = { "off", "mask", "ji" };
+    snprintf (harm, sizeof (harm),
+              ",\"harmSource\":\"%s\",\"synthPatch\":\"%s\","
+              "\"synthAttackMs\":%.6g,\"synthReleaseMs\":%.6g",
+              c->params.harm_source == 1 ? "synth" : "voice",
+              ae_synth_patch_name (c->params.synth_patch),
+              c->params.synth_attack_ms, c->params.synth_release_ms);
+    strncat (out, harm, cap - strlen (out) - 1);
     snprintf (harm, sizeof (harm), ",\"harmOn\":%s,\"harmLock\":\"%s\",\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
@@ -346,6 +358,18 @@ static bool config_apply_json (App *app, const char *json)
     /* Harmony. */
     if (ae_json_get_bool (json, "harmOn", &b))
         c->params.harm_on = b;
+    if (ae_json_get_string (json, "harmSource", str, sizeof (str)))
+        c->params.harm_source = strcmp (str, "synth") == 0 ? 1 : 0;
+    if (ae_json_get_string (json, "synthPatch", str, sizeof (str)))
+    {
+        const int idx = ae_synth_patch_find (str);
+        if (idx >= 0) /* unknown names keep the current patch */
+            c->params.synth_patch = idx;
+    }
+    if (ae_json_get_number (json, "synthAttackMs", &num))
+        c->params.synth_attack_ms = num_clamp (num, 0.0, 5000.0);
+    if (ae_json_get_number (json, "synthReleaseMs", &num))
+        c->params.synth_release_ms = num_clamp (num, 0.0, 10000.0);
     if (ae_json_get_string (json, "harmLock", str, sizeof (str)))
         c->params.harm_lock = strcmp (str, "mask") == 0 ? 1
                             : strcmp (str, "ji") == 0 ? 2 : 0;
@@ -551,6 +575,15 @@ static void status_refresh (App *app)
     }
     snprintf (midi + mn, sizeof (midi) - mn, "]");
 
+    /* Patch names, so UIs build their picker from the engine's own table. */
+    char patches[256];
+    size_t pn = 0;
+    pn += (size_t) snprintf (patches + pn, sizeof (patches) - pn, "[");
+    for (int i = 0; i < ae_synth_patch_count() && pn < sizeof (patches) - 8; ++i)
+        pn += (size_t) snprintf (patches + pn, sizeof (patches) - pn, "%s\"%s\"",
+                                 i ? "," : "", ae_synth_patch_name (i));
+    snprintf (patches + pn, sizeof (patches) - pn, "]");
+
     snprintf (buf, sizeof (buf),
         "{\"running\":%s,\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
@@ -560,6 +593,7 @@ static void status_refresh (App *app)
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
+        "\"synthPatches\":%s,"
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", err,
         st.input_rate, st.output_rate,
@@ -569,6 +603,7 @@ static void status_refresh (App *app)
         hdeg, midi,
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
+        patches,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),
