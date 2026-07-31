@@ -581,6 +581,69 @@ static void test_engine_channels (void)
     ae_audio_engine_stop (e);
 }
 
+static void test_96k (void)
+{
+    /* The 96 kHz latency halving: shifter blocks are fixed SAMPLE counts
+       (48k-referenced), so at 96 k the same samples span half the time.
+       Same latency in samples => half the milliseconds. */
+    AeCorrector *p48 = calloc (1, sizeof (AeCorrector));
+    AeCorrector *p96 = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p48, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_prepare (p96, 96000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    const int l48 = ae_corrector_latency (p48);
+    const int l96 = ae_corrector_latency (p96);
+    CHECK (l96 < l48 * 12 / 10 && l96 > l48 * 8 / 10,
+           "96k latency in samples stays put (%d vs %d at 48k)", l96, l48);
+    const double ms48 = 1000.0 * l48 / 48000.0, ms96 = 1000.0 * l96 / 96000.0;
+    CHECK (ms96 < ms48 * 0.6,
+           "96k latency in ms halves (%.1f ms vs %.1f ms)", ms96, ms48);
+    ae_corrector_free (p48);
+    free (p48);
+
+    /* And the corrector still corrects at the fast rate: the flat A3 lands
+       on 220, with a shifted P5 ghost above it. */
+    ae_corrector_set_edo (p96, 12);
+    ae_corrector_set_retune_ms (p96, 0.0);
+    ae_corrector_set_transition_ms (p96, 0.0);
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_corrector_set_harmony (p96, true, 0, voices);
+
+    const double f_in = 220.0 * pow (2.0, -30.0 / 1200.0);
+    const int total = 96000;
+    float *in = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * f_in / 96000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p96, in + off, hl + off, hr + off, n);
+    }
+
+    CHECK (ae_corrector_voiced (p96), "96k: voiced after 1 s of tone");
+    const float det = ae_corrector_detected_hz (p96);
+    const float tgt = ae_corrector_target_hz (p96);
+    CHECK (fabs (det - f_in) < 2.0, "96k: detected %f (expected ~%f)", det, f_in);
+    CHECK (fabs (tgt - 220.0) < 1e-2, "96k: target %f (expected 220)", tgt);
+    const double p_fifth = goertzel (hl + total / 2, total / 2, 329.63, 96000.0);
+    const double p_root  = goertzel (hl + total / 2, total / 2, 220.0, 96000.0);
+    CHECK (p_fifth > 10.0 * p_root,
+           "96k: harmony bus is the fifth (P5 %.3g vs root %.3g)", p_fifth, p_root);
+
+    ae_corrector_free (p96);
+    free (p96);
+    free (in); free (hl); free (hr);
+}
+
 static void test_soft_clip (void)
 {
     /* Transparent below the knee: exact passthrough, sign included. */
@@ -616,6 +679,7 @@ int main (void)
     test_midi_harmony();
     test_json();
     test_engine_channels();
+    test_96k();
     test_soft_clip();
 
     if (failures == 0)

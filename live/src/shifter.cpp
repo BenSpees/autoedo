@@ -72,8 +72,7 @@ struct AeShifter
 
 int ae_shifter_block_samples (double sample_rate, int quality)
 {
-    if (sample_rate <= 0.0)
-        sample_rate = 48000.0;
+    (void) sample_rate;
     double ms;
     switch (quality)
     {
@@ -81,7 +80,15 @@ int ae_shifter_block_samples (double sample_rate, int quality)
         case AE_SHIFT_QUALITY_HIGH: ms = 120.0; break;
         default:                    ms = 45.0;  break;
     }
-    int block = (int) (sample_rate * ms / 1000.0);
+    /* The block is a fixed SAMPLE count, referenced to the presets' 48 kHz
+       millisecond names -- deliberately NOT scaled by the actual rate. At
+       96 kHz the same samples span half the time, which is the entire
+       latency win of running the interface fast: "balanced" becomes a
+       22.5 ms block instead of 45. The cost is the analysis window
+       shortening in time with it, so frequency resolution at the bottom of
+       the range drops -- the low preset at 96 k is a 12.5 ms window, thin
+       for a bass or a low guitar; step up a preset if the bottom warbles. */
+    int block = (int) (48000.0 * ms / 1000.0);
     return block < 64 ? 64 : block;
 }
 
