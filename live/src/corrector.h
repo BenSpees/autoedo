@@ -144,6 +144,15 @@ typedef struct
     double synth_release_ms;
     double ensemble_depth;   /* 0..1 scaling on the ensemble's wet blend */
     double synth_vowel;      /* 0..1 formant transfer from the live voice */
+    double harm_tilt_db;     /* -12..+12: harmony-bus tone tilt, - dark/+ bright */
+
+    /* Tilt EQ state: a one-pole split into low and high halves, recombined
+       with complementary gains. Per side of the harmony bus; the lead never
+       reaches this bus, which is exactly the scope asked for. */
+    double tilt_lp[2];
+    double tilt_a;      /* one-pole coefficient for the ~700 Hz pivot */
+    double tilt_g_lo, tilt_g_hi;
+    double tilt_db_cur; /* what the gains were built for */
 
     double in_level;                  /* smoothed voiced input RMS; frozen
                                          while unvoiced so release tails hold
@@ -253,10 +262,12 @@ void ae_corrector_set_synth (AeCorrector *p, int source, int patch,
 void ae_corrector_set_voice_sources (AeCorrector *p,
                                      const int sources[AE_HARM_VOICES], int lead);
 
-/* Ensemble depth (0..1, scaling the wet blend of patches that use it) and
-   vowel transfer amount (0..1). Both live. */
+/* Ensemble depth (0..1, scaling the wet blend of patches that use it), vowel
+   transfer amount (0..1), and the harmony bus's tone tilt in dB (-12..+12,
+   negative darker / positive brighter). All live. The tilt reaches every
+   harmony voice -- shifted and synth alike -- and never the lead. */
 void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
-                                   double vowel);
+                                   double vowel, double tilt_db);
 
 /* The source actually in force for a harmony voice, resolving the
    per-voice sentinel against the global switch. */

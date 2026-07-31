@@ -65,6 +65,7 @@ typedef struct
     _Atomic int      synth_patch;
     _Atomic double   ensemble_depth;
     _Atomic double   synth_vowel;
+    _Atomic double   harm_tilt_db;
     _Atomic double   synth_attack_ms;
     _Atomic double   synth_release_ms;
 } AeAtomicParams;
@@ -108,6 +109,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->lead_source,      p->lead_source,      memory_order_relaxed);
     atomic_store_explicit (&a->ensemble_depth,   p->ensemble_depth,   memory_order_relaxed);
     atomic_store_explicit (&a->synth_vowel,      p->synth_vowel,      memory_order_relaxed);
+    atomic_store_explicit (&a->harm_tilt_db,     p->harm_tilt_db,     memory_order_relaxed);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         atomic_store_explicit (&a->harm_voice_source[v], p->harm_voice_source[v],
                                memory_order_relaxed);
@@ -173,7 +175,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                         atomic_load_explicit (&a->lead_source, memory_order_relaxed));
     ae_corrector_set_synth_shape (ps,
                         atomic_load_explicit (&a->ensemble_depth, memory_order_relaxed),
-                        atomic_load_explicit (&a->synth_vowel, memory_order_relaxed));
+                        atomic_load_explicit (&a->synth_vowel, memory_order_relaxed),
+                        atomic_load_explicit (&a->harm_tilt_db, memory_order_relaxed));
 
     *bypass_out = atomic_load_explicit (&a->bypass, memory_order_relaxed);
     *lead_out   = atomic_load_explicit (&a->lead_on, memory_order_relaxed);

@@ -176,6 +176,7 @@ static void config_defaults (App *app)
     c->params.synth_patch      = 0;     /* "pad" */
     c->params.ensemble_depth   = 1.0;
     c->params.synth_vowel      = 0.0;
+    c->params.harm_tilt_db     = 0.0;
     c->params.synth_attack_ms  = 80.0;
     c->params.synth_release_ms = 500.0;
     c->params.midi_mode = false;
@@ -246,12 +247,13 @@ static void config_json (const App *app, char *out, size_t cap)
     snprintf (harm, sizeof (harm),
               ",\"harmSource\":\"%s\",\"leadSource\":\"%s\",\"synthPatch\":\"%s\","
               "\"synthAttackMs\":%.6g,\"synthReleaseMs\":%.6g,"
-              "\"ensembleDepth\":%.6g,\"synthVowel\":%.6g,\"hSrc\":[",
+              "\"ensembleDepth\":%.6g,\"synthVowel\":%.6g,\"harmTiltDb\":%.6g,\"hSrc\":[",
               c->params.harm_source == 1 ? "synth" : "voice",
               c->params.lead_source == 1 ? "synth" : "voice",
               ae_synth_patch_name (c->params.synth_patch),
               c->params.synth_attack_ms, c->params.synth_release_ms,
-              c->params.ensemble_depth, c->params.synth_vowel);
+              c->params.ensemble_depth, c->params.synth_vowel,
+              c->params.harm_tilt_db);
     strncat (out, harm, cap - strlen (out) - 1);
     for (int v = 0; v < 5; ++v)
     {
@@ -386,6 +388,8 @@ static bool config_apply_json (App *app, const char *json)
         c->params.ensemble_depth = num_clamp (num, 0.0, 1.0);
     if (ae_json_get_number (json, "synthVowel", &num))
         c->params.synth_vowel = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "harmTiltDb", &num))
+        c->params.harm_tilt_db = num_clamp (num, -12.0, 12.0);
     /* Per-voice sources: "voice" / "synth", anything else (including
        "default" and an empty slot) means follow harmSource. */
     {

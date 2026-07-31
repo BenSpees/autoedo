@@ -173,10 +173,40 @@ void ae_corrector_set_voice_sources (AeCorrector *p,
 }
 
 void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
-                                   double vowel)
+                                   double vowel, double tilt_db)
 {
     p->ensemble_depth = dclamp (ensemble_depth, 0.0, 1.0);
     p->synth_vowel    = dclamp (vowel, 0.0, 1.0);
+    p->harm_tilt_db   = dclamp (tilt_db, -12.0, 12.0);
+}
+
+/* Tilt EQ on the harmony bus: split at ~700 Hz and recombine the halves with
+   equal and opposite gains, so +6 lifts the top and drops the bottom by the
+   same amount and the pivot itself stays put. One shelf pair rather than a
+   filter sweep -- "darker / brighter" is a tilt, and a tilt is what stays
+   musical at every setting. */
+static void render_tilt (AeCorrector *p, float *harm_l, float *harm_r, int n)
+{
+    if (p->harm_tilt_db != p->tilt_db_cur)
+    {
+        const double half = p->harm_tilt_db * 0.5;
+        p->tilt_g_hi = pow (10.0, half / 20.0);
+        p->tilt_g_lo = pow (10.0, -half / 20.0);
+        p->tilt_db_cur = p->harm_tilt_db;
+    }
+    const double a = p->tilt_a, glo = p->tilt_g_lo, ghi = p->tilt_g_hi;
+    float *bus[2] = { harm_l, harm_r };
+    for (int s = 0; s < 2; ++s)
+    {
+        double lp = p->tilt_lp[s];
+        float *b = bus[s];
+        for (int i = 0; i < n; ++i)
+        {
+            lp += (b[i] - lp) * a;
+            b[i] = (float) (glo * lp + ghi * (b[i] - lp));
+        }
+        p->tilt_lp[s] = lp;
+    }
 }
 
 /* ---- vowel transfer (channel vocoder) -------------------------------------
@@ -381,6 +411,11 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->ens_buf_r = calloc ((size_t) p->ens_len, sizeof (float));
 
     voc_prepare (p); /* bandpass coefficients follow the sample rate */
+    /* Tilt pivot: 700 Hz, the crossover a "darker/brighter" control wants --
+       low enough that dropping the top keeps the fundamentals, high enough
+       that lifting it is air rather than honk. */
+    p->tilt_a = 1.0 - exp (-2.0 * AE_PI * 700.0 / p->fs);
+    p->tilt_db_cur = 1e9; /* force a gain rebuild on the first block */
 
     ae_yin_prepare (&p->detector, p->fs, p->frame_size, min_hz, max_hz);
 
@@ -461,6 +496,7 @@ void ae_corrector_reset (AeCorrector *p)
     }
     for (int s = 0; s < AE_VOC_SIGNALS; ++s)
         p->voc_norm[s] = 1.0;
+    p->tilt_lp[0] = p->tilt_lp[1] = 0.0;
 
     if (p->ens_buf_l != NULL)
         memset (p->ens_buf_l, 0, (size_t) p->ens_len * sizeof (float));
@@ -1136,7 +1172,13 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     if (any_synth)
         render_synth_harmony (p, harm_l, harm_r, num_samples);
     if (! any_shift)
+    {
+        /* Tilt is a property of the harmony BUS, so it applies however the
+           voices on it were made. */
+        if (p->harm_tilt_db != 0.0)
+            render_tilt (p, harm_l, harm_r, num_samples);
         return;
+    }
 
     /* 4. Harmony voices: one shifter each, mixed through their own smoothed
        gain so mute/solo and voice changes can't click. A configured voice is
@@ -1177,6 +1219,9 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         }
         p->h_mix[v] = mix;
     }
+
+    if (p->harm_tilt_db != 0.0)
+        render_tilt (p, harm_l, harm_r, num_samples);
 }
 
 void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *harm_r,

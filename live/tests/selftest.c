@@ -710,7 +710,7 @@ static void run_synth_case_ex (int sources[AE_HARM_VOICES], int lead, double vow
     ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH, ae_synth_patch_find (patch),
                             5.0, 200.0);
     ae_corrector_set_voice_sources (p, sources, lead);
-    ae_corrector_set_synth_shape (p, 1.0, vowel);
+    ae_corrector_set_synth_shape (p, 1.0, vowel, 0.0);
 
     double phase = 0.0;
     for (int i = 0; i < total; ++i)
@@ -837,14 +837,92 @@ static void test_synth_sources_and_vowel (void)
     /* Ensemble depth 0 collapses the effect back to the dry ranks. */
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
     ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
-    ae_corrector_set_synth_shape (p, 0.0, 0.0);
+    ae_corrector_set_synth_shape (p, 0.0, 0.0, 0.0);
     CHECK (p->ensemble_depth == 0.0, "ensemble depth takes 0");
-    ae_corrector_set_synth_shape (p, 2.0, -1.0);
-    CHECK (p->ensemble_depth == 1.0 && p->synth_vowel == 0.0,
-           "synth shape clamps out of range");
+    ae_corrector_set_synth_shape (p, 2.0, -1.0, 99.0);
+    CHECK (p->ensemble_depth == 1.0 && p->synth_vowel == 0.0
+           && p->harm_tilt_db == 12.0, "synth shape clamps out of range");
     ae_corrector_free (p);
     free (p);
 
+    free (mono); free (hl); free (hr);
+}
+
+static void test_harmony_tilt (void)
+{
+    /* The tilt is a property of the harmony BUS: it must reach shifted and
+       synth voices alike, and never touch the lead. */
+    const int total = 48000, tail = 24000;
+    float *mono = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    int src[AE_HARM_VOICES];
+
+    /* Measure the harmony bus's high/low balance and the LEAD's, at three
+       tilts, for a shifted and then a synth voice. */
+    for (int synth = 0; synth < 2; ++synth)
+    {
+        double ratio[3], lead_ratio[3];
+        for (int t = 0; t < 3; ++t)
+        {
+            const double tilt = t == 0 ? -9.0 : t == 1 ? 0.0 : 9.0;
+            AeCorrector *p = calloc (1, sizeof (AeCorrector));
+            ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+            ae_corrector_set_edo (p, 12);
+            ae_corrector_set_retune_ms (p, 0.0);
+            ae_corrector_set_transition_ms (p, 0.0);
+            AeHarmVoice voices[AE_HARM_VOICES];
+            memset (voices, 0, sizeof (voices));
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+                voices[v].gain = 1.0;
+            voices[0].interval = 7;
+            ae_corrector_set_harmony (p, true, 0, voices);
+            ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                                    ae_synth_patch_find ("organ"), 5.0, 200.0);
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+                src[v] = synth ? AE_HARM_SRC_SYNTH : AE_HARM_SRC_VOICE;
+            ae_corrector_set_voice_sources (p, src, AE_HARM_SRC_VOICE);
+            ae_corrector_set_synth_shape (p, 1.0, 0.0, tilt);
+
+            double phase = 0.0;
+            for (int i = 0; i < total; ++i)
+            {
+                phase += 2.0 * M_PI * 220.0 / 48000.0;
+                mono[i] = (float) (0.4 * sin (phase) + 0.25 * sin (4.0 * phase)
+                                 + 0.2 * sin (8.0 * phase));
+            }
+            for (int off = 0; off < total; off += 512)
+            {
+                const int n = total - off < 512 ? total - off : 512;
+                ae_corrector_process (p, mono + off, hl + off, hr + off, n);
+            }
+            double hi = 0.0, lo = 0.0, lhi = 0.0, llo = 0.0;
+            for (double f = 1300.0; f <= 2700.0; f += 200.0)
+            {
+                hi  += goertzel (hl + total - tail, tail, f, 48000.0);
+                lhi += goertzel (mono + total - tail, tail, f, 48000.0);
+            }
+            for (double f = 200.0; f <= 500.0; f += 50.0)
+            {
+                lo  += goertzel (hl + total - tail, tail, f, 48000.0);
+                llo += goertzel (mono + total - tail, tail, f, 48000.0);
+            }
+            ratio[t] = hi / (lo + 1e-15);
+            lead_ratio[t] = lhi / (llo + 1e-15);
+            ae_corrector_free (p);
+            free (p);
+        }
+        const char *what = synth ? "synth" : "shifted";
+        CHECK (ratio[2] > ratio[1] * 1.5,
+               "%s voices: +9 dB tilt brightens (%.4g vs %.4g)", what, ratio[2], ratio[1]);
+        CHECK (ratio[0] < ratio[1] * 0.67,
+               "%s voices: -9 dB tilt darkens (%.4g vs %.4g)", what, ratio[0], ratio[1]);
+        /* The lead is on its own bus and must not move at all. */
+        CHECK (fabs (lead_ratio[2] - lead_ratio[1]) < 0.05 * (lead_ratio[1] + 1e-15)
+               && fabs (lead_ratio[0] - lead_ratio[1]) < 0.05 * (lead_ratio[1] + 1e-15),
+               "%s: the lead is untouched by the tilt (%.4g / %.4g / %.4g)",
+               what, lead_ratio[0], lead_ratio[1], lead_ratio[2]);
+    }
     free (mono); free (hl); free (hr);
 }
 
@@ -945,6 +1023,7 @@ int main (void)
     test_synth_harmony();
     test_synth_string_machine();
     test_synth_sources_and_vowel();
+    test_harmony_tilt();
     test_midi_harmony();
     test_json();
     test_engine_channels();
