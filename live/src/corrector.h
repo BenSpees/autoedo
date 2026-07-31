@@ -54,6 +54,20 @@
    is synth. */
 #define AE_VOC_SIGNALS 3
 
+/* Vowel transfer modes. `vocoder` is the 16-band channel vocoder: cheap,
+   unconditionally stable, moves vowel COLOUR. `lpc` estimates the vocal
+   tract itself -- an all-pole fit per frame, imposed on the synth -- which
+   resolves formants continuously instead of quantizing them to bands, lets
+   the tract stay put while the pitch moves (the "formant-corrected" part),
+   and can carry consonants through its residual. */
+#define AE_VOWEL_MODE_VOCODER 0
+#define AE_VOWEL_MODE_LPC     1
+
+/* All-pole order: 18 poles resolves F1..F4 plus spectral tilt at either
+   session rate, which is the usual choice for a ~20 ms speech window. */
+#define AE_LPC_ORDER  18
+#define AE_LPC_WINDOW 1024
+
 typedef struct
 {
     int    interval; /* signed EDO steps, 0 = voice off */
@@ -197,6 +211,21 @@ typedef struct
     double voc_atk, voc_rel; /* envelope follower coefficients */
     bool   voc_ready;        /* coefficients built for the current fs */
 
+    /* LPC vowel mode. The vocal tract is estimated per detection hop as
+       REFLECTION coefficients: a lattice built from them is stable for any
+       |k| < 1, and -- unlike direct-form coefficients -- interpolating them
+       between frames stays stable too, which is the classic way this filter
+       blows up. Analysis writes lpc_k_t; the audio thread slews lpc_k
+       toward it and filters with that. */
+    int    vowel_mode;
+    double lpc_k[AE_LPC_ORDER];    /* slewed, what the filters use */
+    double lpc_k_t[AE_LPC_ORDER];  /* analysis target */
+    bool   lpc_valid;              /* an analysis has succeeded */
+    double lpc_lat[AE_VOC_SIGNALS][AE_LPC_ORDER + 1]; /* synthesis lattices */
+    double lpc_inv[AE_LPC_ORDER + 1];                 /* analysis lattice */
+    double lpc_norm[AE_VOC_SIGNALS];                  /* smoothed level match */
+    float *lpc_res;                /* this block's residual (max_block) */
+
     /* Parameters (set from the audio thread between blocks) ---------------- */
     int    edo;
     double retune_ms;
@@ -267,7 +296,7 @@ void ae_corrector_set_voice_sources (AeCorrector *p,
    negative darker / positive brighter). All live. The tilt reaches every
    harmony voice -- shifted and synth alike -- and never the lead. */
 void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
-                                   double vowel, double tilt_db);
+                                   double vowel, double tilt_db, int vowel_mode);
 
 /* The source actually in force for a harmony voice, resolving the
    per-voice sentinel against the global switch. */

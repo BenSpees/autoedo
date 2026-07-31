@@ -73,6 +73,7 @@ typedef struct
     double   ensemble_depth;         /* 0..1 */
     double   synth_vowel;            /* 0..1 formant transfer */
     double   harm_tilt_db;           /* -12..+12 harmony tone tilt */
+    int      vowel_mode;             /* 0 channel vocoder, 1 LPC */
     double   synth_attack_ms;        /* 0..5000 */
     double   synth_release_ms;       /* 0..10000 */
 } AeLiveParams;

@@ -6,6 +6,7 @@
 #include "../src/audio_params.h"
 #include "../src/json.h"
 #include "../src/corrector.h"
+#include "../src/shifter.h"
 #include "../src/tuning.h"
 #include "../src/yin.h"
 
@@ -710,7 +711,7 @@ static void run_synth_case_ex (int sources[AE_HARM_VOICES], int lead, double vow
     ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH, ae_synth_patch_find (patch),
                             5.0, 200.0);
     ae_corrector_set_voice_sources (p, sources, lead);
-    ae_corrector_set_synth_shape (p, 1.0, vowel, 0.0);
+    ae_corrector_set_synth_shape (p, 1.0, vowel, 0.0, AE_VOWEL_MODE_VOCODER);
 
     double phase = 0.0;
     for (int i = 0; i < total; ++i)
@@ -837,14 +838,218 @@ static void test_synth_sources_and_vowel (void)
     /* Ensemble depth 0 collapses the effect back to the dry ranks. */
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
     ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
-    ae_corrector_set_synth_shape (p, 0.0, 0.0, 0.0);
+    ae_corrector_set_synth_shape (p, 0.0, 0.0, 0.0, AE_VOWEL_MODE_VOCODER);
     CHECK (p->ensemble_depth == 0.0, "ensemble depth takes 0");
-    ae_corrector_set_synth_shape (p, 2.0, -1.0, 99.0);
+    ae_corrector_set_synth_shape (p, 2.0, -1.0, 99.0, AE_VOWEL_MODE_VOCODER);
     CHECK (p->ensemble_depth == 1.0 && p->synth_vowel == 0.0
            && p->harm_tilt_db == 12.0, "synth shape clamps out of range");
     ae_corrector_free (p);
     free (p);
 
+    free (mono); free (hl); free (hr);
+}
+
+static void test_lpc_vowel_mode (void)
+{
+    /* LPC mode estimates the vocal tract rather than 16 fixed bands. The
+       definitional test is the same as the vocoder's -- two vowels at one
+       pitch must give different synth spectra -- plus the two things LPC
+       is FOR: it must resolve the difference more sharply than the band
+       vocoder, and its all-pole filter must stay stable while the tract
+       moves under it. */
+    const int total = 96000, tail = 48000;
+    float *mono = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    int src[AE_HARM_VOICES];
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        src[v] = AE_HARM_SRC_DEFAULT;
+
+    /* [mode][vowel] -> high/low spectral balance of the harmony bus. */
+    double tilt[2][2];
+    double peak[2] = { 0.0, 0.0 };
+    int nan_count = 0;
+    for (int mode = 0; mode < 2; ++mode)
+        for (int bright = 0; bright < 2; ++bright)
+        {
+            AeCorrector *p = calloc (1, sizeof (AeCorrector));
+            ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+            ae_corrector_set_edo (p, 12);
+            ae_corrector_set_retune_ms (p, 0.0);
+            ae_corrector_set_transition_ms (p, 0.0);
+            AeHarmVoice voices[AE_HARM_VOICES];
+            memset (voices, 0, sizeof (voices));
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+                voices[v].gain = 1.0;
+            voices[0].interval = 7;
+            ae_corrector_set_harmony (p, true, 0, voices);
+            ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                                    ae_synth_patch_find ("organ"), 5.0, 200.0);
+            ae_corrector_set_voice_sources (p, src, AE_HARM_SRC_VOICE);
+            ae_corrector_set_synth_shape (p, 1.0, 1.0, 0.0,
+                                          mode ? AE_VOWEL_MODE_LPC
+                                               : AE_VOWEL_MODE_VOCODER);
+
+            double phase = 0.0;
+            for (int i = 0; i < total; ++i)
+            {
+                phase += 2.0 * M_PI * 220.0 / 48000.0;
+                mono[i] = bright
+                    ? (float) (0.35 * sin (phase) + 0.30 * sin (8.0 * phase)
+                             + 0.30 * sin (10.0 * phase))
+                    : (float) (0.45 * sin (phase) + 0.30 * sin (2.0 * phase));
+            }
+            for (int off = 0; off < total; off += 512)
+            {
+                const int n = total - off < 512 ? total - off : 512;
+                ae_corrector_process (p, mono + off, hl + off, hr + off, n);
+            }
+            double hi = 0.0, lo = 0.0;
+            for (double f = 1400.0; f <= 2600.0; f += 200.0)
+                hi += goertzel (hl + total - tail, tail, f, 48000.0);
+            for (double f = 260.0; f <= 700.0; f += 60.0)
+                lo += goertzel (hl + total - tail, tail, f, 48000.0);
+            tilt[mode][bright] = hi / (lo + 1e-12);
+            for (int i = 0; i < total; ++i)
+            {
+                if (isnan (hl[i]) || isinf (hl[i])) ++nan_count;
+                if (fabs (hl[i]) > peak[mode]) peak[mode] = fabs (hl[i]);
+            }
+            ae_corrector_free (p);
+            free (p);
+        }
+
+    CHECK (nan_count == 0, "LPC: no NaN or inf escapes the all-pole lattice");
+    /* Stability AND level sanity: the wet-path saturator caps a single
+       LPC signal at 2.5 and the ensemble blend can add at most ~1.4x, so
+       anything past 4 means the safety net has a hole in it. */
+    CHECK (peak[1] < 4.0, "LPC: output stays bounded (peak %.3g)", peak[1]);
+    CHECK (tilt[1][1] > tilt[1][0] * 2.0,
+           "LPC: a brighter vowel brightens the synth (%.4g vs %.4g)",
+           tilt[1][1], tilt[1][0]);
+    /* The point of LPC over the band vocoder: a continuous tract estimate
+       separates the two vowels further than 16 fixed bands can. */
+    const double sep_voc = tilt[0][1] / (tilt[0][0] + 1e-12);
+    const double sep_lpc = tilt[1][1] / (tilt[1][0] + 1e-12);
+    CHECK (sep_lpc > sep_voc,
+           "LPC resolves vowels more sharply than the band vocoder "
+           "(%.3gx vs %.3gx)", sep_lpc, sep_voc);
+
+    /* Stability under a MOVING tract: the coefficients are interpolated
+       every block, which is exactly where a direct-form fit would blow up. */
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("organ"), 5.0, 200.0);
+    ae_corrector_set_voice_sources (p, src, AE_HARM_SRC_VOICE);
+    ae_corrector_set_synth_shape (p, 1.0, 1.0, 0.0, AE_VOWEL_MODE_LPC);
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        /* Sweep the "vowel" continuously between the two shapes. */
+        const double m = 0.5 + 0.5 * sin (2.0 * M_PI * 3.0 * i / 48000.0);
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        mono[i] = (float) (0.4 * sin (phase)
+                         + 0.3 * (1.0 - m) * sin (2.0 * phase)
+                         + 0.3 * m * sin (9.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, mono + off, hl + off, hr + off, n);
+    }
+    double moving_peak = 0.0;
+    int moving_bad = 0;
+    for (int i = 0; i < total; ++i)
+    {
+        if (isnan (hl[i]) || isinf (hl[i])) ++moving_bad;
+        if (fabs (hl[i]) > moving_peak) moving_peak = fabs (hl[i]);
+    }
+    CHECK (moving_bad == 0 && moving_peak < 4.0,
+           "LPC: stable while the tract moves (peak %.3g, bad %d)",
+           moving_peak, moving_bad);
+    ae_corrector_free (p);
+    free (p);
+    free (mono); free (hl); free (hr);
+}
+
+static void test_harmony_formant_preservation (void)
+{
+    /* The harmony shifters go through the same set_shift() as the lead,
+       which asks Signalsmith Stretch to hold formants still while the
+       pitch moves. Definitional measurement: a voice-like tone whose
+       spectral envelope has one strong bump at 1800 Hz, harmonised a
+       fourth DOWN. With preservation the output envelope keeps its bump
+       at 1800 Hz; without it the bump rides down with the pitch to
+       ~1350 Hz -- the "slowed tape" sound this feature exists to kill. */
+    if (! ae_shifter_has_formant_support ())
+    {
+        printf ("note: shifter lacks formant support, preservation untested\n");
+        return;
+    }
+
+    const int total = 96000, tail = 48000;
+    float *mono = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = -5; /* perfect fourth down in 12-EDO */
+    ae_corrector_set_harmony (p, true, 0, voices);
+
+    /* 14 harmonics of A3 (220 Hz), amplitudes drawn from a fixed envelope:
+       a floor plus a Gaussian formant bump centred on 1800 Hz. Phases are
+       scattered so the crest stays sane. */
+    const double f0 = 220.0;
+    double amp[15];
+    for (int h = 1; h <= 14; ++h)
+    {
+        const double f = f0 * h;
+        const double d = (f - 1800.0) / 300.0;
+        amp[h] = 0.05 + 0.5 * exp (-d * d);
+    }
+    for (int i = 0; i < total; ++i)
+    {
+        double s = 0.0;
+        for (int h = 1; h <= 14; ++h)
+            s += amp[h] * sin (2.0 * M_PI * f0 * h * i / 48000.0 + 1.7 * h);
+        mono[i] = (float) (0.35 * s);
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, mono + off, hl + off, hr + off, n);
+    }
+
+    /* The harmony fundamental is 220 * 2^(-5/12) = 164.81 Hz. Its 11th
+       harmonic (1813 Hz) sits inside the preserved bump; its 8th (1319 Hz)
+       sits where the bump would have LANDED had the envelope moved with
+       the pitch. Preservation makes the first dominate; a transposed
+       envelope reverses the ratio by ~20 dB. */
+    const double hf0 = 220.0 * pow (2.0, -5.0 / 12.0);
+    const double e_kept  = goertzel (hl + total - tail, tail, 11.0 * hf0, 48000.0);
+    const double e_moved = goertzel (hl + total - tail, tail,  8.0 * hf0, 48000.0);
+    CHECK (e_kept > 4.0 * e_moved,
+           "harmony formants preserved: bump stays at 1800 Hz "
+           "(kept %.3g vs moved %.3g)", e_kept, e_moved);
+
+    ae_corrector_free (p);
+    free (p);
     free (mono); free (hl); free (hr);
 }
 
@@ -882,7 +1087,7 @@ static void test_harmony_tilt (void)
             for (int v = 0; v < AE_HARM_VOICES; ++v)
                 src[v] = synth ? AE_HARM_SRC_SYNTH : AE_HARM_SRC_VOICE;
             ae_corrector_set_voice_sources (p, src, AE_HARM_SRC_VOICE);
-            ae_corrector_set_synth_shape (p, 1.0, 0.0, tilt);
+            ae_corrector_set_synth_shape (p, 1.0, 0.0, tilt, AE_VOWEL_MODE_VOCODER);
 
             double phase = 0.0;
             for (int i = 0; i < total; ++i)
@@ -1024,6 +1229,8 @@ int main (void)
     test_synth_string_machine();
     test_synth_sources_and_vowel();
     test_harmony_tilt();
+    test_lpc_vowel_mode();
+    test_harmony_formant_preservation();
     test_midi_harmony();
     test_json();
     test_engine_channels();

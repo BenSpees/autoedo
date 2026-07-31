@@ -173,11 +173,13 @@ void ae_corrector_set_voice_sources (AeCorrector *p,
 }
 
 void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
-                                   double vowel, double tilt_db)
+                                   double vowel, double tilt_db, int vowel_mode)
 {
     p->ensemble_depth = dclamp (ensemble_depth, 0.0, 1.0);
     p->synth_vowel    = dclamp (vowel, 0.0, 1.0);
     p->harm_tilt_db   = dclamp (tilt_db, -12.0, 12.0);
+    p->vowel_mode     = vowel_mode == AE_VOWEL_MODE_LPC ? AE_VOWEL_MODE_LPC
+                                                        : AE_VOWEL_MODE_VOCODER;
 }
 
 /* Tilt EQ on the harmony bus: split at ~700 Hz and recombine the halves with
@@ -323,6 +325,175 @@ static void voc_apply (AeCorrector *p, float *buf, int n, int sig, double amount
     }
 }
 
+/* ---- LPC vowel mode (formant-corrected resynthesis) -----------------------
+   Where the channel vocoder above measures 16 fixed bands, this estimates
+   the vocal tract itself: an order-18 all-pole fit to the current frame,
+   which resolves the formants continuously and -- because the fit is
+   independent of the excitation -- lets the tract stay put while the synth
+   plays a different pitch. That last property is the "formant-corrected"
+   part: a harmony a fourth below keeps a human tract instead of sounding
+   like slowed tape.
+
+   Levinson-Durbin, returning REFLECTION coefficients. Direct-form
+   coefficients are what usually makes this filter explode: interpolating
+   two stable polynomials can land on an unstable one. Reflection
+   coefficients cannot -- any set with |k| < 1 is stable, and so is anything
+   between two such sets -- so those are what get stored, slewed and
+   filtered with. Returns false when the frame is too quiet or the fit
+   degenerates, which leaves the previous (good) tract in place. */
+static bool lpc_analyze_frame (const float *x, int n, double k_out[AE_LPC_ORDER])
+{
+    double r[AE_LPC_ORDER + 1];
+    for (int lag = 0; lag <= AE_LPC_ORDER; ++lag)
+    {
+        double s = 0.0;
+        for (int i = lag; i < n; ++i)
+            s += (double) x[i] * x[i - lag];
+        r[lag] = s;
+    }
+    if (r[0] <= 1e-9)
+        return false;
+    /* Ridge: a hair of white noise on the diagonal keeps the recursion off
+       the edge of stability on near-periodic frames (a sung vowel is very
+       nearly periodic, which is exactly when this would otherwise fail). */
+    r[0] *= 1.0001;
+    r[0] += 1e-9;
+
+    double a[AE_LPC_ORDER + 1] = { 0.0 };
+    double e = r[0];
+    for (int i = 1; i <= AE_LPC_ORDER; ++i)
+    {
+        double acc = r[i];
+        for (int j = 1; j < i; ++j)
+            acc -= a[j] * r[i - j];
+        const double k = acc / e;
+        if (! (k > -0.999 && k < 0.999)) /* NaN-safe */
+            return false;
+        k_out[i - 1] = k;
+
+        double tmp[AE_LPC_ORDER + 1];
+        for (int j = 1; j < i; ++j)
+            tmp[j] = a[j] - k * a[i - j];
+        for (int j = 1; j < i; ++j)
+            a[j] = tmp[j];
+        a[i] = k;
+
+        e *= 1.0 - k * k;
+        if (e <= 1e-12)
+            return false;
+    }
+    return true;
+}
+
+/* The whitened excitation of the live voice: the input run through the
+   analysis (FIR) lattice. It carries what the all-pole envelope does not --
+   the buzz of the glottis and the noise burst of a consonant -- which is
+   what a "t" or an "s" needs to survive into the synth. */
+static void lpc_residual (AeCorrector *p, const float *in, float *out, int n)
+{
+    double *g = p->lpc_inv; /* g[j] holds stage j's backward error, delayed */
+
+    for (int s = 0; s < n; ++s)
+    {
+        const double x = in[s];
+        double f = x;
+        /* Stage i reads g_{i-1}[n-1] and produces g_i[n], which stage i+1
+           will read NEXT sample -- so each slot must be saved before it is
+           overwritten, or the filter reads this sample's value as if it
+           were last sample's. */
+        double gd = g[0];
+        g[0] = x; /* g_0[n] = x[n] */
+        for (int i = 1; i <= AE_LPC_ORDER; ++i)
+        {
+            const double k = p->lpc_k[i - 1];
+            const double fi = f - k * gd;
+            const double gi = gd - k * f;
+            if (i < AE_LPC_ORDER)
+            {
+                const double saved = g[i];
+                g[i] = gi;
+                gd = saved;
+            }
+            f = fi;
+        }
+        out[s] = (float) f;
+    }
+}
+
+/* Safety saturator for the LPC wet path. The normaliser below is
+   RMS-matched and smoothed across blocks, but an all-pole resonator's
+   crest factor can spike within one block when a formant lands on a
+   carrier partial -- the average is right while individual peaks run
+   several times hot. Linear below the knee (inert in normal operation),
+   then a rational curve that approaches knee+1: the wet sample can never
+   exceed 2.5 no matter what the lattice rings up to. */
+static inline double lpc_sat (double w)
+{
+    const double knee = 1.5;
+    const double aw = fabs (w);
+    if (aw <= knee)
+        return w;
+    const double t = aw - knee;
+    const double y = knee + t / (1.0 + t);
+    return w < 0.0 ? -y : y;
+}
+
+/* Impose the estimated tract on one synth signal: the all-pole (IIR)
+   lattice, which is the analysis lattice run backwards. `amount`
+   crossfades against the dry synth, and a carried, smoothed normaliser
+   holds the level where the volume match put it. */
+static void lpc_apply (AeCorrector *p, float *buf, int n, int sig,
+                       const float *residual, double amount)
+{
+    if (n <= 0 || amount <= 0.0 || ! p->lpc_valid)
+        return;
+
+    double *b = p->lpc_lat[sig];
+    const double norm = p->lpc_norm[sig];
+    double dry_sq = 0.0, wet_sq = 0.0;
+    double dry_pk = 0.0, wet_pk = 0.0;
+    /* A touch of the voice's own excitation rides with the carrier, which
+       is what carries consonants; the oscillator alone is purely periodic
+       and can only ever sing vowels. */
+    const double res_mix = 0.35;
+
+    for (int s = 0; s < n; ++s)
+    {
+        const double dry = buf[s];
+        double f = dry + res_mix * (residual != NULL ? residual[s] : 0.0f);
+        for (int i = AE_LPC_ORDER; i >= 1; --i)
+        {
+            const double k = p->lpc_k[i - 1];
+            f += k * b[i - 1];
+            b[i] = b[i - 1] - k * f;
+        }
+        b[0] = f;
+        dry_sq += dry * dry;
+        wet_sq += f * f;
+        const double ad = fabs (dry), aw = fabs (f);
+        if (ad > dry_pk) dry_pk = ad;
+        if (aw > wet_pk) wet_pk = aw;
+        buf[s] = (float) (dry + amount * (lpc_sat (f * norm) - dry));
+    }
+
+    /* Peak-aware normaliser: match RMS as the baseline, but never let the
+       wet peak exceed the dry peak by more than 6 dB -- a formant filter
+       legitimately raises crest factor a little, not by the 15-20 dB a
+       resonance parked on a partial can produce. */
+    if (wet_sq > 1e-20 && dry_sq > 1e-20)
+    {
+        double want = sqrt (dry_sq / wet_sq);
+        if (wet_pk > 1e-10)
+        {
+            const double pk_cap = 2.0 * dry_pk / wet_pk;
+            if (pk_cap < want)
+                want = pk_cap;
+        }
+        want = dclamp (want, 0.0, 64.0);
+        p->lpc_norm[sig] += (want - p->lpc_norm[sig]) * 0.25;
+    }
+}
+
 /* polyBLEP residual: subtracted at a saw's wrap to band-limit the edge. */
 static inline double poly_blep (double t, double dt)
 {
@@ -399,6 +570,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->in_block  = calloc ((size_t) p->max_block, sizeof (float));
     p->wet_buf   = calloc ((size_t) p->max_block, sizeof (float));
     p->voice_buf = calloc ((size_t) p->max_block, sizeof (float));
+    free (p->lpc_res);
+    p->lpc_res   = calloc ((size_t) p->max_block, sizeof (float));
 
     /* Ensemble delay lines: ~40 ms covers the deepest tap plus its sweep. */
     free (p->ens_buf_l);
@@ -498,6 +671,20 @@ void ae_corrector_reset (AeCorrector *p)
         p->voc_norm[s] = 1.0;
     p->tilt_lp[0] = p->tilt_lp[1] = 0.0;
 
+    p->lpc_valid = false;
+    for (int i = 0; i < AE_LPC_ORDER; ++i)
+        p->lpc_k[i] = p->lpc_k_t[i] = 0.0;
+    for (int i = 0; i <= AE_LPC_ORDER; ++i)
+        p->lpc_inv[i] = 0.0;
+    for (int sg = 0; sg < AE_VOC_SIGNALS; ++sg)
+    {
+        p->lpc_norm[sg] = 1.0;
+        for (int i = 0; i <= AE_LPC_ORDER; ++i)
+            p->lpc_lat[sg][i] = 0.0;
+    }
+    if (p->lpc_res != NULL)
+        memset (p->lpc_res, 0, (size_t) p->max_block * sizeof (float));
+
     if (p->ens_buf_l != NULL)
         memset (p->ens_buf_l, 0, (size_t) p->ens_len * sizeof (float));
     if (p->ens_buf_r != NULL)
@@ -533,6 +720,8 @@ void ae_corrector_free (AeCorrector *p)
     free (p->wet_buf);
     free (p->voice_buf);
     p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
+    free (p->lpc_res);
+    p->lpc_res = NULL;
     free (p->ens_buf_l);
     free (p->ens_buf_r);
     p->ens_buf_l = p->ens_buf_r = NULL;
@@ -580,6 +769,24 @@ static void run_detection (AeCorrector *p)
 
     const AeYinResult res = ae_yin_process (&p->detector, p->frame, p->frame_size);
     const bool now_voiced = res.voiced && res.frequency_hz > 0.0 && rms > AE_GATE_RMS;
+
+    /* Vocal-tract estimate for LPC vowel mode, on the newest window of the
+       same frame the detector just used. Runs whether or not the frame is
+       voiced: a consonant has a tract shape too, and that is exactly the
+       part a channel vocoder cannot reproduce. A failed fit leaves the
+       previous tract standing rather than collapsing the filter. */
+    if (p->vowel_mode == AE_VOWEL_MODE_LPC && p->synth_vowel > 0.0)
+    {
+        const int w = p->frame_size < AE_LPC_WINDOW ? p->frame_size : AE_LPC_WINDOW;
+        const float *win = p->frame + (p->frame_size - w);
+        double k[AE_LPC_ORDER];
+        if (lpc_analyze_frame (win, w, k))
+        {
+            for (int i = 0; i < AE_LPC_ORDER; ++i)
+                p->lpc_k_t[i] = k[i];
+            p->lpc_valid = true;
+        }
+    }
 
     /* Sung loudness for the synth ghosts (~80 ms smoothing); frozen while
        unvoiced so a release tail holds its level like it holds its pitch. */
@@ -1065,8 +1272,16 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
        and smearing them afterwards is what the ensemble is for. */
     if (p->synth_vowel > 0.0)
     {
-        voc_apply (p, harm_l, num_samples, 0, p->synth_vowel);
-        voc_apply (p, harm_r, num_samples, 1, p->synth_vowel);
+        if (p->vowel_mode == AE_VOWEL_MODE_LPC)
+        {
+            lpc_apply (p, harm_l, num_samples, 0, p->lpc_res, p->synth_vowel);
+            lpc_apply (p, harm_r, num_samples, 1, p->lpc_res, p->synth_vowel);
+        }
+        else
+        {
+            voc_apply (p, harm_l, num_samples, 0, p->synth_vowel);
+            voc_apply (p, harm_r, num_samples, 1, p->synth_vowel);
+        }
     }
     if (pat->ensemble && p->ensemble_depth > 0.0)
         render_ensemble (p, harm_l, harm_r, num_samples);
@@ -1093,7 +1308,22 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
        the transfer on mid-phrase lands on the vowel being sung rather than
        ramping up from silence. */
     if (p->synth_vowel > 0.0)
-        voc_analyze (p, p->in_block, num_samples);
+    {
+        if (p->vowel_mode == AE_VOWEL_MODE_LPC)
+        {
+            /* Slew the tract toward the newest estimate (~15 ms), in
+               reflection-coefficient space so every intermediate set is
+               still a stable filter, and whiten this block for its
+               consonant content. */
+            const double a = 1.0 - exp (-num_samples / (0.015 * p->fs));
+            for (int i = 0; i < AE_LPC_ORDER; ++i)
+                p->lpc_k[i] += (p->lpc_k_t[i] - p->lpc_k[i]) * a;
+            if (p->lpc_valid && p->lpc_res != NULL)
+                lpc_residual (p, p->in_block, p->lpc_res, num_samples);
+        }
+        else
+            voc_analyze (p, p->in_block, num_samples);
+    }
 
     const bool lead_synth = p->lead_source == AE_HARM_SRC_SYNTH;
 
@@ -1122,7 +1352,12 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         for (int i = 0; i < num_samples; ++i)
             p->wet_buf[i] = (float) (p->wet_buf[i] * match);
         if (p->synth_vowel > 0.0)
-            voc_apply (p, p->wet_buf, num_samples, 2, p->synth_vowel);
+        {
+            if (p->vowel_mode == AE_VOWEL_MODE_LPC)
+                lpc_apply (p, p->wet_buf, num_samples, 2, p->lpc_res, p->synth_vowel);
+            else
+                voc_apply (p, p->wet_buf, num_samples, 2, p->synth_vowel);
+        }
     }
     else
     {
