@@ -49,27 +49,58 @@ static double ji_snap_cents (double cents, double period)
 /* ---- synth harmony patches ------------------------------------------------
    Small additive/subtractive recipes tuned to sit behind a voice: partial
    levels sum to ~1, detuned saw pairs give pads their slow chorus movement,
-   and an optional one-pole low-pass (cutoff = lp_mult x fundamental) keeps
-   saws soft. Waves: 0 = sine, 1 = polyBLEP saw. */
-typedef struct { float ratio, level, detune_cents; int wave; } AeSynthPartial;
+   an optional per-partial vibrato LFO (rate in Hz, depth in cents) adds the
+   time-varying detune a static offset cannot, and an optional one-pole
+   low-pass (cutoff = lp_mult x fundamental) keeps saws soft. Waves:
+   0 = sine, 1 = polyBLEP saw, 2 = polyBLEP square.
+
+   `ensemble` runs the whole synth harmony bus through the triple-chorus
+   below -- the string-machine move: a Solina is just sawtooth ranks, and
+   ITS sound is the ensemble smearing them. */
+typedef struct
+{
+    float ratio, level, detune_cents;
+    int   wave;
+    float lfo_hz, lfo_cents;
+} AeSynthPartial;
 typedef struct
 {
     const char    *name;
     int            n;
     AeSynthPartial part[AE_SYNTH_PARTIALS];
     float          lp_mult; /* 0 = no filter */
+    int            ensemble;
 } AeSynthPatch;
 
 static const AeSynthPatch k_synth_patches[] = {
-    { "pad",   3, { { 1.0f, 0.40f, -6.0f, 1 }, { 1.0f, 0.40f, +6.0f, 1 },
-                    { 2.0f, 0.14f, +3.0f, 1 } },                          2.5f },
-    { "warm",  3, { { 1.0f, 0.72f,  0.0f, 0 }, { 2.0f, 0.22f, +2.0f, 0 },
-                    { 3.0f, 0.07f,  0.0f, 0 } },                          0.0f },
-    { "glass", 3, { { 1.0f, 0.55f,  0.0f, 0 }, { 2.0f, 0.30f, +4.0f, 0 },
-                    { 4.0f, 0.16f, -3.0f, 0 } },                          0.0f },
-    { "organ", 4, { { 1.0f, 0.52f,  0.0f, 0 }, { 2.0f, 0.28f,  0.0f, 0 },
-                    { 3.0f, 0.16f,  0.0f, 0 }, { 4.0f, 0.09f,  0.0f, 0 } }, 0.0f },
-    { "sine",  1, { { 1.0f, 0.90f,  0.0f, 0 } },                          0.0f },
+    { "pad",   3, { { 1.0f, 0.40f, -6.0f, 1, 0, 0 }, { 1.0f, 0.40f, +6.0f, 1, 0, 0 },
+                    { 2.0f, 0.14f, +3.0f, 1, 0, 0 } },                          2.5f, 0 },
+    { "warm",  3, { { 1.0f, 0.72f,  0.0f, 0, 0, 0 }, { 2.0f, 0.22f, +2.0f, 0, 0, 0 },
+                    { 3.0f, 0.07f,  0.0f, 0, 0, 0 } },                          0.0f, 0 },
+    { "glass", 3, { { 1.0f, 0.55f,  0.0f, 0, 0, 0 }, { 2.0f, 0.30f, +4.0f, 0, 0, 0 },
+                    { 4.0f, 0.16f, -3.0f, 0, 0, 0 } },                          0.0f, 0 },
+    { "organ", 4, { { 1.0f, 0.52f,  0.0f, 0, 0, 0 }, { 2.0f, 0.28f,  0.0f, 0, 0, 0 },
+                    { 3.0f, 0.16f,  0.0f, 0, 0, 0 }, { 4.0f, 0.09f,  0.0f, 0, 0, 0 } },
+                                                                                0.0f, 0 },
+    { "sine",  1, { { 1.0f, 0.90f,  0.0f, 0, 0, 0 } },                          0.0f, 0 },
+    /* Solina-style string machine: saw ranks at 8' and 4' (plus a whisper of
+       2'), each drifting on its own slow/fast vibrato pair, brightened past
+       the pad's filter, the ensemble doing the actual string-ness. */
+    { "strings", 5, { { 1.0f, 0.26f, -5.0f, 1, 0.7f, 5.0f },
+                      { 1.0f, 0.26f, +5.0f, 1, 5.2f, 3.0f },
+                      { 2.0f, 0.16f, -3.0f, 1, 0.9f, 5.0f },
+                      { 2.0f, 0.11f, +7.0f, 1, 6.1f, 3.0f },
+                      { 4.0f, 0.06f,  0.0f, 1, 1.3f, 4.0f } },                  4.0f, 1 },
+    /* Vox-humana-ish: a square/saw blend rounded well down, ensemble on --
+       the "choir" stop of the same era of machines. */
+    { "choir", 4, { { 1.0f, 0.28f, -4.0f, 2, 0.6f, 4.0f },
+                    { 1.0f, 0.26f, +4.0f, 1, 4.8f, 3.0f },
+                    { 2.0f, 0.18f,  0.0f, 0, 0.0f, 0.0f },
+                    { 2.0f, 0.10f, +8.0f, 1, 0.8f, 5.0f } },                    2.2f, 1 },
+    /* Bright detuned saw pair, no ensemble: a section pad that cuts. */
+    { "brass", 3, { { 1.0f, 0.42f, -3.0f, 1, 4.5f, 2.0f },
+                    { 1.0f, 0.42f, +3.0f, 1, 5.5f, 2.0f },
+                    { 2.0f, 0.10f,  0.0f, 1, 0.0f, 0.0f } },                    5.0f, 0 },
 };
 #define K_SYNTH_PATCHES ((int) (sizeof (k_synth_patches) / sizeof (k_synth_patches[0])))
 
@@ -83,7 +114,8 @@ static double synth_patch_rms (const AeSynthPatch *pat)
     double sum = 0.0;
     for (int k = 0; k < pat->n; ++k)
         sum += (double) pat->part[k].level * pat->part[k].level
-             * (pat->part[k].wave == 1 ? 1.0 / 3.0 : 0.5);
+             * (pat->part[k].wave == 1 ? 1.0 / 3.0
+              : pat->part[k].wave == 2 ? 1.0 : 0.5);
     const double rms = sqrt (sum);
     return rms > 1e-6 ? rms : 1.0;
 }
@@ -191,6 +223,16 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->wet_buf   = calloc ((size_t) p->max_block, sizeof (float));
     p->voice_buf = calloc ((size_t) p->max_block, sizeof (float));
 
+    /* Ensemble delay lines: ~40 ms covers the deepest tap plus its sweep. */
+    free (p->ens_buf_l);
+    free (p->ens_buf_r);
+    p->ens_len = 1;
+    while (p->ens_len < (int) (0.04 * p->fs) + 8)
+        p->ens_len <<= 1;
+    p->ens_mask  = p->ens_len - 1;
+    p->ens_buf_l = calloc ((size_t) p->ens_len, sizeof (float));
+    p->ens_buf_r = calloc ((size_t) p->ens_len, sizeof (float));
+
     ae_yin_prepare (&p->detector, p->fs, p->frame_size, min_hz, max_hz);
 
     if (p->edo == 0) /* first prepare on a zeroed struct: neutral defaults */
@@ -241,9 +283,26 @@ void ae_corrector_reset (AeCorrector *p)
         p->s_env[v]       = 0.0;
         p->s_lp[v]        = 0.0;
         for (int k = 0; k < AE_SYNTH_PARTIALS; ++k)
-            p->s_phase[v][k] = 0.0;
+        {
+            /* Stagger the start phases: identical phases across voices make
+               the first attack of a stacked chord sum to a click. */
+            p->s_phase[v][k] = (double) (v * AE_SYNTH_PARTIALS + k)
+                             / (double) (AE_HARM_VOICES * AE_SYNTH_PARTIALS);
+            p->s_lfo[v][k]   = 2.0 * AE_PI * p->s_phase[v][k];
+        }
         atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
     }
+
+    if (p->ens_buf_l != NULL)
+        memset (p->ens_buf_l, 0, (size_t) p->ens_len * sizeof (float));
+    if (p->ens_buf_r != NULL)
+        memset (p->ens_buf_r, 0, (size_t) p->ens_len * sizeof (float));
+    p->ens_write = 0;
+    /* Three taps, each with its own slow and fast LFO, started a third of a
+       cycle apart so the taps never sweep in unison (that would be vibrato,
+       not ensemble). */
+    for (int i = 0; i < 6; ++i)
+        p->ens_lfo[i] = 2.0 * AE_PI * (double) (i % 3) / 3.0;
 
     atomic_store_explicit (&p->detected_hz_out, 0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->target_hz_out,   0.0f, memory_order_relaxed);
@@ -269,6 +328,10 @@ void ae_corrector_free (AeCorrector *p)
     free (p->wet_buf);
     free (p->voice_buf);
     p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
+    free (p->ens_buf_l);
+    free (p->ens_buf_r);
+    p->ens_buf_l = p->ens_buf_r = NULL;
+    p->ens_len = p->ens_mask = 0;
     ae_corrector_free_shifters (p);
     ae_yin_free (&p->detector);
 }
@@ -570,6 +633,96 @@ static void set_shift (AeShifter *s, double semitones, double base_hz)
     ae_shifter_set_formant_base (s, base_hz);
 }
 
+/* The string-machine ensemble: three delay taps swept by their own pairs of
+   LFOs (a slow ~0.6 Hz wander plus a fast ~6 Hz shimmer, the classic
+   Solina/Eminent topology), summed back with the dry bus. The taps are
+   spread across the stereo field in opposite senses, which is what turns a
+   flat rank of saws into a wide, breathing string section. Fractional delay
+   is linear-interpolated -- at these sweep depths the interpolation's own
+   high-end loss reads as part of the effect.
+
+   Runs on the whole harmony bus rather than per voice: one shared box, like
+   the hardware, so a five-note chord swirls together instead of five
+   independent choruses fighting each other. */
+static void render_ensemble (AeCorrector *p, float *harm_l, float *harm_r,
+                             int num_samples)
+{
+    if (p->ens_buf_l == NULL || p->ens_buf_r == NULL || p->ens_len <= 0)
+        return;
+
+    /* Tap centres and sweep depths in ms; rates in Hz (slow, fast). */
+    static const double c_ms[3]    = { 8.0, 12.0, 16.0 };
+    static const double d_ms[3]    = { 2.6,  3.2,  2.2 };
+    static const double slow_hz[3] = { 0.31, 0.42, 0.55 };
+    static const double fast_hz[3] = { 5.9,  6.4,  5.3 };
+    /* Per-tap stereo weights: taps 0 and 2 lean opposite ways, tap 1 sits
+       centred, so the sum is wide without losing the mono middle. */
+    static const double w_l[3] = { 0.9, 0.7, 0.4 };
+    static const double w_r[3] = { 0.4, 0.7, 0.9 };
+    /* Normalise the tap sum back to unity, then blend dry against it at
+       equal power (they are largely decorrelated, so 1/sqrt2 each). */
+#define AE_ENS_WET_NORM (1.0 / (0.9 + 0.7 + 0.4))
+#define AE_ENS_BLEND    0.70710678
+
+    const double fs = p->fs;
+    for (int t = 0; t < 3; ++t)
+    {
+        p->ens_lfo[t]     += 2.0 * AE_PI * slow_hz[t] * num_samples / fs;
+        p->ens_lfo[t + 3] += 2.0 * AE_PI * fast_hz[t] * num_samples / fs;
+        if (p->ens_lfo[t] > 2.0 * AE_PI)     p->ens_lfo[t] -= 2.0 * AE_PI;
+        if (p->ens_lfo[t + 3] > 2.0 * AE_PI) p->ens_lfo[t + 3] -= 2.0 * AE_PI;
+    }
+
+    /* Delay in samples per tap and SIDE, held for the block (the sweep is
+       slow next to a block; stepping per block keeps the sin() count
+       trivial). The two sides sweep in OPPOSITE senses: that is what widens
+       a centred rank of saws instead of merely thickening it -- with the
+       same modulation on both sides the output of a mono bus would stay
+       perfectly correlated, i.e. still mono. */
+    double delay_l[3], delay_r[3];
+    for (int t = 0; t < 3; ++t)
+    {
+        const double mod = 0.75 * sin (p->ens_lfo[t]) + 0.25 * sin (p->ens_lfo[t + 3]);
+        delay_l[t] = dclamp ((c_ms[t] + d_ms[t] * mod) * 0.001 * fs,
+                             1.0, (double) (p->ens_len - 2));
+        delay_r[t] = dclamp ((c_ms[t] - d_ms[t] * mod) * 0.001 * fs,
+                             1.0, (double) (p->ens_len - 2));
+    }
+
+    for (int i = 0; i < num_samples; ++i)
+    {
+        const float dry_l = harm_l[i], dry_r = harm_r[i];
+        p->ens_buf_l[p->ens_write & p->ens_mask] = dry_l;
+        p->ens_buf_r[p->ens_write & p->ens_mask] = dry_r;
+
+        double wet_l = 0.0, wet_r = 0.0;
+        for (int t = 0; t < 3; ++t)
+        {
+            const double rl = (double) p->ens_write - delay_l[t];
+            const double rr = (double) p->ens_write - delay_r[t];
+            const int il = (int) floor (rl), ir = (int) floor (rr);
+            const double fl = rl - (double) il, fr = rr - (double) ir;
+            const float al = p->ens_buf_l[il & p->ens_mask];
+            const float bl = p->ens_buf_l[(il + 1) & p->ens_mask];
+            const float ar = p->ens_buf_r[ir & p->ens_mask];
+            const float br = p->ens_buf_r[(ir + 1) & p->ens_mask];
+            /* Tap weights lean the taps across the field; the opposite
+               sweeps above are what actually decorrelate the sides. */
+            wet_l += w_l[t] * (al + (bl - al) * fl);
+            wet_r += w_r[t] * (ar + (br - ar) * fr);
+        }
+        ++p->ens_write;
+
+        /* Equal-power blend of dry against the (mostly decorrelated) wet
+           sum, each normalised by its own weight total: the hardware's
+           "ensemble on" is a full-strength blend, not a subtle send, and it
+           must not cost level -- these patches are volume-matched to the
+           singer like every other one. */
+        harm_l[i] = (float) (AE_ENS_BLEND * (dry_l + wet_l * AE_ENS_WET_NORM));
+        harm_r[i] = (float) (AE_ENS_BLEND * (dry_r + wet_r * AE_ENS_WET_NORM));
+    }
+}
+
 /* 4b. Synth harmony: oscillator ghosts at the same target degrees the
    shifter voices would sing, each through the shared attack/release
    envelope. Unlike the shifter path there is no voiced crossfade -- a
@@ -616,18 +769,40 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         for (int k = 0; k < pat->n; ++k)
         {
             const AeSynthPartial *pp = &pat->part[k];
-            const double inc = hz * pp->ratio
-                             * pow (2.0, pp->detune_cents / 1200.0) / p->fs;
+            /* Vibrato is stepped once per block: at these rates (< 7 Hz) a
+               block is a fraction of a cycle, and per-sample sin() per
+               partial per voice is real money on the audio thread. */
+            double lfo = p->s_lfo[v][k];
+            double cents = pp->detune_cents;
+            if (pp->lfo_hz > 0.0f && pp->lfo_cents > 0.0f)
+            {
+                cents += pp->lfo_cents * sin (lfo);
+                lfo += 2.0 * AE_PI * pp->lfo_hz * num_samples / p->fs;
+                if (lfo > 2.0 * AE_PI) lfo -= 2.0 * AE_PI;
+                p->s_lfo[v][k] = lfo;
+            }
+            const double inc = hz * pp->ratio * pow (2.0, cents / 1200.0) / p->fs;
             if (inc >= 0.45) /* partial would alias; leave it out */
                 continue;
             double ph = p->s_phase[v][k];
-            if (pp->wave == 1)
+            if (pp->wave == 1) /* saw */
                 for (int i = 0; i < num_samples; ++i)
                 {
                     ph += inc;
                     if (ph >= 1.0) ph -= 1.0;
                     buf[i] += (float) (pp->level
                                        * (2.0 * ph - 1.0 - poly_blep (ph, inc)));
+                }
+            else if (pp->wave == 2) /* square: two band-limited saw edges */
+                for (int i = 0; i < num_samples; ++i)
+                {
+                    ph += inc;
+                    if (ph >= 1.0) ph -= 1.0;
+                    double ph2 = ph + 0.5;
+                    if (ph2 >= 1.0) ph2 -= 1.0;
+                    const double sq = (ph < 0.5 ? 1.0 : -1.0)
+                                    - poly_blep (ph, inc) + poly_blep (ph2, inc);
+                    buf[i] += (float) (pp->level * sq);
                 }
             else
                 for (int i = 0; i < num_samples; ++i)
@@ -664,6 +839,9 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         }
         p->s_env[v] = env;
     }
+
+    if (pat->ensemble)
+        render_ensemble (p, harm_l, harm_r, num_samples);
 }
 
 static void process_chunk (AeCorrector *p, float *mono, float *harm_l,

@@ -137,7 +137,8 @@ down. Both carry the identical string, serialized once per tick server-side.
   "outputName": "External Headphones",
   "shifter": "Signalsmith Stretch 1.3.2",  // the vendored pitch-shift engine
   "formantSupport": true,     // formants held still under pitch shift
-  "synthPatches": ["pad","warm","glass","organ","sine"],
+  "synthPatches": ["pad","warm","glass","organ","sine",
+                   "strings","choir","brass"],
                               // the engine's synth-harmony patch table, in
                               // order — build a `synthPatch` picker from this
   "stepCents": 100.0,         // period / edo, stretch-adjusted
@@ -221,7 +222,7 @@ UI behavior you may want to replicate).
 |---|---|---|---|
 | `harmOn` | bool | live | master harmony switch |
 | `harmSource` | `"voice"` \| `"synth"` | live | what the ghosts are made of: pitch-shifted copies of the live input (classic harmonizer) or the built-in synth at the same target degrees. Applies to all five voices (phase 1). Synth ghosts are volume-matched to the sung level — `hg` trims from parity — and, unlike shifted ghosts, ring past the end of the sung note by the release time, holding their last pitch and level |
-| `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). Unknown names are ignored |
+| `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list. Simple ranks: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). String-machine voices, with per-partial vibrato and the shared **ensemble** (three delay taps swept in opposite senses per side — the Solina/Eminent trick that turns a rank of saws into a wide, breathing section): `strings` (saw ranks at 8'/4'/2'), `choir` (vox-humana square/saw blend, rounded down), `brass` (bright detuned saw pair, no ensemble — a section pad that cuts). Unknown names are ignored |
 | `synthAttackMs` | float 0–5000 | live | synth envelope attack (default 80) |
 | `synthReleaseMs` | float 0–10000 | live | synth envelope release (default 500) |
 | `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward, up first per distance) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |

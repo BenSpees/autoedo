@@ -39,7 +39,7 @@
 #define AE_HARM_SRC_VOICE 0
 #define AE_HARM_SRC_SYNTH 1
 
-#define AE_SYNTH_PARTIALS 4
+#define AE_SYNTH_PARTIALS 6
 
 typedef struct
 {
@@ -136,6 +136,17 @@ typedef struct
     double s_env[AE_HARM_VOICES];     /* attack/release envelope */
     double s_lp[AE_HARM_VOICES];      /* one-pole low-pass state */
     double s_phase[AE_HARM_VOICES][AE_SYNTH_PARTIALS]; /* 0..1 per partial */
+    double s_lfo[AE_HARM_VOICES][AE_SYNTH_PARTIALS];   /* vibrato phase, rad */
+
+    /* Ensemble (string-machine chorus): a stereo pair of delay lines the
+       whole synth harmony bus runs through when the patch asks for it.
+       Allocated in prepare (fs-sized), so the audio thread never allocates. */
+    float  *ens_buf_l;
+    float  *ens_buf_r;
+    int     ens_len;   /* power of two */
+    int     ens_mask;
+    int     ens_write;
+    double  ens_lfo[6]; /* tap LFO phases (3 slow + 3 fast), radians */
 
     /* Parameters (set from the audio thread between blocks) ---------------- */
     int    edo;

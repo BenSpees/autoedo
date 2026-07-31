@@ -581,6 +581,114 @@ static void test_engine_channels (void)
     ae_audio_engine_stop (e);
 }
 
+static void test_synth_string_machine (void)
+{
+    /* The string-machine patches exist and carry the ensemble; the plain
+       ones do not (a pad that suddenly swirled would be a regression). */
+    const int strings = ae_synth_patch_find ("strings");
+    const int choir   = ae_synth_patch_find ("choir");
+    const int brass   = ae_synth_patch_find ("brass");
+    CHECK (strings >= 0, "strings patch exists");
+    CHECK (choir >= 0, "choir patch exists");
+    CHECK (brass >= 0, "brass patch exists");
+
+    /* Render a held note through `strings` and through `sine`, and compare
+       what the ensemble does to the stereo image. */
+    const int total = 96000; /* 2 s: several sweeps of the slowest LFO */
+    float *in = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+    }
+
+    /* Centre-panned single voice: without an ensemble L and R are identical,
+       with one they decorrelate. That difference IS the effect. */
+    double corr[2] = { 0.0, 0.0 };
+    double rms_out[2] = { 0.0, 0.0 };
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+            voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                                pass == 0 ? ae_synth_patch_find ("sine") : strings,
+                                5.0, 200.0);
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+        }
+        /* Normalised L/R correlation over the settled tail. */
+        double sxy = 0.0, sxx = 0.0, syy = 0.0, sq = 0.0;
+        for (int i = total / 2; i < total; ++i)
+        {
+            sxy += (double) hl[i] * hr[i];
+            sxx += (double) hl[i] * hl[i];
+            syy += (double) hr[i] * hr[i];
+            sq  += (double) hl[i] * hl[i];
+        }
+        corr[pass] = (sxx > 1e-12 && syy > 1e-12) ? sxy / sqrt (sxx * syy) : 1.0;
+        rms_out[pass] = sqrt (sq / (total / 2));
+        ae_corrector_free (p);
+        free (p);
+    }
+    CHECK (corr[0] > 0.99, "no ensemble: L and R stay identical (%.4f)", corr[0]);
+    CHECK (corr[1] < 0.95, "ensemble decorrelates the stereo image (%.4f)", corr[1]);
+    CHECK (rms_out[1] > 0.2 * rms_out[0] && rms_out[1] < 5.0 * rms_out[0],
+           "ensemble keeps a sane level (%.4g vs %.4g)", rms_out[1], rms_out[0]);
+
+    /* And the movement is real: an ensembled note's short-window level
+       varies over time, where a static patch's does not. */
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH, strings, 5.0, 200.0);
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
+    }
+    double lo = 1e9, hi = 0.0;
+    for (int w = total / 2; w + 4800 <= total; w += 4800)
+    {
+        double s = 0.0;
+        for (int i = w; i < w + 4800; ++i)
+            s += (double) hl[i] * hl[i];
+        s = sqrt (s / 4800.0);
+        if (s < lo) lo = s;
+        if (s > hi) hi = s;
+    }
+    CHECK (hi > lo * 1.02, "ensemble breathes (window RMS %.4g..%.4g)", lo, hi);
+    /* No NaNs escaping the delay lines. */
+    int nan = 0;
+    for (int i = 0; i < total; ++i)
+        if (isnan (hl[i]) || isnan (hr[i])) ++nan;
+    CHECK (nan == 0, "ensemble output is finite");
+    ae_corrector_free (p);
+    free (p);
+    free (in); free (hl); free (hr);
+}
+
 static void test_96k (void)
 {
     /* The 96 kHz latency halving: shifter blocks are fixed SAMPLE counts
@@ -676,6 +784,7 @@ int main (void)
     test_walk();
     test_harmony();
     test_synth_harmony();
+    test_synth_string_machine();
     test_midi_harmony();
     test_json();
     test_engine_channels();
