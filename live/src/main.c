@@ -180,6 +180,8 @@ static void config_defaults (App *app)
     c->params.vowel_mode       = 0;   /* channel vocoder */
     c->params.synth_attack_ms  = 80.0;
     c->params.synth_release_ms = 500.0;
+    c->params.drone_on  = false;
+    c->params.drone_deg = 0;
     c->params.midi_mode = false;
     c->midi_source[0]   = '\0'; /* all MIDI inputs */
     c->input_channel    = 0;    /* backend default channel handling */
@@ -249,14 +251,15 @@ static void config_json (const App *app, char *out, size_t cap)
               ",\"harmSource\":\"%s\",\"leadSource\":\"%s\",\"synthPatch\":\"%s\","
               "\"synthAttackMs\":%.6g,\"synthReleaseMs\":%.6g,"
               "\"ensembleDepth\":%.6g,\"synthVowel\":%.6g,\"harmTiltDb\":%.6g,"
-              "\"vowelMode\":\"%s\",\"hSrc\":[",
+              "\"vowelMode\":\"%s\",\"droneOn\":%s,\"droneDeg\":%d,\"hSrc\":[",
               c->params.harm_source == 1 ? "synth" : "voice",
               c->params.lead_source == 1 ? "synth" : "voice",
               ae_synth_patch_name (c->params.synth_patch),
               c->params.synth_attack_ms, c->params.synth_release_ms,
               c->params.ensemble_depth, c->params.synth_vowel,
               c->params.harm_tilt_db,
-              c->params.vowel_mode == 1 ? "lpc" : "vocoder");
+              c->params.vowel_mode == 1 ? "lpc" : "vocoder",
+              c->params.drone_on ? "true" : "false", c->params.drone_deg);
     strncat (out, harm, cap - strlen (out) - 1);
     for (int v = 0; v < 5; ++v)
     {
@@ -395,6 +398,14 @@ static bool config_apply_json (App *app, const char *json)
         c->params.harm_tilt_db = num_clamp (num, -12.0, 12.0);
     if (ae_json_get_string (json, "vowelMode", str, sizeof (str)))
         c->params.vowel_mode = strcmp (str, "lpc") == 0 ? 1 : 0;
+    if (ae_json_get_bool (json, "droneOn", &b))
+        c->params.drone_on = b;
+    if (ae_json_get_number (json, "droneDeg", &num))
+    {
+        const int deg = (int) num;
+        c->params.drone_deg = deg < 0 ? 0
+                            : deg > 8 * AE_MAX_EDO ? 8 * AE_MAX_EDO : deg;
+    }
     /* Per-voice sources: "voice" / "synth", anything else (including
        "default" and an empty slot) means follow harmSource. */
     {

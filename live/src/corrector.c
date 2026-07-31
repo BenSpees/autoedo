@@ -182,6 +182,15 @@ void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
                                                         : AE_VOWEL_MODE_VOCODER;
 }
 
+void ae_corrector_set_drone (AeCorrector *p, bool on, long long degree)
+{
+    const long long top = 8LL * (p->edo > 0 ? p->edo : AE_MIN_EDO);
+    if (degree < 0)   degree = 0;
+    if (degree > top) degree = top;
+    p->drone_on = on;
+    p->drone_j  = degree;
+}
+
 /* Tilt EQ on the harmony bus: split at ~700 Hz and recombine the halves with
    equal and opposite gains, so +6 lifts the top and drops the bottom by the
    same amount and the pivot itself stays put. One shelf pair rather than a
@@ -655,6 +664,14 @@ void ae_corrector_reset (AeCorrector *p)
             p->s_lfo[v][k]   = 2.0 * AE_PI * p->s_phase[v][k];
         }
         atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
+    }
+    p->drone_env   = 0.0;
+    p->drone_cents = 0.0;
+    p->drone_lp    = 0.0;
+    for (int k = 0; k < AE_SYNTH_PARTIALS; ++k)
+    {
+        p->drone_phase[k] = (double) k / (double) AE_SYNTH_PARTIALS;
+        p->drone_lfo[k]   = 2.0 * AE_PI * p->drone_phase[k];
     }
 
     for (int b = 0; b < AE_VOC_BANDS; ++b)
@@ -1283,6 +1300,41 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
             voc_apply (p, harm_r, num_samples, 1, p->synth_vowel);
         }
     }
+
+    /* The drone: one absolute-pitch voice, deliberately AFTER the vowel
+       stage (a drone has no mouth to follow -- the vocoder's gating would
+       mute it between phrases, the exact opposite of a drone) and BEFORE
+       the ensemble, so it swirls with the section like any other rank. */
+    {
+        const bool gate = p->harm_on && p->drone_on;
+        double env = p->drone_env;
+        if (gate || env >= 1e-4)
+        {
+            const double cents_t = (double) p->drone_j * (p->period_cents > 0.0
+                                       ? p->period_cents : 1200.0)
+                                 / (double) (p->edo > 0 ? p->edo : AE_MIN_EDO);
+            if (gate && env < 1e-3)
+                p->drone_cents = cents_t; /* a fresh drone starts on pitch */
+            else
+                p->drone_cents += (cents_t - p->drone_cents) * glide_a;
+            const double hz = (p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ)
+                            * pow (2.0, p->drone_cents / 1200.0);
+            float *buf = p->voice_buf;
+            synth_render_voice (p, pat, hz, p->drone_phase, p->drone_lfo,
+                                &p->drone_lp, buf, num_samples);
+            const double want = gate ? 1.0 : 0.0;
+            const double a = gate ? atk_a : rel_a;
+            for (int i = 0; i < num_samples; ++i)
+            {
+                env += (want - env) * a;
+                const double s = buf[i] * env * match * 0.70710678; /* centre */
+                harm_l[i] += (float) s;
+                harm_r[i] += (float) s;
+            }
+            p->drone_env = env < 1e-4 && ! gate ? 0.0 : env;
+        }
+    }
+
     if (pat->ensemble && p->ensemble_depth > 0.0)
         render_ensemble (p, harm_l, harm_r, num_samples);
 }
@@ -1404,7 +1456,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         else
             any_shift = true;
     }
-    if (any_synth)
+    if (any_synth || p->drone_on || p->drone_env >= 1e-4)
         render_synth_harmony (p, harm_l, harm_r, num_samples);
     if (! any_shift)
     {

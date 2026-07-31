@@ -187,6 +187,20 @@ typedef struct
     double lead_lfo[AE_SYNTH_PARTIALS];
     double lead_lp;
 
+    /* DRONE: one synth voice pinned to an ABSOLUTE degree, sustained while
+       on regardless of what the singer does (a root-only chord in the chart
+       means "drone that root"). Level rides in_level like the ghosts --
+       frozen while unvoiced -- so it breathes with the set instead of
+       blasting before the first note. Renders after the vowel stage (a
+       drone has no mouth to follow) and before the ensemble. */
+    bool      drone_on;
+    long long drone_j;    /* absolute engine degree */
+    double    drone_env;
+    double    drone_cents;
+    double    drone_phase[AE_SYNTH_PARTIALS];
+    double    drone_lfo[AE_SYNTH_PARTIALS];
+    double    drone_lp;
+
     /* Ensemble (string-machine chorus): a stereo pair of delay lines the
        whole synth harmony bus runs through when the patch asks for it.
        Allocated in prepare (fs-sized), so the audio thread never allocates. */
@@ -297,6 +311,11 @@ void ae_corrector_set_voice_sources (AeCorrector *p,
    harmony voice -- shifted and synth alike -- and never the lead. */
 void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
                                    double vowel, double tilt_db, int vowel_mode);
+
+/* The drone: on/off and its ABSOLUTE engine degree (clamped to 0..8 equaves
+   above the reference anchor). Live; the synth attack/release envelope
+   shapes the edges, and the master harmony switch still gates it. */
+void ae_corrector_set_drone (AeCorrector *p, bool on, long long degree);
 
 /* The source actually in force for a harmony voice, resolving the
    per-voice sentinel against the global switch. */

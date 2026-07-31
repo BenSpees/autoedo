@@ -76,6 +76,12 @@ typedef struct
     int      vowel_mode;             /* 0 channel vocoder, 1 LPC */
     double   synth_attack_ms;        /* 0..5000 */
     double   synth_release_ms;       /* 0..10000 */
+
+    /* The drone: one synth voice pinned to an absolute engine degree,
+       sustained while on (a root-only chart chord means "drone that
+       root"). Gated by harm_on; edges use the synth attack/release. */
+    bool     drone_on;
+    int      drone_deg;              /* absolute degree, 0..8*edo */
 } AeLiveParams;
 
 /* Parameters that require an engine restart to change. */

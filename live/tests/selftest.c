@@ -980,6 +980,87 @@ static void test_lpc_vowel_mode (void)
     free (mono); free (hl); free (hr);
 }
 
+static void test_drone (void)
+{
+    /* The drone: an absolute-pitch synth voice that SUSTAINS while the
+       singer stops -- a root-only chart chord means "drone that root".
+       Measured, not assumed: the drone's fundamental is where the degree
+       says, it keeps sounding through silence (the ghosts do not), the
+       master harmony switch gates it, and droneOn false releases it. */
+    const int fs = 48000, total = 6 * fs;
+    float *mono = malloc ((size_t) total * sizeof (float));
+    float *hl = malloc ((size_t) total * sizeof (float));
+    float *hr = malloc ((size_t) total * sizeof (float));
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, (double) fs, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7; /* one ordinary ghost, to contrast the sustain */
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("organ"), 5.0, 60.0);
+    int src[AE_HARM_VOICES];
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        src[v] = AE_HARM_SRC_DEFAULT;
+    ae_corrector_set_voice_sources (p, src, AE_HARM_SRC_VOICE);
+    ae_corrector_set_synth_shape (p, 0.0, 0.0, 0.0, AE_VOWEL_MODE_VOCODER);
+    /* Degree 4*12 - 3 = A3-region in the C-anchored grid; its frequency is
+       ref * 2^(45/12). */
+    ae_corrector_set_drone (p, true, 45);
+    const double drone_hz = AE_REFERENCE_C0_HZ * pow (2.0, 45.0 / 12.0);
+
+    /* 0..2 s: sing 220 Hz (establishes in_level; the ghost sounds too).
+       2..4 s: silence -- the ghost releases, the drone holds.
+       4..6 s: silence with droneOn false -- everything dies. */
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / fs;
+        mono[i] = i < 2 * fs
+            ? (float) (0.4 * sin (phase) + 0.25 * sin (2.0 * phase)) : 0.0f;
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        if (off == 4 * fs)
+            ae_corrector_set_drone (p, false, 45);
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, mono + off, hl + off, hr + off, n);
+    }
+
+    /* While singing: the drone's fundamental is present at its own pitch. */
+    const double sung = goertzel (hl + fs, fs, drone_hz, fs);
+    CHECK (sung > 1.0, "drone sounds at its degree while singing (%.3g)", sung);
+    /* Through the silence: still there (window well past the ghost's
+       release), while the interval ghost is gone. */
+    const double held = goertzel (hl + 3 * fs, fs, drone_hz, fs);
+    CHECK (held > 1.0, "drone SUSTAINS through silence (%.3g)", held);
+    const double ghost_hz = 220.0 * pow (2.0, 7.0 / 12.0);
+    const double ghost = goertzel (hl + 3 * fs, fs, ghost_hz, fs);
+    CHECK (ghost < held * 0.05,
+           "the ordinary ghost released while the drone held (%.3g vs %.3g)",
+           ghost, held);
+    /* droneOn false: released (give it the 60 ms release, measure after). */
+    const double off_e = goertzel (hl + total - fs / 2, fs / 2, drone_hz, fs);
+    CHECK (off_e < held * 0.01, "droneOn false releases (%.3g)", off_e);
+
+    /* The master harmony switch gates it: same setup, harmony off. */
+    ae_corrector_reset (p);
+    ae_corrector_set_harmony (p, false, 0, voices);
+    ae_corrector_set_drone (p, true, 45);
+    for (int off = 0; off < 2 * fs; off += 512)
+        ae_corrector_process (p, mono + off, hl + off, hr + off, 512);
+    const double gated = goertzel (hl + fs, fs, drone_hz, fs);
+    CHECK (gated < 1e-3, "harmOn false silences the drone (%.3g)", gated);
+
+    ae_corrector_free (p);
+    free (p);
+    free (mono); free (hl); free (hr);
+}
+
 static void test_harmony_formant_preservation (void)
 {
     /* The harmony shifters go through the same set_shift() as the lead,
@@ -1230,6 +1311,7 @@ int main (void)
     test_synth_sources_and_vowel();
     test_harmony_tilt();
     test_lpc_vowel_mode();
+    test_drone();
     test_harmony_formant_preservation();
     test_midi_harmony();
     test_json();

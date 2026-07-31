@@ -69,6 +69,8 @@ typedef struct
     _Atomic int      vowel_mode;
     _Atomic double   synth_attack_ms;
     _Atomic double   synth_release_ms;
+    _Atomic bool     drone_on;
+    _Atomic int      drone_deg;
 } AeAtomicParams;
 
 static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams *p)
@@ -118,6 +120,8 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->synth_patch,      p->synth_patch,      memory_order_relaxed);
     atomic_store_explicit (&a->synth_attack_ms,  p->synth_attack_ms,  memory_order_relaxed);
     atomic_store_explicit (&a->synth_release_ms, p->synth_release_ms, memory_order_relaxed);
+    atomic_store_explicit (&a->drone_on,         p->drone_on,         memory_order_relaxed);
+    atomic_store_explicit (&a->drone_deg,        p->drone_deg,        memory_order_relaxed);
 }
 
 /* Audio thread, once per block: push the current parameters into the
@@ -180,6 +184,9 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                         atomic_load_explicit (&a->synth_vowel, memory_order_relaxed),
                         atomic_load_explicit (&a->harm_tilt_db, memory_order_relaxed),
                         atomic_load_explicit (&a->vowel_mode, memory_order_relaxed));
+    ae_corrector_set_drone (ps,
+                        atomic_load_explicit (&a->drone_on, memory_order_relaxed),
+                        atomic_load_explicit (&a->drone_deg, memory_order_relaxed));
 
     *bypass_out = atomic_load_explicit (&a->bypass, memory_order_relaxed);
     *lead_out   = atomic_load_explicit (&a->lead_on, memory_order_relaxed);
