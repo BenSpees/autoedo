@@ -19,7 +19,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef kAudioObjectPropertyElementMain /* pre-macOS 12 SDKs */
+/* kAudioObjectPropertyElementMain replaced ...Master in the macOS 12 SDK.
+   Both are enum constants, not macros, so #ifndef on the name always fires
+   and would alias us onto the deprecated one forever (six deprecation
+   warnings per build). Gate on the SDK version instead. */
+#include <AvailabilityMacros.h>
+#if !defined(MAC_OS_VERSION_12_0) \
+    || (defined(MAC_OS_X_VERSION_MAX_ALLOWED) \
+        && MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_12_0)
 #define kAudioObjectPropertyElementMain kAudioObjectPropertyElementMaster
 #endif
 

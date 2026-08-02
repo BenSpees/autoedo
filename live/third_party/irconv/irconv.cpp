@@ -10,8 +10,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <utility> /* std::swap — libstdc++ leaks it in, libc++ does not */
 
 namespace {
+
+/* M_PI is a POSIX extension, absent from <cmath> under strict ISO C++ (the
+   mingw-w64 Windows build). Carry our own, as src/corrector.c does. */
+constexpr double kPi = 3.14159265358979323846;
 
 constexpr int kB0   = 64;   /* direct head length == zero-latency guarantee */
 constexpr int kLmax = 4096; /* largest FFT partition; bounds the burst */
@@ -30,7 +35,7 @@ struct Fft {
         if (!tw || !rev)
             return false;
         for (int k = 0; k < n / 2; ++k) {
-            const double a = -2.0 * M_PI * k / n;
+            const double a = -2.0 * kPi * k / n;
             tw[2 * k] = std::cos(a);
             tw[2 * k + 1] = std::sin(a);
         }
@@ -593,8 +598,8 @@ void irc_point_process(IrcPoint* p, const float* in, float* out, int n) {
         if (fading && fp < p->fadeLen) {
             /* Equal-power: the two tails are decorrelated spaces. */
             const double x = (fp + 0.5) / p->fadeLen;
-            wet = p->wetA[i] * std::cos(0.5 * M_PI * x)
-                + p->wetB[i] * std::sin(0.5 * M_PI * x);
+            wet = p->wetA[i] * std::cos(0.5 * kPi * x)
+                + p->wetB[i] * std::sin(0.5 * kPi * x);
             ++fp;
         } else if (fading) {
             wet = p->wetB[i];

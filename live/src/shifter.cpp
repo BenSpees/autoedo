@@ -3,6 +3,7 @@
 #include <signalsmith-stretch/signalsmith-stretch.h>
 
 #include <cstdio>
+#include <new>       /* std::nothrow */
 #include <type_traits>
 #include <utility>
 
