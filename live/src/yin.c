@@ -7,6 +7,103 @@
 static int imax (int a, int b) { return a > b ? a : b; }
 static int imin (int a, int b) { return a < b ? a : b; }
 
+/* Iterative in-place radix-2 FFT; n must be a power of two. */
+static void yin_fft (double *re, double *im, int n, int inverse)
+{
+    for (int i = 1, j = 0; i < n; ++i)
+    {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1)
+            j ^= bit;
+        j |= bit;
+        if (i < j)
+        {
+            double t = re[i]; re[i] = re[j]; re[j] = t;
+            t = im[i]; im[i] = im[j]; im[j] = t;
+        }
+    }
+
+    for (int len = 2; len <= n; len <<= 1)
+    {
+        const double ang = 2.0 * 3.14159265358979323846 / (double) len * (inverse ? 1.0 : -1.0);
+        const double wl_re = cos (ang), wl_im = sin (ang);
+        for (int i = 0; i < n; i += len)
+        {
+            double w_re = 1.0, w_im = 0.0;
+            for (int k = 0; k < len / 2; ++k)
+            {
+                const int p = i + k, q = i + k + len / 2;
+                const double v_re = re[q] * w_re - im[q] * w_im;
+                const double v_im = re[q] * w_im + im[q] * w_re;
+                re[q] = re[p] - v_re;
+                im[q] = im[p] - v_im;
+                re[p] += v_re;
+                im[p] += v_im;
+                const double nw_re = w_re * wl_re - w_im * wl_im;
+                w_im = w_re * wl_im + w_im * wl_re;
+                w_re = nw_re;
+            }
+        }
+    }
+
+    if (inverse)
+        for (int i = 0; i < n; ++i)
+        {
+            re[i] /= (double) n;
+            im[i] /= (double) n;
+        }
+}
+
+/* d(tau) = sum_j (x[j] - x[j+tau])^2 = P(0) + P(tau) - 2 r(tau), with
+   P(tau) = sum_j x[j+tau]^2 and r(tau) = sum_j x[j] x[j+tau]. r comes from one
+   FFT cross-correlation; P slides in constant time. The transform is at least
+   window + tau_max long, which keeps every lag in [0, tau_max] clear of
+   circular wrap-around. */
+static void yin_difference (AeYin *y, const float *x)
+{
+    const int n = y->fft_size;
+
+    for (int i = 0; i < n; ++i)
+    {
+        y->a_re[i] = (i < y->window) ? (double) x[i] : 0.0;
+        y->b_re[i] = (i < y->window + y->tau_max) ? (double) x[i] : 0.0;
+        y->a_im[i] = 0.0;
+        y->b_im[i] = 0.0;
+    }
+
+    yin_fft (y->a_re, y->a_im, n, 0);
+    yin_fft (y->b_re, y->b_im, n, 0);
+
+    for (int i = 0; i < n; ++i) /* conj(A) * B */
+    {
+        const double re = y->a_re[i] * y->b_re[i] + y->a_im[i] * y->b_im[i];
+        const double im = y->a_re[i] * y->b_im[i] - y->a_im[i] * y->b_re[i];
+        y->a_re[i] = re;
+        y->a_im[i] = im;
+    }
+
+    yin_fft (y->a_re, y->a_im, n, 1);
+
+    double power = 0.0;
+    for (int j = 0; j < y->window; ++j)
+        power += (double) x[j] * (double) x[j];
+    const double power0 = power;
+
+    for (int tau = 0; tau < y->tau_max; ++tau)
+    {
+        if (tau > 0)
+        {
+            const double leaving  = (double) x[tau - 1] * (double) x[tau - 1];
+            const double entering = (double) x[tau + y->window - 1]
+                                  * (double) x[tau + y->window - 1];
+            power += entering - leaving;
+        }
+
+        const double d = power0 + power - 2.0 * y->a_re[tau];
+        y->diff[tau] = d > 0.0 ? d : 0.0; /* cancellation can go a hair negative */
+    }
+}
+
 void ae_yin_prepare (AeYin *y, double sample_rate, int frame_size,
                      double min_frequency, double max_frequency)
 {
@@ -27,37 +124,41 @@ void ae_yin_prepare (AeYin *y, double sample_rate, int frame_size,
     y->window = y->frame_size - y->tau_max;
     y->window = imax (y->window, y->tau_max); /* keep a healthy amount of overlap data */
 
-    free (y->diff);
-    free (y->cumulative);
+    y->fft_size = 1;
+    while (y->fft_size < y->window + y->tau_max)
+        y->fft_size <<= 1;
+
+    ae_yin_free (y);
     y->diff       = calloc ((size_t) y->tau_max, sizeof (double));
     y->cumulative = calloc ((size_t) y->tau_max, sizeof (double));
+    y->a_re       = calloc ((size_t) y->fft_size, sizeof (double));
+    y->a_im       = calloc ((size_t) y->fft_size, sizeof (double));
+    y->b_re       = calloc ((size_t) y->fft_size, sizeof (double));
+    y->b_im       = calloc ((size_t) y->fft_size, sizeof (double));
 }
 
 void ae_yin_free (AeYin *y)
 {
     free (y->diff);
     free (y->cumulative);
+    free (y->a_re);
+    free (y->a_im);
+    free (y->b_re);
+    free (y->b_im);
     y->diff = y->cumulative = NULL;
+    y->a_re = y->a_im = y->b_re = y->b_im = NULL;
 }
 
 AeYinResult ae_yin_process (AeYin *y, const float *frame, int num_samples)
 {
     AeYinResult result = { 0.0, 0.0, false };
 
-    if (frame == NULL || y->diff == NULL || num_samples < y->window + y->tau_max)
+    if (frame == NULL || y->diff == NULL || y->a_re == NULL
+        || num_samples < y->window + y->tau_max)
         return result;
 
     /* Step 1: difference function d(tau). */
-    for (int tau = 0; tau < y->tau_max; ++tau)
-    {
-        double sum = 0.0;
-        for (int j = 0; j < y->window; ++j)
-        {
-            const double delta = (double) frame[j] - (double) frame[j + tau];
-            sum += delta * delta;
-        }
-        y->diff[tau] = sum;
-    }
+    yin_difference (y, frame);
 
     /* Step 2: cumulative mean normalised difference d'(tau). */
     y->cumulative[0] = 1.0;

@@ -1,5 +1,12 @@
 /* Monophonic fundamental-frequency estimator using the YIN algorithm
-   (de Cheveigné & Kawahara, 2002). C port of Source/dsp/YinPitchDetector. */
+   (de Cheveigné & Kawahara, 2002). C port of Source/dsp/YinPitchDetector.
+
+   The squared-difference function is evaluated through an FFT
+   cross-correlation rather than the textbook double loop: same answer to
+   within floating-point noise, but O(N log N) instead of O(tau_max * window).
+   At 96 kHz that is ~3.9 M multiply-adds per analysis frame down to ~0.2 M,
+   every 5 ms -- headroom this engine spends on six pitch shifters, LPC and
+   convolution. */
 
 #ifndef AUTOEDO_YIN_H
 #define AUTOEDO_YIN_H
@@ -20,10 +27,16 @@ typedef struct
     int    tau_min;
     int    tau_max;
     int    window;    /* integration window length */
+    int    fft_size;  /* >= window + tau_max, power of two */
     double threshold; /* CMND acceptance threshold (~0.1-0.15) */
 
     double *diff;       /* difference function d(tau) */
     double *cumulative; /* cumulative mean normalised difference d'(tau) */
+
+    /* Scratch for the FFT cross-correlation that evaluates d(tau). Real and
+       imaginary parts are kept in separate arrays rather than C99 _Complex,
+       which MSVC does not support for C. */
+    double *a_re, *a_im, *b_re, *b_im;
 } AeYin;
 
 /* Prepare for a sample rate and analysis frame size (allocates). Safe to call
