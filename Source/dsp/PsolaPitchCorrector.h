@@ -25,6 +25,14 @@ namespace autoedo
     stereo signal phase-coherent. Unvoiced / silent passages are passed through
     a latency-matched dry path with a smooth crossfade to avoid artefacts.
 
+    PSOLA quality lives or dies on where each grain is read from. Analysis marks
+    here form a continuous chain, each one a local period on from the last, and
+    the grain nearest a given output position is the one used. Rebuilding the
+    mark from an absolute grid instead (round(centre / T0) * T0) looks equivalent
+    but is not: a 0.1 % wobble in T0 — ordinary detector jitter on a dead-steady
+    note — moves such a mark by up to half a period, so consecutive grains get
+    overlap-added near antiphase.
+
     Pure C++ (no JUCE) so the engine is unit-testable on its own. Allocation
     happens only in @c prepare(); @c process() is allocation-free.
 */
@@ -66,18 +74,20 @@ public:
 
 private:
     void runDetection();
-    void placeGrain (long long centerOut);
+    void placeGrain (long long centerOut, double synthPos, double period);
     void processChunk (float* const* channelData, int numChannels, int numSamples);
 
     // Configuration ---------------------------------------------------------
-    double fs        = 44100.0;
-    int    channels  = 0;
-    int    frameSize = 2048;
-    int    hop       = 256;
-    int    tauMin    = 30;
-    int    tauMax    = 1024;
-    int    latency   = 0;
-    int    maxBlock  = 512;
+    double fs         = 44100.0;
+    int    channels   = 0;
+    int    frameSize  = 2048;
+    int    hop        = 256;
+    int    tauMin     = 30;
+    int    tauMax     = 1024;
+    int    latency    = 0;
+    int    maxBlock   = 512;
+    int    grainLag   = 2048; // how far behind the input frontier grains are placed
+    int    detectLag  = 1024; // frameSize/2: a frame's estimate describes its centre
 
     int    bufSize   = 1 << 15;
     int    bufMask   = (1 << 15) - 1;
@@ -90,6 +100,13 @@ private:
     std::vector<float>              frame;   // scratch frame for detection
     std::vector<float*>             chanPtrs; // scratch channel pointers for sub-chunking
 
+    // Pitch state stamped onto the timeline position it actually describes, so
+    // grain placement and the dry/wet crossfade can read the estimate belonging
+    // to *their* moment rather than whatever the newest frame happened to say.
+    std::vector<float>              periodRing; // T0 in samples
+    std::vector<float>              ratioRing;  // correction ratio (out/in frequency)
+    std::vector<unsigned char>      voicedRing;
+
     // Running state ---------------------------------------------------------
     YinPitchDetector detector;
 
@@ -97,9 +114,10 @@ private:
     long long lastDetectAt = 0;   // inWrite at last detection
     long long lastTouched  = -1;  // highest output index cleared in wetAcc/wetWin
     double    synthMark    = 0.0;  // absolute output index of next grain center
+    double    analysisMark = 0.0;  // absolute input index of the current analysis mark
 
     double currentPeriod = 200.0; // T0 in samples (from detected pitch)
-    double synthPeriod   = 200.0; // T1 in samples (from corrected pitch)
+    double currentRatio  = 1.0;   // f_out / f_in requested by the correction
     bool   voiced        = false;
     bool   primed        = false; // becomes true once first pitch is found
 

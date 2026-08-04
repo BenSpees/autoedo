@@ -1,5 +1,6 @@
 #pragma once
 
+#include <complex>
 #include <vector>
 
 namespace autoedo
@@ -11,6 +12,13 @@ namespace autoedo
     Plain C++ with no JUCE dependency so it can be unit-tested in isolation.
     Designed for voice / monophonic instruments, which is what pitch correction
     operates on.
+
+    The squared-difference function is evaluated through an FFT cross-correlation
+    rather than the textbook double loop. The result is identical to within
+    floating-point noise, but the cost drops from O(tauMax * window) to
+    O(N log N) — at 96 kHz that is the difference between ~3.9 M and ~0.2 M
+    multiply-adds per analysis frame, which is what makes a 5 ms detection hop
+    affordable at high sample rates.
 */
 class YinPitchDetector
 {
@@ -43,15 +51,22 @@ public:
     int  getFrameSize() const noexcept { return frameSize; }
 
 private:
+    /** Fill @c diff with d(tau) for tau in [0, tauMax). */
+    void differenceFunction (const float* x);
+
     double sampleRate = 44100.0;
     int    frameSize  = 2048;
     int    tauMin     = 2;
     int    tauMax     = 1024;
     int    window     = 1024; // integration window length
+    int    fftSize    = 2048; // >= window + tauMax, power of two
     double threshold  = 0.12;
 
     std::vector<double> diff;       // difference function d(tau)
     std::vector<double> cumulative; // cumulative mean normalised difference d'(tau)
+
+    // Scratch for the FFT cross-correlation (allocated in prepare()).
+    std::vector<std::complex<double>> specA, specB;
 };
 
 } // namespace autoedo
