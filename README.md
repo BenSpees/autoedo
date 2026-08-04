@@ -51,11 +51,27 @@ input ─► YIN pitch detection ─► nearest EDO degree (re: C) ─► retune
 ```
 
 - **Detection** — [YIN](https://en.wikipedia.org/wiki/Pitch_detection_algorithm)
-  (`Source/dsp/YinPitchDetector.*`), a robust monophonic f0 estimator.
+  (`Source/dsp/YinPitchDetector.*`), a robust monophonic f0 estimator. Its
+  squared-difference function is evaluated by FFT cross-correlation rather than
+  the textbook double loop — same answer, but O(N log N) instead of
+  O(tauMax × window), which is what keeps a 5 ms detection hop affordable at
+  high sample rates.
 - **Quantisation** — nearest EDO degree relative to C (`Source/dsp/Tuning.h`).
 - **Correction** — time-domain PSOLA (`Source/dsp/PsolaPitchCorrector.*`),
   which shifts pitch while preserving duration and formants. Unvoiced / silent
   passages pass through a latency-matched dry path with a smooth crossfade.
+
+PSOLA quality lives or dies on where each grain is read from. Analysis marks
+form a *continuous chain* — each one a local period on from the last — and the
+mark nearest a given output position is the one that grain reads, at fractional
+sample resolution. Consecutive grains are therefore always a whole number of
+local periods apart in the source, which is what lets them overlap-add in phase.
+Pitch state (period, correction ratio, voicing) is stamped onto the timeline
+position it describes rather than read from the analysis frontier, so a grain
+uses the estimate belonging to its own moment and the dry/wet crossfade opens on
+the note it belongs to. `tests/DspTests.cpp` measures the result: a note already
+on the grid comes back with its harmonic-to-artefact ratio intact to within a
+fraction of a dB.
 
 Detection and timing are shared across channels (the source is assumed
 monophonic), so a stereo signal stays phase-coherent. The plugin reports a
@@ -126,9 +142,16 @@ per-degree scale selection, a live pitch/target read-out, and working
 detection + correction — all verified by unit tests.
 
 Possible next steps:
-- Glottal-epoch-synchronous PSOLA marks for higher vocal quality (the current
-  engine uses an epoch-free uniform grid — robust, but a true epoch detector
-  would reduce phasiness).
+- Glottal-epoch-synchronous PSOLA marks for higher vocal quality. Marks are
+  currently epoch-*free*: a continuous chain spaced by the local period, which
+  keeps consecutive grains phase-coherent but does not align them to the glottal
+  pulse. Anchoring to real epochs is the remaining route to lower phasiness on
+  voice. (A hard peak-snap was tried and caused period-doubling on harmonically
+  rich tones; it would need a proper epoch detector, nudged rather than snapped.)
+- Reduce the residual that a *shifted* note carries — a trace of the original
+  pitch, measurable at roughly −65 dB as sidebands on multiples of the input f0.
+  It is inherent to grain repetition/omission; less of it needs either
+  epoch-aligned marks or a spectral method.
 - Selectable reference note / root, and custom non-equal (e.g. just-intonation)
   scales.
 - Saving/recalling named degree presets.
