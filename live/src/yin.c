@@ -199,6 +199,51 @@ AeYinResult ae_yin_process (AeYin *y, const float *frame, int num_samples)
         }
     }
 
+    /* Voicing is decided by the dip the selection above found, before the
+       guard below moves the lag: the guard chooses which octave the note is
+       in, it does not get a vote on whether there is a note at all. */
+    const double d_voiced = y->cumulative[best_tau];
+
+    /* Step 3b: octave guard. Both selections above can land an octave (or a
+       twelfth) low. A plucked string is rich enough that d'(tau) at the true
+       period sometimes sits just above the threshold while 2*tau -- which is
+       also a period, just not the shortest one -- dips below it; the first
+       crossing is then the subharmonic, and the fallback's global minimum
+       prefers the longer lag for the same reason. Both make a guitar
+       suddenly an octave down.
+
+       So walk the submultiples smallest-lag-first and take the first one
+       that is a genuine dip of comparable quality (periodicity within 90% of
+       the best). "Comparable" is the important part: a real octave error and
+       its true fundamental are near-equal dips, whereas the tau/2 of a note
+       that really is low is a shallow nothing and fails the test. */
+    {
+        const double q_best = 1.0 - d_voiced;
+        for (int k = 4; k >= 2; --k)
+        {
+            int c = best_tau / k;
+            if (c < y->tau_min || c >= y->tau_max - 1)
+                continue;
+            /* Snap to the bottom of whatever dip sits near tau/k -- the
+               submultiple of an interpolated lag is rarely exactly on it. */
+            const int slack = imax (1, c / 16);
+            const int lo = imax (y->tau_min, c - slack);
+            const int hi = imin (y->tau_max - 2, c + slack);
+            for (int t = lo; t <= hi; ++t)
+                if (y->cumulative[t] < y->cumulative[c])
+                    c = t;
+            /* A local minimum, not a point on a slope. */
+            if (y->cumulative[c] > y->cumulative[c - 1]
+                || y->cumulative[c] > y->cumulative[c + 1])
+                continue;
+            if (1.0 - y->cumulative[c] >= 0.90 * q_best)
+            {
+                best_tau = c;
+                break;
+            }
+        }
+    }
+
     /* Step 4: parabolic interpolation around best_tau for sub-sample accuracy. */
     double better_tau = (double) best_tau;
     if (best_tau > 0 && best_tau < y->tau_max - 1)
@@ -214,12 +259,12 @@ AeYinResult ae_yin_process (AeYin *y, const float *frame, int num_samples)
     if (better_tau <= 0.0)
         return result;
 
-    double p = 1.0 - y->cumulative[best_tau];
+    double p = 1.0 - d_voiced;
     if (p < 0.0) p = 0.0;
     if (p > 1.0) p = 1.0;
 
     result.frequency_hz = y->sample_rate / better_tau;
     result.periodicity  = p;
-    result.voiced       = y->cumulative[best_tau] < y->threshold;
+    result.voiced       = d_voiced < y->threshold;
     return result;
 }

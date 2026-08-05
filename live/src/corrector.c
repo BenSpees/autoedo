@@ -5,6 +5,7 @@
 #include <string.h>
 
 #define AE_PI       3.14159265358979323846
+#define AE_SQRT2    1.41421356237309504880
 #define AE_MIN_FREQ 65.0    /* default lowest detectable pitch (Hz) */
 #define AE_MAX_FREQ 1600.0  /* default highest detectable pitch (Hz) */
 #define AE_GATE_RMS 0.0015  /* ~ -56 dBFS noise gate for detection */
@@ -649,6 +650,13 @@ void ae_corrector_reset (AeCorrector *p)
     p->in_transition  = false;
     p->sustain_s      = 0.0;
 
+    /* Unity until a controller says otherwise, and STARTING at unity rather
+       than ramping to it: a fresh engine must not fade its harmony in. */
+    if (p->harm_master <= 0.0)
+        p->harm_master = 1.0;
+    p->harm_master_cur = p->harm_master;
+    p->lead_on         = true;
+
     for (int i = 0; i < AE_MAX_EDO; ++i)
         p->enabled_deg[i] = true; /* default: every degree usable */
 
@@ -810,11 +818,29 @@ void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
         if (hv.pan >  1.0) hv.pan =  1.0;
         if (hv.gain < 0.0) hv.gain = 0.0;
         p->harm[v] = hv;
-        /* constant-power pan */
+        /* Constant-power pan, normalised so DEAD CENTRE IS UNITY IN BOTH
+           CHANNELS. The lead is mono and reaches L and R at full level, so
+           the textbook cos/sin law (0.707 a side) would put a centred ghost
+           a fixed 3 dB under the lead -- a deficit the per-voice trim then
+           has to spend half its range undoing. The sqrt(2) here is what
+           makes "gain 0 dB" mean "at the lead's level", which is what an
+           operator reasonably expects it to mean. Power stays constant
+           across the sweep: hard over is sqrt(2) into one side, the same
+           total as unity into both. */
         const double a = (hv.pan + 1.0) * (AE_PI / 4.0);
-        p->h_gl[v] = hv.gain * cos (a);
-        p->h_gr[v] = hv.gain * sin (a);
+        p->h_gl[v] = hv.gain * cos (a) * AE_SQRT2;
+        p->h_gr[v] = hv.gain * sin (a) * AE_SQRT2;
     }
+}
+
+void ae_corrector_set_harm_master (AeCorrector *p, double gain_lin)
+{
+    p->harm_master = gain_lin < 0.0 ? 0.0 : (gain_lin > 64.0 ? 64.0 : gain_lin);
+}
+
+void ae_corrector_set_lead_on (AeCorrector *p, bool on)
+{
+    p->lead_on = on;
 }
 
 static void run_detection (AeCorrector *p)
@@ -1010,6 +1036,20 @@ static void run_detection (AeCorrector *p)
         double used_cents[AE_HARM_VOICES];
         int    used_n = 0;
 
+        /* The pitch every ghost is measured FROM. The interval itself comes
+           from the snapped degree (cand, below) so it is exact by
+           construction -- but an exact interval is only in tune if it is
+           stacked on the note the player is actually hearing as the lead.
+           With the corrected lead in the mix that is out_cents. With the
+           lead muted -- a guitarist harmonising against their own amp --
+           the audible lead is the string, so the anchor is what was really
+           played. Anchoring to the degree's ideal frequency instead is what
+           put the synth ghosts a few cents out: whenever the lead is not
+           fully corrected (Amount below 1, inside the tolerance dead zone,
+           or still gliding), the lead sits off its ideal degree and a ghost
+           pinned to that ideal beats against it. */
+        const double anchor_cents = p->lead_on ? p->out_cents : detected_cents;
+
         for (int v = 0; v < AE_HARM_VOICES; ++v)
         {
             const AeHarmVoice *hv = &p->harm[v];
@@ -1047,12 +1087,15 @@ static void run_detection (AeCorrector *p)
                     {
                         used_cents[used_n++] = ghost_cents;
 
-                        /* The voice rides the corrected pitch, so its shift is
-                           measured from the detected input like the main one. */
-                        const double voice_cents = p->out_cents + (ghost_cents - target_cents);
+                        /* Interval from the snapped degrees, stacked on the
+                           audible lead. Both ghost sources use the same
+                           number, so a shifted voice and a synth voice on
+                           the same interval land on the same pitch. */
+                        const double voice_cents =
+                            anchor_cents + (ghost_cents - target_cents);
                         p->h_semitones[v] = dclamp ((voice_cents - detected_cents) / 100.0,
                                                     -36.0, 36.0);
-                        p->h_cents_t[v] = ghost_cents; /* synth target pitch */
+                        p->h_cents_t[v] = voice_cents; /* synth target pitch */
                         p->h_active[v] = true;
                     }
                 }
@@ -1388,6 +1431,36 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         render_ensemble (p, harm_l, harm_r, num_samples);
 }
 
+/* The harmony-bus master: the LAST thing on the ghost bus and the only
+   thing on all of it. Smoothed over ~5 ms so a controller sweeping the
+   fader cannot zipper, and deliberately applied after the IR and the tilt
+   so pulling the bus down takes its reverb tail with it. */
+static void apply_harm_master (AeCorrector *p, float *harm_l, float *harm_r,
+                               int num_samples)
+{
+    const double target = p->harm_master;
+    double g = p->harm_master_cur;
+    if (g == target)
+    {
+        if (g == 1.0)
+            return;
+        for (int i = 0; i < num_samples; ++i)
+        {
+            harm_l[i] = (float) (harm_l[i] * g);
+            harm_r[i] = (float) (harm_r[i] * g);
+        }
+        return;
+    }
+    const double a = 1.0 - exp (-1.0 / (0.005 * p->fs));
+    for (int i = 0; i < num_samples; ++i)
+    {
+        g += (target - g) * a;
+        harm_l[i] = (float) (harm_l[i] * g);
+        harm_r[i] = (float) (harm_r[i] * g);
+    }
+    p->harm_master_cur = fabs (target - g) < 1e-6 ? target : g;
+}
+
 static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                            float *harm_r, int num_samples)
 {
@@ -1525,6 +1598,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         }
         if (p->harm_tilt_db != 0.0)
             render_tilt (p, harm_l, harm_r, num_samples);
+        apply_harm_master (p, harm_l, harm_r, num_samples);
         return;
     }
 
@@ -1576,6 +1650,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     }
     if (p->harm_tilt_db != 0.0)
         render_tilt (p, harm_l, harm_r, num_samples);
+    apply_harm_master (p, harm_l, harm_r, num_samples);
 }
 
 void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *harm_r,

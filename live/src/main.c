@@ -54,6 +54,8 @@ typedef struct
     double          ref_a4;        /* reference A4, default 440.0 */
     double          stretch_cents; /* octave stretch, cents per octave */
     char            range_name[16];/* detection range preset */
+    double          det_min_hz;    /* explicit range override, 0 = use the */
+    double          det_max_hz;    /* preset named by range_name           */
     char            quality_name[16];/* pitch-shifter quality/latency preset */
     char            scale_cat[64]; /* last-loaded catalog scale (cosmetic; */
     char            scale_name[64];/* the mask itself is the real state)   */
@@ -93,6 +95,12 @@ static const struct { const char *name; double min_hz, max_hz; } k_ranges[] = {
     { "tenor",      80.0,  600.0 },
     { "alto",      100.0,  800.0 },
     { "soprano",   130.0, 1200.0 },
+    /* Guitar in standard tuning: low E is 82.4 Hz and the top string's
+       12th fret is 659, so 78..1400 covers the instrument with a little
+       room either side. The tight bottom is the point -- every subharmonic
+       of a note the guitar can actually play falls outside the window, so
+       the detector cannot chase one even before the octave guard votes. */
+    { "guitar",     78.0, 1400.0 },
     { "instrument", 65.0, 1600.0 },
     { "wide",       40.0, 2000.0 },
 };
@@ -168,11 +176,13 @@ static void config_defaults (App *app)
     app->ref_a4        = 440.0;
     app->stretch_cents = 0.0;
     snprintf (app->range_name, sizeof (app->range_name), "instrument");
+    app->det_min_hz = app->det_max_hz = 0.0; /* 0 = use the named preset */
     snprintf (app->quality_name, sizeof (app->quality_name), "balanced");
     app->scale_cat[0] = app->scale_name[0] = '\0';
 
-    c->params.harm_on   = false;
-    c->params.harm_lock = 1; /* Mask — the headline behavior */
+    c->params.harm_on        = false;
+    c->params.harm_lock      = 1; /* Mask — the headline behavior */
+    c->params.harm_master_db = 0.0;
     for (int v = 0; v < 5; ++v)
     {
         c->params.harm_interval[v] = 0;
@@ -221,6 +231,14 @@ static void config_sync (App *app)
                      * pow (2.0, app->root_cents / 1200.0);
     c->params.period_cents = 1200.0 + app->stretch_cents;
     range_lookup (app->range_name, &c->det_min_hz, &c->det_max_hz);
+    /* An explicit window wins over the preset. A named voice type is a fine
+       default, but nothing beats telling the detector the actual bottom of
+       the instrument in front of it -- a period longer than the lowest note
+       the source can play is, by definition, not that source's pitch. */
+    if (app->det_min_hz > 0.0) c->det_min_hz = app->det_min_hz;
+    if (app->det_max_hz > 0.0) c->det_max_hz = app->det_max_hz;
+    if (c->det_max_hz < c->det_min_hz * 2.0)
+        c->det_max_hz = c->det_min_hz * 2.0;
     c->quality = quality_lookup (app->quality_name);
 }
 
@@ -234,6 +252,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"humanize\":%.6g,"
               "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
+              "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
               "\"bypass\":%s,\"leadOn\":%s,\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
@@ -241,6 +260,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.humanize,
               app->root_note, app->root_cents, app->ref_a4,
               app->stretch_cents, app->range_name, app->quality_name,
+              app->det_min_hz, app->det_max_hz,
               c->params.bypass ? "true" : "false",
               c->params.lead_on ? "true" : "false",
               c->params.output_gain_db, c->buffer_frames, c->input_channel,
@@ -290,10 +310,13 @@ static void config_json (const App *app, char *out, size_t cap)
         strncat (out, harm, cap - strlen (out) - 1);
     }
     strncat (out, "]", cap - strlen (out) - 1);
-    snprintf (harm, sizeof (harm), ",\"harmOn\":%s,\"harmLock\":\"%s\",\"midiMode\":%s,\"midiSource\":\"",
+    snprintf (harm, sizeof (harm),
+              ",\"harmOn\":%s,\"harmLock\":\"%s\",\"harmGainDb\":%.4g,"
+              "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
                            ? c->params.harm_lock : 0],
+              c->params.harm_master_db,
               c->params.midi_mode ? "true" : "false");
     strncat (out, harm, cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->midi_source);
@@ -413,6 +436,20 @@ static bool config_apply_json (App *app, const char *json)
             restart = true; /* detection window is baked in at prepare time */
         snprintf (app->range_name, sizeof (app->range_name), "%.15s", str);
     }
+    /* Explicit detection window, 0 = fall back to the preset. Restart-scoped
+       like `range`: the analysis buffers are sized from it at prepare. */
+    if (ae_json_get_number (json, "detectMinHz", &num))
+    {
+        const double lo = num == 0.0 ? 0.0 : num_clamp (num, 20.0, 500.0);
+        if (lo != app->det_min_hz) restart = true;
+        app->det_min_hz = lo;
+    }
+    if (ae_json_get_number (json, "detectMaxHz", &num))
+    {
+        const double hi = num == 0.0 ? 0.0 : num_clamp (num, 100.0, 4000.0);
+        if (hi != app->det_max_hz) restart = true;
+        app->det_max_hz = hi;
+    }
     if (ae_json_get_string (json, "quality", str, sizeof (str)))
     {
         if (quality_lookup (str) != quality_lookup (app->quality_name))
@@ -429,6 +466,8 @@ static bool config_apply_json (App *app, const char *json)
     /* Harmony. */
     if (ae_json_get_bool (json, "harmOn", &b))
         c->params.harm_on = b;
+    if (ae_json_get_number (json, "harmGainDb", &num))
+        c->params.harm_master_db = num_clamp (num, -24.0, 12.0);
     if (ae_json_get_string (json, "harmSource", str, sizeof (str)))
         c->params.harm_source = strcmp (str, "synth") == 0 ? 1 : 0;
     if (ae_json_get_string (json, "leadSource", str, sizeof (str)))
@@ -528,7 +567,10 @@ static bool config_apply_json (App *app, const char *json)
             c->params.harm_ext[v] = (int) num_clamp (arr[v], 0.0, 2.0);
     if ((n5 = ae_json_get_num_array (json, "hg", arr, 5)) >= 0)
         for (int v = 0; v < n5; ++v)
-            c->params.harm_gain_db[v] = num_clamp (arr[v], -60.0, 6.0);
+            /* Ceiling raised from +6: with 0 dB now meaning "at the lead's
+               level", the whole +12 is real headroom above the lead rather
+               than half of it being spent climbing back to parity. */
+            c->params.harm_gain_db[v] = num_clamp (arr[v], -60.0, 12.0);
     if ((n5 = ae_json_get_num_array (json, "hp", arr, 5)) >= 0)
         for (int v = 0; v < n5; ++v)
             c->params.harm_pan[v] = num_clamp (arr[v], -1.0, 1.0);
@@ -635,6 +677,16 @@ static void config_load (App *app)
     buf[n] = '\0';
     fclose (f);
     config_apply_json (app, buf);
+
+    /* Harmony is PERFORMANCE STATE, not a setting, so it does not survive a
+       relaunch. The file still carries harmOn/droneOn (the config echo has
+       one shape, always), but a fresh engine comes up with the ghosts
+       silent. Otherwise ending a set with harmony up means the next launch
+       -- often mid-soundcheck, or at the top of a song, before any chart
+       has said anything about harmony -- starts singing on its own, which
+       is exactly the surprise a controller then has to race to undo. */
+    app->engine_cfg.params.harm_on  = false;
+    app->engine_cfg.params.drone_on = false;
 }
 
 /* ------------------------------------------------------------------ engine */
@@ -761,6 +813,22 @@ static void status_refresh (App *app)
                                  i ? "," : "", ae_synth_patch_name (i));
     snprintf (patches + pn, sizeof (patches) - pn, "]");
 
+    /* Is the synth envelope anywhere in the signal path right now?
+       synthAttackMs/synthReleaseMs are live and always honoured, but only a
+       SYNTH-sourced voice has an envelope at all -- a pitch-shifted ghost
+       just rides the click-free mix ramp. A rig whose voices are all on the
+       shifted source will move those two controls and hear nothing, which
+       reads as a dead control rather than an inapplicable one. This says
+       which it is, so a controller can grey them for the right reason. */
+    bool synth_env_active = app->engine_cfg.params.drone_on;
+    for (int v = 0; v < 5; ++v)
+    {
+        const int s = app->engine_cfg.params.harm_voice_source[v];
+        const int eff = (s == 0 || s == 1) ? s : app->engine_cfg.params.harm_source;
+        if (eff == 1 && app->engine_cfg.params.harm_interval[v] != 0)
+            synth_env_active = true;
+    }
+
     snprintf (buf, sizeof (buf),
         "{\"running\":%s,\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
@@ -770,7 +838,7 @@ static void status_refresh (App *app)
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
-        "\"synthPatches\":%s,\"irError\":\"%s\","
+        "\"synthPatches\":%s,\"synthEnvActive\":%s,\"irError\":\"%s\","
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", err,
         st.input_rate, st.output_rate,
@@ -780,7 +848,7 @@ static void status_refresh (App *app)
         hdeg, midi,
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
-        patches, ir_err,
+        patches, synth_env_active ? "true" : "false", ir_err,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),

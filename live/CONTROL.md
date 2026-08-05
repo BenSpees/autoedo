@@ -141,6 +141,14 @@ down. Both carry the identical string, serialized once per tick server-side.
                    "choir","brass","solina bright","bass"],
                               // the engine's synth-harmony patch table, in
                               // order — build a `synthPatch` picker from this
+  "synthEnvActive": false,    // is the synth envelope in the signal path at
+                              // all? synthAttackMs/synthReleaseMs are live
+                              // and always honoured, but only a SYNTH-sourced
+                              // voice (or the drone) has an envelope — a
+                              // pitch-shifted ghost just rides a ~5 ms
+                              // click-free mix ramp. False means those two
+                              // controls are inapplicable right now, not
+                              // dead: grey them and say why
   "stepCents": 100.0,         // period / edo, stretch-adjusted
   "config": { ... }           // the FULL config object of §4 — the echo your
                               // UI syncs its controls from
@@ -202,7 +210,8 @@ UI behavior you may want to replicate).
 | `leadOn` | bool | live | the corrected lead voice in the output mix. `false` = **harmony only**: ghosts (shifted or synth) still follow the sung pitch while the singer stays out of the engine's output — for rigs that take the dry voice from another bus. `bypass` still wins (a dry passthrough with the lead muted would be silence) |
 | `outputGainDb` | float −60…12 | live | master output gain. The output stage soft-clips: transparent below ≈ −2 dBFS, then a smooth saturation that never reaches full scale — so a many-voice harmony stack (worst on a mono-folded `outputChannel` bus) saturates gently instead of crackling as hard digital clipping. If a big stack sounds *compressed*, that is the clip working: pull `hg` per voice (≈ −6 dB for five voices) or `outputGainDb` down until it cleans up |
 | `quality` | `"low"` \| `"balanced"` \| `"high"` | **restart** | pitch-shifter analysis block: 25 / 45 / 120 ms **at 48 kHz**, giving 31 / 56 / 150 ms of shifter latency. The block is a fixed *sample count* (48k-referenced), so a faster device shortens it in time — at 96 kHz the same presets are 12.5 / 22.5 / 60 ms blocks and the latency halves with them. The analysis window shortens too: frequency resolution at the bottom of the range drops, so if a bass or low guitar warbles at 96 k, step up a preset. Correction is accurate at all three; harmony intervals only stay in tune on low voices at `high` |
-| `range` | string | **restart** | detection window preset: `bass` (55–400 Hz), `baritone` (65–450), `tenor` (80–600), `alto` (100–800), `soprano` (130–1200), `instrument` (65–1600, default), `wide` (40–2000). Unknown names behave as `instrument`. Latency follows the low limit |
+| `range` | string | **restart** | detection window preset: `bass` (55–400 Hz), `baritone` (65–450), `tenor` (80–600), `alto` (100–800), `soprano` (130–1200), `guitar` (78–1400), `instrument` (65–1600, default), `wide` (40–2000). Unknown names behave as `instrument`. Latency follows the low limit |
+| `detectMinHz`, `detectMaxHz` | float, 0 or 20–500 / 100–4000 | **restart** | explicit detection window, overriding whatever `range` names. `0` (default) = use the preset. **Set these for any instrument whose real range you know.** A period longer than the lowest note the source can play is, by definition, not that source's pitch, and a window that admits one invites a subharmonic lock — the classic "the guitar suddenly went an octave down". The engine also runs an octave guard inside the detector (it prefers the shortest lag whose periodicity is within 90% of the best), but the cheapest fix is to not offer it the wrong answer. `detectMaxHz` is raised to `2 × detectMinHz` if it would otherwise be below it |
 
 ### Devices
 | Key | Type | Applies | Meaning |
@@ -220,7 +229,8 @@ UI behavior you may want to replicate).
 ### Harmony (Xentar `hm`/`hx` packing)
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
-| `harmOn` | bool | live | master harmony switch |
+| `harmOn` | bool | live | master harmony switch. **Deliberately not restored from the config file**: it is performance state, not a setting, so a fresh engine always comes up with the ghosts silent no matter what was on when the last instance exited. (`droneOn` is the same.) The key is still written to the file and still echoed — only the *launch value* is forced false |
+| `harmGainDb` | float −24…+12 | live | **harmony bus master**: one gain over every ghost — shifted, synth and drone alike — applied last on the bus, after the harmony IR and tilt, so pulling it down takes the reverb tail with it. It never touches the lead. Per-voice `hg` trims ride **on top of** it, not instead of it: `hg[v] = −6` under `harmGainDb = −12` is −18 dB on that voice. Smoothed over ~5 ms, so it is safe to sweep live |
 | `harmSource` | `"voice"` \| `"synth"` | live | what the ghosts are made of: pitch-shifted copies of the live input (classic harmonizer) or the built-in synth at the same target degrees. Applies to all five voices (phase 1). Synth ghosts are volume-matched to the sung level — `hg` trims from parity — and, unlike shifted ghosts, ring past the end of the sung note by the release time, holding their last pitch and level |
 | `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list. Simple ranks: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). String-machine voices, with per-partial vibrato and the shared **ensemble** (three delay taps swept in opposite senses per side — the Solina/Eminent trick that turns a rank of saws into a wide, breathing section): `strings` (saw ranks at 8'/4'/2'), `solina bright` (the same ranks with the tone control open, for sitting on top of a band), `choir` (vox-humana square/saw blend, rounded down), `brass` (bright detuned saw pair, no ensemble — a section pad that cuts), `bass` (sub-octave rank, filtered down, no ensemble — a wandering bass is a tuning problem, not an effect). Unknown names are ignored |
 | `hSrc` | string[5] | live | **per-voice** source override: `"voice"`, `"synth"`, or `"default"` (follow `harmSource`, the default). Mixed rigs work — voice 1 on the shifter for a real double, voices 2–3 on the synth for a pad — because the shifted and synth passes render independently into one bus |
@@ -251,13 +261,31 @@ A stereo WAV into the mono lead folds to mid; into the harm point its channels c
 | `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward, up first per distance) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |
 | `hm` | int[5], each −72…72 | live | voice intervals in EDO steps; 0 = voice off. Keep within ±`edo` (the pool is ±equave); intervals are *steps*, so re-clamp when you lower the EDO |
 | `hx` | int[5], 0–2 | live | per-voice octave extension, stacking in the voice's direction: `eff = hm + sign(hm)·hx·edo` |
-| `hg` | float[5], −60…6 | live | per-voice gain, dB |
+| `hg` | float[5], −60…+12 | live | per-voice gain, dB, **relative to the lead**: `0` puts that ghost at the lead's own level. Two things make that literally true rather than approximately. The pan law is normalised so dead centre is unity into *both* sides of the bus, matching the mono lead, instead of the textbook 0.707 that would sit every centred ghost a fixed 3 dB down. And the shifter is level-matched across the formant stage — formant compensation costs real energy on upward shifts (≈ −4 dB at a fifth, ≈ −6 dB at an octave), which is a tonal choice with an unwanted level side effect, so a slow (~100 ms) makeup restores it. The ceiling is +12 because the whole range is now headroom above the lead rather than half of it spent climbing back to parity |
 | `hp` | float[5], −1…1 | live | per-voice pan (constant-power) |
 | `hMute`, `hSolo` | 0/1[5] | live | mute / solo (solo among harmony voices only) |
 
-Voices ride the *corrected* pitch; voices landing on one pitch dedupe
-(no gain doubling) but still report their degree in `harmDeg`. Down-shift
-depth is bounded by the detection range's longest period.
+**How a ghost's pitch is derived.** The *interval* comes from the snapped
+degrees: the lead's post-snap degree plus `hm`/`hx`, then the `harmLock`
+quantize, so the interval is exact by construction. That interval is then
+stacked on the pitch the performer is actually **hearing** as the lead —
+`leadOn: true` means the engine's corrected lead, `leadOn: false` means the
+note that was really played, because with the lead muted the reference in
+the room is the instrument itself. Shifted and synth ghosts use the same
+number, so a voice on either source lands on the same pitch.
+
+That second half matters whenever the lead is not fully corrected — `amount`
+below 1, a note inside the `toleranceCents` dead zone, or a glide still in
+flight. In all three the lead sits off its ideal degree, and a ghost pinned
+to the *degree's* ideal frequency beats against it. With `amount: 1` and the
+note settled the two definitions coincide exactly, so nothing changes for a
+fully-corrected lead. If ghosts still read out of tune against the
+instrument, check `refA4` and `stretchCents` against how it is actually
+tuned: the whole grid hangs off those two.
+
+Voices landing on one pitch dedupe (no gain doubling) but still report their
+degree in `harmDeg`. Down-shift depth is bounded by the detection range's
+longest period.
 
 ### MIDI Harmony
 | Key | Type | Applies | Meaning |
@@ -348,7 +376,15 @@ with offline dimming + reconnect · syncs controls from the config echo with
 a dirty-window guard · surfaces `running:false` + `error` with a restart
 affordance · batches restart-triggering keys · handles the chromatic
 fallback and largest-gap warning · re-clamps `hm` and re-labels intervals on
-EDO change · re-sends virtual MIDI after restarts.
+EDO change · re-sends virtual MIDI after restarts · greys the synth envelope
+controls on `synthEnvActive:false` (inapplicable, not dead).
+
+**Deciding whether a key is real.** The config echo is the contract: a key
+that appears in `status.config` is implemented, and the value that comes
+back is the value the engine is using — clamped if you sent something out of
+range. A key the engine does not know is dropped silently, so it never
+appears in the echo; comparing what you sent against what came back is the
+whole test, and it needs no version negotiation.
 
 ## 10. Multi-instance rigs (one engine per input channel)
 

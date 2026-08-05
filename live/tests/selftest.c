@@ -114,6 +114,47 @@ static void test_yin (void)
     ae_yin_free (&y);
 }
 
+/* The octave guard. A plucked string with a weak fundamental and alternating
+   partial phases is the classic subharmonic trap: d'(tau) at the true period
+   sits above the threshold while 2*tau dips below it, so an unguarded YIN
+   reports the note an octave down -- the "guitar suddenly goes bassy" bug. */
+static void test_yin_octave_guard (void)
+{
+    AeYin y;
+    memset (&y, 0, sizeof (y));
+    ae_yin_prepare (&y, 48000.0, 4096, 60.0, 1600.0);
+
+    float frame[4096];
+    const double f0 = 165.0; /* E3, low on a guitar but well inside the range */
+    for (int i = 0; i < 4096; ++i)
+    {
+        const double t = 2.0 * M_PI * f0 * i / 48000.0;
+        /* Fundamental barely there, the partials carrying the note, and
+           every other one inverted so the waveform does not repeat cleanly
+           until two periods have gone by. */
+        frame[i] = (float) (0.04 * sin (t)
+                          + 0.50 * sin (2.0 * t + 3.0)
+                          - 0.45 * sin (3.0 * t)
+                          + 0.40 * sin (4.0 * t + 1.0)
+                          - 0.30 * sin (5.0 * t));
+    }
+
+    const AeYinResult r = ae_yin_process (&y, frame, 4096);
+    CHECK (r.voiced, "octave guard: rich tone reads as voiced");
+    CHECK (r.frequency_hz > f0 * 0.94,
+           "octave guard: no subharmonic (got %.1f Hz, note is %.1f)",
+           r.frequency_hz, f0);
+
+    /* And the guard must not invent an octave: a pure tone stays put, and a
+       genuinely low note is not dragged up to its own second partial. */
+    for (int i = 0; i < 4096; ++i)
+        frame[i] = (float) (0.5 * sin (2.0 * M_PI * 82.4 * i / 48000.0));
+    const AeYinResult lo = ae_yin_process (&y, frame, 4096);
+    CHECK (fabs (lo.frequency_hz - 82.4) < 1.5,
+           "octave guard: low E stays low (got %.1f Hz)", lo.frequency_hz);
+    ae_yin_free (&y);
+}
+
 static void test_correction (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -345,15 +386,16 @@ static void test_synth_harmony (void)
            "synth ghost is the fifth (P5 %.3g vs root %.3g)", p_fifth, p_root);
 
     /* Volume match: the ghost sits at the sung level, like a shifted copy
-       would -- harm_l carries the constant-power pan share (cos pi/4) of a
-       ghost driven to the input's RMS. */
+       would. A centred voice at 0 dB reaches each side of the bus at UNITY
+       -- the same level the mono lead reaches each side with -- so parity
+       with the lead is parity with the input RMS, no pan-law discount. */
     double in_sq = 0.0, gl_sq = 0.0;
     for (int i = sung - 24000; i < sung; ++i)
     {
         in_sq += (double) in[i] * in[i];
         gl_sq += (double) hl[i] * hl[i];
     }
-    const double want_rms = sqrt (in_sq / 24000.0) * 0.7071;
+    const double want_rms = sqrt (in_sq / 24000.0);
     const double got_rms  = sqrt (gl_sq / 24000.0);
     CHECK (got_rms > want_rms * 0.6 && got_rms < want_rms * 1.6,
            "synth volume-matches the voice (got %.3g want %.3g)",
@@ -388,6 +430,309 @@ static void test_synth_harmony (void)
     ae_corrector_free (p);
     free (p);
     free (in); free (hl); free (hr);
+}
+
+/* Drive one steady tone through a corrector and report the RMS of the lead
+   and of the harmony bus's left side. Shared by the two tests below. */
+static void harm_levels (int source, double master_lin, double voice_gain,
+                         double *lead_rms, double *harm_rms, double *in_rms)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 12;         /* an equave up: one voice, centred */
+    voices[0].gain     = voice_gain;
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_harm_master (p, master_lin);
+    ae_corrector_set_synth (p, source, ae_synth_patch_find ("sine"), 5.0, 200.0);
+
+    const int total = 96000;
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *hl = calloc ((size_t) total, sizeof (float));
+    float *hr = calloc ((size_t) total, sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase));
+    }
+    float *lead = malloc ((size_t) total * sizeof (float));
+    memcpy (lead, in, (size_t) total * sizeof (float));
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, lead + off, hl + off, hr + off, n);
+    }
+
+    /* Measure over the last half second, well past every ramp. */
+    const int w = 24000, s = total - w;
+    double l_sq = 0.0, h_sq = 0.0, i_sq = 0.0;
+    for (int i = s; i < total; ++i)
+    {
+        l_sq += (double) lead[i] * lead[i];
+        h_sq += (double) hl[i] * hl[i];
+        i_sq += (double) in[i] * in[i];
+    }
+    *lead_rms = sqrt (l_sq / w);
+    *harm_rms = sqrt (h_sq / w);
+    *in_rms   = sqrt (i_sq / w);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (hl); free (hr); free (lead);
+}
+
+/* harmGainDb: one master over the whole ghost bus, on top of the per-voice
+   trims, that never touches the lead. Plus the parity the master rides on --
+   a 0 dB voice sits at the lead's level rather than 3 dB under it. */
+static void test_harm_master (void)
+{
+    double lead0, harm0, in0;
+    harm_levels (AE_HARM_SRC_SYNTH, 1.0, 1.0, &lead0, &harm0, &in0);
+    CHECK (harm0 > in0 * 0.8 && harm0 < in0 * 1.25,
+           "harmony parity: 0 dB synth ghost sits at the lead's level "
+           "(ghost %.4g, input %.4g)", harm0, in0);
+
+    double leadS, harmS, inS;
+    harm_levels (AE_HARM_SRC_VOICE, 1.0, 1.0, &leadS, &harmS, &inS);
+    CHECK (harmS > inS * 0.7 && harmS < inS * 1.4,
+           "harmony parity: 0 dB shifted ghost sits at the lead's level "
+           "(ghost %.4g, input %.4g)", harmS, inS);
+
+    /* -12 dB master: a quarter of the amplitude on the bus, and the lead
+       bit-for-bit untouched. */
+    double lead1, harm1, in1;
+    harm_levels (AE_HARM_SRC_SYNTH, 0.25, 1.0, &lead1, &harm1, &in1);
+    CHECK (fabs (harm1 - harm0 * 0.25) < harm0 * 0.02,
+           "harmGainDb scales the ghost bus (%.4g vs %.4g expected)",
+           harm1, harm0 * 0.25);
+    CHECK (fabs (lead1 - lead0) < lead0 * 1e-6,
+           "harmGainDb leaves the lead alone (%.6g vs %.6g)", lead1, lead0);
+
+    /* Per-voice trim rides ON TOP of the master, not instead of it: -6 dB
+       on the voice under a -12 dB master is -18 dB in total. */
+    double lead2, harm2, in2;
+    harm_levels (AE_HARM_SRC_SYNTH, 0.25, 0.5, &lead2, &harm2, &in2);
+    CHECK (fabs (harm2 - harm0 * 0.125) < harm0 * 0.02,
+           "per-voice trim multiplies the master (%.4g vs %.4g expected)",
+           harm2, harm0 * 0.125);
+
+    /* And the master reaches the shifted voices too, not just the synth. */
+    double lead3, harm3, in3;
+    harm_levels (AE_HARM_SRC_VOICE, 0.25, 1.0, &lead3, &harm3, &in3);
+    CHECK (fabs (harm3 - harmS * 0.25) < harmS * 0.05,
+           "harmGainDb reaches shifted ghosts (%.4g vs %.4g expected)",
+           harm3, harmS * 0.25);
+}
+
+/* synthAttackMs / synthReleaseMs really shape the ghost envelope: they are
+   read live off the config every block, and a longer release measurably
+   holds the pad up after the input stops. */
+static void test_synth_envelope (void)
+{
+    const int sung = 48000, quiet = 48000, total = sung + quiet;
+    const double rel_ms[2] = { 50.0, 1500.0 };
+    double tail[2];
+
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+            voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                                ae_synth_patch_find ("sine"), 5.0, rel_ms[c]);
+
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double phase = 0.0;
+        for (int i = 0; i < sung; ++i)
+        {
+            phase += 2.0 * M_PI * 220.0 / 48000.0;
+            in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+        }
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+        }
+
+        /* Level 300 ms after the input stopped: six release constants for
+           the short setting, a fifth of one for the long. */
+        double sq = 0.0;
+        for (int i = sung + 12000; i < sung + 16800; ++i)
+            sq += (double) hl[i] * hl[i];
+        tail[c] = sqrt (sq / 4800.0);
+
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+
+    CHECK (tail[1] > tail[0] * 20.0,
+           "synthReleaseMs shapes the tail (50 ms %.3g vs 1500 ms %.3g)",
+           tail[0], tail[1]);
+
+    /* Attack: a slow attack must not be at full level a few milliseconds in.
+       Measured on the synth LEAD, whose envelope is the input crossfade, so
+       this is specifically the ghost's own attack being tested. */
+    const double atk_ms[2] = { 1.0, 1000.0 };
+    double onset[2];
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+            voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                                ae_synth_patch_find ("sine"), atk_ms[c], 200.0);
+
+        float *in = calloc ((size_t) sung, sizeof (float));
+        float *hl = calloc ((size_t) sung, sizeof (float));
+        float *hr = calloc ((size_t) sung, sizeof (float));
+        double phase = 0.0;
+        for (int i = 0; i < sung; ++i)
+        {
+            phase += 2.0 * M_PI * 220.0 / 48000.0;
+            in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+        }
+        for (int off = 0; off < sung; off += 512)
+        {
+            const int n = sung - off < 512 ? sung - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+        }
+
+        /* Peak reached in the first 100 ms of the ghost sounding, relative
+           to the settled level at the end of the note. */
+        double pk = 0.0;
+        int first = -1;
+        for (int i = 0; i < sung; ++i)
+            if (fabs (hl[i]) > 1e-4) { first = i; break; }
+        if (first >= 0)
+            for (int i = first; i < first + 4800 && i < sung; ++i)
+                if (fabs (hl[i]) > pk) pk = fabs (hl[i]);
+        double settled = 0.0;
+        for (int i = sung - 4800; i < sung; ++i)
+            if (fabs (hl[i]) > settled) settled = fabs (hl[i]);
+        onset[c] = settled > 0.0 ? pk / settled : 0.0;
+
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+    CHECK (onset[0] > 0.8,
+           "synthAttackMs: a 1 ms attack is up immediately (%.3g)", onset[0]);
+    CHECK (onset[1] < 0.35,
+           "synthAttackMs: a 1 s attack is still climbing (%.3g vs fast %.3g)",
+           onset[1], onset[0]);
+}
+
+/* Peak-search the strongest partial near `guess` (Goertzel over a fine grid).
+   YIN would average the inharmonic upper partials; this reads the one
+   frequency being asked about. */
+static double peak_near (const float *buf, int n, double guess, double fs)
+{
+    double best_f = guess, best_p = -1.0;
+    for (double f = guess * 0.94; f <= guess * 1.06; f += guess * 0.0005)
+    {
+        const double p = goertzel (buf, n, f, fs);
+        if (p > best_p) { best_p = p; best_f = f; }
+    }
+    return best_f;
+}
+
+/* A ghost takes its INTERVAL from the snapped degrees but stacks it on the
+   pitch actually being heard as the lead. With the lead only half-corrected,
+   a ghost pinned to the degree's ideal frequency would beat against it; this
+   pins the failure at 20 cents, which is audible and was the report. */
+static void test_harmony_anchor (void)
+{
+    /* A3 (degree 45 at 12-EDO off the C0 anchor), sung 40 cents sharp, with
+       Amount at 0.5 -- so the lead comes out 20 cents sharp of 220. */
+    const double sharp_c = 40.0;
+    const double in_hz   = 220.0 * pow (2.0, sharp_c / 1200.0);
+    const double lead_hz = 220.0 * pow (2.0, 0.5 * sharp_c / 1200.0);
+    const double fifth   = pow (2.0, 7.0 / 12.0);
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    ae_corrector_set_amount (p, 0.5);
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_corrector_set_harmony (p, true, 1 /* mask lock */, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("sine"), 5.0, 200.0);
+
+    const int total = 98304;
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *hl = calloc ((size_t) total, sizeof (float));
+    float *hr = calloc ((size_t) total, sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * in_hz / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.15 * sin (2.0 * phase));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
+    }
+
+    const double want = lead_hz * fifth;         /* on the audible lead */
+    const double ideal = 220.0 * fifth;          /* on the degree's ideal */
+    const double got = peak_near (hl + total - 48000, 48000, want, 48000.0);
+    const double err_c = 1200.0 * log2 (got / want);
+    CHECK (fabs (err_c) < 6.0,
+           "harmony anchors to the audible lead (%.2f Hz, wanted %.2f, "
+           "%.1f cents off; the old degree-anchored answer was %.2f)",
+           got, want, err_c, ideal);
+
+    /* With Amount back at 1 the two definitions coincide, so a fully
+       corrected lead is unchanged by any of this. */
+    ae_corrector_set_amount (p, 1.0);
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        float blk[512];
+        memcpy (blk, in + off, (size_t) n * sizeof (float));
+        ae_corrector_process (p, blk, hl + off, hr + off, n);
+    }
+    const double got1 = peak_near (hl + total - 48000, 48000, ideal, 48000.0);
+    CHECK (fabs (1200.0 * log2 (got1 / ideal)) < 6.0,
+           "a fully corrected lead still gives the exact degree (%.2f Hz, "
+           "wanted %.2f)", got1, ideal);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (hl); free (hr);
 }
 
 static void test_midi_harmony (void)
@@ -1409,7 +1754,11 @@ int main (void)
 {
     test_tuning();
     test_yin();
+    test_yin_octave_guard();
     test_correction();
+    test_harm_master();
+    test_harmony_anchor();
+    test_synth_envelope();
     test_walk();
     test_harmony();
     test_synth_harmony();

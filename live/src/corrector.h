@@ -137,6 +137,8 @@ typedef struct
 
     /* Harmony voices -------------------------------------------------------- */
     bool        harm_on;
+    bool        lead_on;   /* corrected lead is in the output: decides which
+                              pitch the ghosts anchor to (see set_lead_on) */
     int         harm_lock; /* 0 = off, 1 = mask, 2 = JI landmarks */
     AeHarmVoice harm[AE_HARM_VOICES];
 
@@ -146,6 +148,12 @@ typedef struct
     double    h_mix[AE_HARM_VOICES];       /* smoothed mix gain (click-free) */
     double    h_gl[AE_HARM_VOICES];        /* constant-power pan gains */
     double    h_gr[AE_HARM_VOICES];
+
+    /* Harmony-bus master, linear. Rides on top of the per-voice trims and
+       reaches every ghost -- shifted, synth and drone -- and never the
+       lead. `_cur` is the smoothed value the audio actually sees. */
+    double    harm_master;
+    double    harm_master_cur;
     _Atomic int h_deg_out[AE_HARM_VOICES]; /* live ghost degree (UI) */
 
     /* Synth harmony source ------------------------------------------------- */
@@ -306,6 +314,20 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
 /* Configure the harmony voices (audio thread, between blocks). */
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES]);
+
+/* Harmony-bus master gain, LINEAR (audio thread, between blocks). One knob
+   over the whole ghost bus: it multiplies every harmony voice -- shifted,
+   synth and drone alike -- on top of their per-voice trims, and never
+   touches the lead. Smoothed internally, so it is safe to sweep live. */
+void ae_corrector_set_harm_master (AeCorrector *p, double gain_lin);
+
+/* Whether the corrected lead is in the engine's output. This is not a
+   level: it tells the harmony which pitch the player is actually hearing
+   as the lead, so the ghosts can be an exact interval above it (see
+   ae_corrector_set_harmony). With the lead in the mix that reference is
+   the corrected pitch; with it muted the performer is hearing their own
+   instrument, so the reference is the pitch they really played. */
+void ae_corrector_set_lead_on (AeCorrector *p, bool on);
 
 /* Configure the harmony source and synth voice (audio thread, between
    blocks). Out-of-range patch indices clamp into the table. */

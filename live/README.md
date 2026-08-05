@@ -127,9 +127,11 @@ strips the window to the ruler + a stage-readable readout.
 - **⚙ engine popover** — input/output device (may be different devices at
   different rates; the app resamples and compensates drift), buffer size,
   **shifter quality** (see below),
-  detection-range preset (Bass … Soprano / Instrument / Wide; changing it
-  restarts the engine — announced by a toast — and latency follows the low
-  limit), output gain, lane toggles, restart, and any engine error.
+  detection-range preset (Bass … Soprano / Guitar / Instrument / Wide;
+  changing it restarts the engine — announced by a toast — and latency
+  follows the low limit; an external controller can also give an explicit
+  window with `detectMinHz`/`detectMaxHz`), output gain, lane toggles,
+  restart, and any engine error.
 - **Header** — Bypass, A/B config slots with Copy A→B, Preset menu,
   Perform toggle.
 - **Harmony strip** (Xentar smart-harmonizer emulation) — a third surface,
@@ -140,8 +142,15 @@ strips the window to the ruler + a stage-readable readout.
   independent voice pods (V1 pink · V2 violet · V3 cyan · V4 lime · V5
   blue), each with the full interval pool (±1 … ±equave, labeled in
   steps + cents), octave-extension dots (0–2, stacking in the voice's
-  direction), gain and pan mini-knobs, and mute/solo. Voices ride the
-  *corrected* pitch, dedupe when they land on one pitch, and render as
+  direction), gain and pan mini-knobs, and mute/solo — plus a **bus
+  master** on the collapsed line, one fader over every ghost (shifted and
+  synth alike) that never touches the lead. A voice at 0 dB sits at the
+  lead's own level: the pan law is normalised so centre is unity into both
+  sides, and the shifter is level-matched across its formant stage, which
+  otherwise costs several dB on upward shifts. Each ghost takes its
+  *interval* from the snapped degrees and stacks it on the pitch actually
+  being heard as the lead, so it stays consonant even when the lead is only
+  partly corrected. Voices dedupe when they land on one pitch, and render as
   colored ghost ticks on the ruler (gold when a voice lands on the root).
   **Learn-from-ruler**: select a pod, then shift-click a lug to set its
   interval. Harmony state persists as `hm`/`hx`/`hg`/`hp` fields.

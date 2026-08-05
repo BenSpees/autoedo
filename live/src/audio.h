@@ -58,7 +58,10 @@ typedef struct
     int      harm_lock;              /* 0 off, 1 mask, 2 JI */
     int      harm_interval[5];       /* signed EDO steps, 0 = voice off */
     int      harm_ext[5];            /* 0..2 octave extension, voice-directed */
-    double   harm_gain_db[5];        /* -60..+6 */
+    double   harm_master_db;         /* -24..+12: master over the whole ghost
+                                        bus, on top of the per-voice trims;
+                                        never touches the lead */
+    double   harm_gain_db[5];        /* -60..+12, 0 = at the lead's level */
     double   harm_pan[5];            /* -1..1 */
     uint32_t harm_mute;              /* bit v */
     uint32_t harm_solo;              /* bit v */

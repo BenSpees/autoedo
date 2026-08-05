@@ -280,6 +280,7 @@
             <option value="tenor">Tenor (80–600 Hz)</option>
             <option value="alto">Alto (100–800 Hz)</option>
             <option value="soprano">Soprano (130–1200 Hz)</option>
+            <option value="guitar">Guitar (78–1400 Hz)</option>
             <option value="instrument" selected>Instrument (65–1600 Hz)</option>
             <option value="wide">Wide (40–2000 Hz)</option>
           </select>
@@ -412,6 +413,10 @@
       <select id="synth-patch" title="synth sound" style="width:auto" hidden></select>
       <input type="number" id="synth-atk" class="num" min="0" max="5000" step="10" title="synth attack, ms" hidden>
       <input type="number" id="synth-rel" class="num" min="0" max="10000" step="10" title="synth release, ms" hidden>
+      <span id="harm-master-wrap" style="display:inline-flex;align-items:center;gap:6px" title="harmony bus master — one gain over every ghost (shifted and synth alike), on top of the per-voice trims. Never touches the lead.">
+        <input type="range" id="harm-master" min="-24" max="12" step="0.5" value="0" style="width:88px">
+        <span class="tab" id="harm-master-val" style="min-width:52px;text-align:right">0.0 dB</span>
+      </span>
       <button id="lead-on" title="the corrected lead voice in the output mix — off = harmony only (ghosts still follow the sung pitch, the singer stays out of this engine's output)">Lead</button>
       <button id="midi-mode"
         title="MIDI Harmony: held MIDI notes override the mask — retune snaps to the nearest held note, harmony locks to the held pitch classes. Middle C = the root in octave 4; one EDO step per semitone. No notes held = normal behavior. Pick the input in ⚙.">MIDI</button>
@@ -1006,6 +1011,7 @@ function harmCfg() { // defaults until the first status lands
   return cfg || { edo: 12, harmOn: false, harmLock: 'mask', hm: [0,0,0,0,0], hx: [0,0,0,0,0],
                   hg: [0,0,0,0,0], hp: [0,0,0,0,0], hMute: [0,0,0,0,0], hSolo: [0,0,0,0,0],
                   harmSource: 'voice', synthPatch: 'pad', synthAttackMs: 80, synthReleaseMs: 500,
+                  harmGainDb: 0,
                   leadOn: true };
 }
 
@@ -1125,7 +1131,7 @@ function buildHarmPods() {
     }
     row.appendChild(dots);
     const gain = miniKnob(row, VOICE_COLORS[v], {
-      min: -24, max: 6,
+      min: -24, max: 12,
       get: () => Math.max(-24, harmCfg().hg[v]),
       onset: x => { const hg = harmCfg().hg.slice(); hg[v] = Math.round(x * 2) / 2; schedulePost({ hg }); updVal(); },
     });
@@ -1185,6 +1191,9 @@ function syncHarm() {
   if (document.activeElement !== $('synth-patch')) $('synth-patch').value = c.synthPatch;
   if (document.activeElement !== $('synth-atk')) $('synth-atk').value = c.synthAttackMs;
   if (document.activeElement !== $('synth-rel')) $('synth-rel').value = c.synthReleaseMs;
+  const hgm = c.harmGainDb === undefined ? 0 : c.harmGainDb;
+  if (document.activeElement !== $('harm-master')) $('harm-master').value = hgm;
+  $('harm-master-val').textContent = `${hgm.toFixed(1)} dB`;
   // collapsed chips: what the voices are, not just how many — and ONLY when
   // collapsed (expanded shows the pods; never the same state twice)
   const chips = $('harm-chips');
@@ -1214,6 +1223,11 @@ function syncHarm() {
 }
 
 $('harm-power').onclick = () => { schedulePost({ harmOn: !harmCfg().harmOn }); syncHarm(); };
+$('harm-master').oninput = e => {
+  const v = parseFloat(e.target.value);
+  $('harm-master-val').textContent = `${v.toFixed(1)} dB`;
+  schedulePost({ harmGainDb: v });
+};
 document.querySelectorAll('#harm-lock button').forEach(b => {
   b.onclick = () => { schedulePost({ harmLock: b.dataset.lock }); syncHarm(); };
 });

@@ -2,6 +2,7 @@
 
 #include <signalsmith-stretch/signalsmith-stretch.h>
 
+#include <cmath>
 #include <cstdio>
 #include <new>       /* std::nothrow */
 #include <type_traits>
@@ -69,6 +70,11 @@ struct AeShifter
     Stretch stretch;
     double  sample_rate;
     int     latency;
+    /* Level matching: slow mean-square trackers either side of the shift,
+       and the makeup gain they imply (ramped, never stepped). */
+    double  ms_in;
+    double  ms_out;
+    double  makeup;
 };
 
 int ae_shifter_block_samples (double sample_rate, int quality)
@@ -109,6 +115,8 @@ AeShifter *ae_shifter_create (double sample_rate, int block_samples)
     do_configure (s->stretch, block_samples, block_samples / 4,
                   std::integral_constant<bool, HasFormants<Stretch>::value>());
     s->latency = s->stretch.inputLatency() + s->stretch.outputLatency();
+    s->ms_in = s->ms_out = 0.0;
+    s->makeup = 1.0;
     return s;
 }
 
@@ -119,8 +127,11 @@ void ae_shifter_destroy (AeShifter *s)
 
 void ae_shifter_reset (AeShifter *s)
 {
-    if (s != NULL)
-        s->stretch.reset();
+    if (s == NULL)
+        return;
+    s->stretch.reset();
+    s->ms_in = s->ms_out = 0.0;
+    s->makeup = 1.0;
 }
 
 void ae_shifter_set_semitones (AeShifter *s, double semitones,
@@ -173,7 +184,58 @@ void ae_shifter_process (AeShifter *s, const float *in, float *out, int n)
     float *ip = const_cast<float *> (in);
     float **ipp = &ip;
     float **opp = &out;
+
+    double sq_in = 0.0;
+    for (int i = 0; i < n; ++i)
+        sq_in += (double) in[i] * in[i];
+
     s->stretch.process (ipp, n, opp, n);
+
+    /* Level matching. Transposition on its own is level-preserving, but
+       FORMANT COMPENSATION is not: re-imposing the original spectral
+       envelope on a shifted spectrum throws away real energy, and the
+       further up you shift the more it costs -- measured here at roughly
+       -4 dB at a fifth and -6 dB at an octave on a harmonic-rich source.
+       That is a tonal choice with a level side effect, and the side effect
+       is not wanted: a harmony voice asked for at 0 dB must arrive at the
+       lead's level, not several dB under it with the operator's trim
+       spending its range climbing back.
+
+       So track the mean square either side of the shift over ~100 ms and
+       restore what the envelope stage took. Slow on purpose: this must
+       correct a standing spectral loss without following the note's own
+       dynamics, which are the performance. The gain ramps across the block
+       rather than stepping, and is clamped to +/-12 dB so a pathological
+       block cannot turn into a burst. */
+    double sq_out = 0.0;
+    for (int i = 0; i < n; ++i)
+        sq_out += (double) out[i] * out[i];
+
+    const double a = 1.0 - exp (-(double) n / (0.100 * s->sample_rate));
+    s->ms_in  += (sq_in / n - s->ms_in) * a;
+    s->ms_out += (sq_out / n - s->ms_out) * a;
+
+    double target = s->makeup;
+    /* Only re-measure on real signal (~ -80 dBFS RMS); silence holds the
+       last gain rather than dividing noise by noise. */
+    if (s->ms_in > 1e-8 && s->ms_out > 1e-8)
+    {
+        target = sqrt (s->ms_in / s->ms_out);
+        if (target < 0.25) target = 0.25;
+        if (target > 4.0)  target = 4.0;
+    }
+
+    if (target != s->makeup || s->makeup != 1.0)
+    {
+        const double step = (target - s->makeup) / n;
+        double g = s->makeup;
+        for (int i = 0; i < n; ++i)
+        {
+            g += step;
+            out[i] = (float) (out[i] * g);
+        }
+        s->makeup = target;
+    }
 }
 
 const char *ae_shifter_version (void)
