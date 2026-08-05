@@ -2445,8 +2445,10 @@ static void test_sample_ghost (void)
     snprintf (dir, sizeof (dir), "%s/piano", root);
     snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
     if (system (cmd) != 0) { CHECK (false, "sample ghost: cannot stage"); return; }
-    /* One long, flat-ish zone at C4 so the ghost's pitch comes entirely
-       from the playback rate. */
+    /* A PURE SINE at C4. The input below carries a strong 2nd harmonic, so
+       a shifted ghost would bring that harmonic along with it and a sample
+       ghost cannot -- which is what tells the two sources apart. A pitch
+       test alone could not: a shifted fifth of A3 is also E4. */
     snprintf (pth, sizeof (pth), "%s/C4.wav", dir); write_wav (pth, 261.6256, 3.0, 0.5);
 
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -2480,7 +2482,7 @@ static void test_sample_ghost (void)
     for (int i = quiet; i < total; ++i)
     {
         ph += 2.0 * M_PI * 220.0 / 48000.0;
-        in[i] = (float) (0.4 * sin (ph) + 0.15 * sin (2.0 * ph));
+        in[i] = (float) (0.4 * sin (ph) + 0.35 * sin (2.0 * ph));
     }
     for (int off = 0; off < total; off += 512)
     {
@@ -2488,13 +2490,103 @@ static void test_sample_ghost (void)
         ae_corrector_process (p, in + off, hl + off, hr + off, n);
     }
 
-    /* The ghost sings E4 (329.63), not the recording's C4 (261.63): the
-       rate did the transposing. */
+    /* Sings E4 (329.63), not the recording's C4 -- the rate transposed it. */
     const double p_fifth = goertzel (hl + quiet + 9600, 24000, 329.63, 48000.0);
     const double p_zone  = goertzel (hl + quiet + 9600, 24000, 261.63, 48000.0);
     CHECK (p_fifth > 8.0 * p_zone,
            "sample ghost sings its own pitch, not the zone's (E4 %.3g vs C4 %.3g)",
            p_fifth, p_zone);
+    /* ...and it is really the SAMPLE: the recording is a pure sine, so the
+       input's strong 2nd harmonic must NOT come along. A shifted ghost
+       would carry it up to 659 Hz. */
+    const double p_h2 = goertzel (hl + quiet + 9600, 24000, 659.26, 48000.0);
+    CHECK (p_h2 < 0.05 * p_fifth,
+           "sample ghost is the recording, not a shifted copy "
+           "(2nd harmonic %.3g vs fundamental %.3g)", p_h2, p_fifth);
+    CHECK (ae_corrector_voice_source (p, 0) == AE_HARM_SRC_SAMPLE,
+           "sample ghost: the source switch actually took");
+
+    ae_corrector_free (p);
+    free (p); free (in); free (hl); free (hr);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* Strike level tracks THIS note, not the last one. Measuring takes 30 ms
+   and the strike cannot wait for it, so a voice is struck at the fast
+   follower's estimate and the window's verdict refines it (ramped). The
+   version this replaced read the LAST completed measurement at strike
+   time, which struck every note at the previous note's level -- exactly
+   wrong the moment the dynamics change. */
+static void test_sample_velocity (void)
+{
+    const char *root = "/tmp/ae-smp-vel";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "sample velocity: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir); write_wav (pth, 261.6256, 3.0, 0.5);
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    char err[256] = "";
+    if (! ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)))
+    { CHECK (false, "sample velocity: bank load (%s)", err); free (p); return; }
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_sample (p, 1.0, -1.0);      /* measure the velocity */
+    ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
+    CHECK (ae_corrector_voice_source (p, 0) == AE_HARM_SRC_SAMPLE,
+           "sample velocity: voice 0 really is on the sample source");
+
+    /* A LOUD note, a long silence, then a QUIETER one. The gap has to
+       outlast the onset detector's slow follower (150 ms) by enough that
+       the second note still reads as an EDGE against it -- a much quieter
+       note too soon after a loud one is inside the first one's decay and
+       is deliberately not an onset. */
+    const int gap = 36864, note = 36864;
+    const int total = gap + note + gap + note;
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *hl = calloc ((size_t) total, sizeof (float));
+    float *hr = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        const bool n1 = i >= gap && i < gap + note;
+        const bool n2 = i >= gap + note + gap;
+        if (! n1 && ! n2) continue;
+        ph += 2.0 * M_PI * 220.0 / 48000.0;
+        const double amp = n1 ? 0.50 : 0.12;      /* ~12 dB apart */
+        in[i] = (float) (amp * (sin (ph) + 0.3 * sin (2.0 * ph)));
+    }
+    /* Sample the STRIKE LEVEL each note actually got, once its 30 ms
+       measuring window has closed and the refinement has settled. The
+       radiated level is the wrong probe here: the voiced gate shapes it
+       too, and would mask the very thing under test. */
+    double loud = -1.0, quiet = -1.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
+        const double g = p->smp[0][p->smp_cur[0]].gain;
+        if (off >= gap + 9600 && off < gap + 12000)                 loud  = g;
+        if (off >= gap + note + gap + 9600
+            && off < gap + note + gap + 12000)                      quiet = g;
+    }
+
+    CHECK (loud > 0.5, "strike level: the loud note strikes hard (%.3f)", loud);
+    CHECK (quiet > 0.0 && quiet < loud * 0.85,
+           "strike level follows THIS note, not the last (loud %.3f vs quiet "
+           "%.3f; striking at the previous note's verdict inverts these)",
+           loud, quiet);
 
     ae_corrector_free (p);
     free (p); free (in); free (hl); free (hr);
@@ -2614,6 +2706,7 @@ int main (void)
     test_makeup_on_plucks();
     test_sampler_bank();
     test_sample_ghost();
+    test_sample_velocity();
     test_lead_wet_tap();
     test_formant_offset();
 

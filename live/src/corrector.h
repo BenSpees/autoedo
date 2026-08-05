@@ -255,6 +255,8 @@ typedef struct
     _Atomic float smp_vel_out;   /* last strike level, for the read-out */
     signed char   smp_rr[AE_SMP_MAX_ZONES * 2]; /* last RR pick per zone+layer */
     unsigned      smp_rng;
+    double        smp_gain_a;    /* per-sample coefficient of the ~15 ms
+                                    ramp the velocity refinement rides */
 
     /* Onset: one pulse per note edge, shared by the attack sound and the
        sample strike -- both need the same "energy appeared" moment, and
@@ -266,10 +268,13 @@ typedef struct
     struct
     {
         const AeSampleRec *rec;
-        double pos, rate, gain, fade;
+        double pos, rate, gain, gain_t, fade;
         int    gen;
     } smp[AE_HARM_VOICES + 1][2]; /* [AE_HARM_VOICES] = the lead */
     int    smp_cur[AE_HARM_VOICES + 1];
+    bool   smp_pending[AE_HARM_VOICES + 1]; /* an onset is waiting for a
+                                               pitch to strike at */
+    int    smp_wait[AE_HARM_VOICES + 1];    /* samples it may keep waiting */
     double smp_env[AE_HARM_VOICES + 1];
 
     /* Attack Sound ---------------------------------------------------------- */

@@ -154,8 +154,8 @@ int ae_synth_patch_find (const char *name)
 void ae_corrector_set_synth (AeCorrector *p, int source, int patch,
                              double attack_ms, double release_ms)
 {
-    p->harm_source = source == AE_HARM_SRC_SYNTH ? AE_HARM_SRC_SYNTH
-                                                 : AE_HARM_SRC_VOICE;
+    p->harm_source = (source == AE_HARM_SRC_SYNTH || source == AE_HARM_SRC_SAMPLE)
+                         ? source : AE_HARM_SRC_VOICE;
     p->synth_patch = patch < 0 ? 0
                    : patch >= K_SYNTH_PATCHES ? K_SYNTH_PATCHES - 1 : patch;
     p->synth_attack_ms  = dclamp (attack_ms, 0.0, 5000.0);
@@ -168,10 +168,12 @@ void ae_corrector_set_voice_sources (AeCorrector *p,
     for (int v = 0; v < AE_HARM_VOICES; ++v)
     {
         const int s = sources[v];
-        p->h_source[v] = (s == AE_HARM_SRC_VOICE || s == AE_HARM_SRC_SYNTH)
+        p->h_source[v] = (s == AE_HARM_SRC_VOICE || s == AE_HARM_SRC_SYNTH
+                          || s == AE_HARM_SRC_SAMPLE)
                              ? s : AE_HARM_SRC_DEFAULT;
     }
-    p->lead_source = lead == AE_HARM_SRC_SYNTH ? AE_HARM_SRC_SYNTH : AE_HARM_SRC_VOICE;
+    p->lead_source = (lead == AE_HARM_SRC_SYNTH || lead == AE_HARM_SRC_SAMPLE)
+                         ? lead : AE_HARM_SRC_VOICE;
 }
 
 void ae_corrector_set_synth_shape (AeCorrector *p, double ensemble_depth,
@@ -686,11 +688,20 @@ void ae_corrector_reset (AeCorrector *p)
     if (p->smp_mix <= 0.0) p->smp_mix = 1.0;
     if (p->smp_vel_fixed == 0.0) p->smp_vel_fixed = -1.0;
     p->smp_rng = 0x2545f491u;
+    /* Voices default to "follow the global source" -- the documented
+       meaning of AE_HARM_SRC_DEFAULT. A zeroed struct would otherwise read
+       as an explicit per-voice AE_HARM_SRC_VOICE override and silently
+       pin every voice to the shifter. */
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        p->h_source[v] = AE_HARM_SRC_DEFAULT;
+    p->smp_gain_a = 1.0 - exp (-1.0 / (0.015 * p->fs));
     p->onset_pulse = false;
     p->vel_win = 0; p->vel_peak = 0.0;
     memset (p->smp_rr, -1, sizeof (p->smp_rr));
     memset (p->smp, 0, sizeof (p->smp));
     memset (p->smp_cur, 0, sizeof (p->smp_cur));
+    memset (p->smp_pending, 0, sizeof (p->smp_pending));
+    memset (p->smp_wait, 0, sizeof (p->smp_wait));
     memset (p->smp_env, 0, sizeof (p->smp_env));
     atomic_store_explicit (&p->smp_vel_out, 0.7f, memory_order_relaxed);
     p->atk_last_dir   = 0;
@@ -980,6 +991,16 @@ bool ae_corrector_load_samples (AeCorrector *p, const char *root,
     return true;
 }
 
+/* Peak amplitude -> strike level, across 40 dB: -40 dBFS is 0, full scale
+   is 1. Used for both the estimate at the strike and the measurement that
+   refines it, so the two are on the same scale by construction. */
+static double vel_from_peak (double peak)
+{
+    const double db = peak > 1e-6 ? 20.0 * log10 (peak) : -120.0;
+    const double v = (db + 40.0) / 40.0;
+    return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+}
+
 /* Strike one voice: pick the recording, set the read cursor and the
    fractional rate. The OLD slot is left ringing on a 6 ms fade rather than
    cut, which is the sampler equivalent of Xentar's node-swap retrigger --
@@ -1010,7 +1031,8 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
     /* Fractional and UNQUANTISED -- that is what lands a 22-EDO degree
        exactly off a 12-per-octave map. */
     p->smp[v][nxt].rate = hz / rec_hz;
-    p->smp[v][nxt].gain = vel;
+    p->smp[v][nxt].gain   = vel;
+    p->smp[v][nxt].gain_t = vel;
     p->smp[v][nxt].fade = 1.0;
     p->smp[v][nxt].gen  = atomic_load_explicit (&p->smp_gen, memory_order_relaxed);
 }
@@ -1036,6 +1058,11 @@ static double sample_tick (AeCorrector *p, int v, int slot)
     const double f = p->smp[v][slot].pos - k;
     const double x = (1.0 - f) * r->pcm[k] + f * r->pcm[k + 1];
     p->smp[v][slot].pos += p->smp[v][slot].rate;
+    /* The refinement RAMPS (~15 ms) rather than stepping: a level
+       correction that slides is heard as the note settling, a step is
+       heard as a second event. */
+    p->smp[v][slot].gain += (p->smp[v][slot].gain_t - p->smp[v][slot].gain)
+                          * p->smp_gain_a;
     return x * p->smp[v][slot].gain * p->smp[v][slot].fade;
 }
 
@@ -1177,11 +1204,18 @@ static void detect_onset (AeCorrector *p, int num_samples)
         p->vel_win -= num_samples;
         if (p->vel_win <= 0)
         {
-            const double db = p->vel_peak > 1e-6 ? 20.0 * log10 (p->vel_peak) : -120.0;
-            double vel = (db + 40.0) / 40.0;   /* -40 dBFS -> 0, 0 dBFS -> 1 */
-            if (vel < 0.0) vel = 0.0;
-            if (vel > 1.0) vel = 1.0;
+            const double vel = vel_from_peak (p->vel_peak);
             atomic_store_explicit (&p->smp_vel_out, (float) vel, memory_order_relaxed);
+            /* Refine the strike this window was measuring -- the LEVEL of
+               the note now sounding, not the next one's. Only the level:
+               the layer (soft vs main) is a different recording and was
+               committed at the strike, so a note whose estimate landed the
+               wrong side of the soft threshold keeps that timbre. It is
+               the one thing measuring cannot fix without delaying the
+               strike, which is the latency the feature exists to hide. */
+            if (p->smp_vel_fixed < 0.0)
+                for (int v = 0; v <= AE_HARM_VOICES; ++v)
+                    p->smp[v][p->smp_cur[v]].gain_t = vel;
         }
     }
 }
@@ -2156,9 +2190,15 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
     double g_shift, g_smp;
     sample_layer_gains (p->smp_mix, &g_shift, &g_smp);
 
+    /* The strike level. Measuring takes 30 ms and the strike cannot wait
+       for it, so a struck voice takes the fast follower's reading NOW and
+       the window's verdict corrects it 30 ms later (see detect_onset).
+       Reading smp_vel_out here instead would strike every note at the
+       PREVIOUS note's level, which is exactly wrong the moment the
+       dynamics change. */
     const double vel = p->smp_vel_fixed >= 0.0
         ? p->smp_vel_fixed
-        : (double) atomic_load_explicit (&p->smp_vel_out, memory_order_relaxed);
+        : vel_from_peak (p->atk_fast * AE_SQRT2); /* RMS -> peak estimate */
     const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
     const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
 
@@ -2172,10 +2212,31 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         const double hz = ref * pow (2.0, p->h_cents_cur[v] / 1200.0);
         (void) period;
 
-        /* Strike on the note edge; otherwise only the RATE moves, which is
-           what keeps a held note one struck note instead of a stutter. */
-        if (gate && p->onset_pulse)
-            sample_strike (p, v, hz, vel);
+        /* Strike on the note EDGE -- but a pitched sample cannot be struck
+           before there is a pitch to strike at, and the voicing gate lags
+           the energy edge by several detection hops. So the onset ARMS the
+           strike and it fires at the first moment a pitch exists: instantly
+           when the voice already has a glide position (the common case
+           inside a phrase, so the strike really is at the onset), and on
+           the first lock for a cold note. The attack sound covers the
+           interval either way -- that is what it is for. Waiting is capped
+           so a pending strike cannot fire into the next phrase. */
+        if (p->onset_pulse)
+        {
+            p->smp_pending[v] = true;
+            p->smp_wait[v] = (int) (0.20 * p->fs);
+        }
+        if (p->smp_pending[v])
+        {
+            p->smp_wait[v] -= num_samples;
+            if (p->smp_wait[v] <= 0)
+                p->smp_pending[v] = false;
+            else if ((gate || p->h_glide_valid[v]) && hz > 0.0)
+            {
+                sample_strike (p, v, hz, vel);
+                p->smp_pending[v] = false;
+            }
+        }
         for (int k = 0; k < 2; ++k)
             if (p->smp[v][k].rec != NULL && p->smp[v][k].rate > 0.0)
             {
@@ -2186,7 +2247,7 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
             }
 
         double env = p->smp_env[v];
-        if (! gate && env < 1e-4
+        if (! gate && env < 1e-4 && ! p->smp_pending[v]
             && p->smp[v][0].rec == NULL && p->smp[v][1].rec == NULL)
         {
             p->smp_env[v] = 0.0;
@@ -2329,10 +2390,24 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const double hz =
             (double) atomic_load_explicit (&p->target_hz_out, memory_order_relaxed);
         const double vel = p->smp_vel_fixed >= 0.0 ? p->smp_vel_fixed
-            : (double) atomic_load_explicit (&p->smp_vel_out, memory_order_relaxed);
+            : vel_from_peak (p->atk_fast * AE_SQRT2);
         const int L = AE_HARM_VOICES;
-        if (p->onset_pulse && hz > 0.0)
-            sample_strike (p, L, hz, vel);
+        if (p->onset_pulse)
+        {
+            p->smp_pending[L] = true;
+            p->smp_wait[L] = (int) (0.20 * p->fs);
+        }
+        if (p->smp_pending[L])
+        {
+            p->smp_wait[L] -= num_samples;
+            if (p->smp_wait[L] <= 0)
+                p->smp_pending[L] = false;
+            else if (hz > 0.0)
+            {
+                sample_strike (p, L, hz, vel);
+                p->smp_pending[L] = false;
+            }
+        }
         const int cur = p->smp_cur[L], old = cur == 0 ? 1 : 0;
         if (p->smp[L][cur].rec != NULL && hz > 0.0)
         {
