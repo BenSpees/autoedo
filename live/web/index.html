@@ -434,9 +434,15 @@
       </span>
       <span class="dimtxt">Harm sound</span>
       <span class="seg" id="harm-src" title="what the ghosts are made of: pitch-shifted live audio, or the built-in synth (volume-matched to the voice, rings by the release time)">
-        <button data-src="voice">Voice</button><button data-src="synth">Synth</button>
+        <button data-src="voice">Voice</button><button data-src="synth">Synth</button><button data-src="sample">Sample</button>
       </span>
       <select id="synth-patch" title="synth sound" style="width:auto" hidden></select>
+      <select id="smp-inst" title="sampled instrument — struck at each note onset and re-pitched, never re-struck, for as long as that note lasts" style="width:auto" hidden>
+        <option>piano</option><option>electric</option><option>acoustic</option>
+        <option>bass</option><option>vibraphone</option><option>choir</option>
+        <option>harpsichord</option><option>oboe</option>
+      </select>
+      <input type="number" id="smp-mix" class="num" min="0" max="1" step="0.05" title="sample layer blend: 0 = the shifted ghost alone, 1 = the sample alone, 0.5 = BOTH at unity" style="width:52px" hidden>
       <input type="number" id="synth-atk" class="num" min="0" max="5000" step="10" title="synth attack, ms" hidden>
       <input type="number" id="synth-rel" class="num" min="0" max="10000" step="10" title="synth release, ms" hidden>
       <span class="dimtxt">Attack</span>
@@ -1053,6 +1059,7 @@ function harmCfg() { // defaults until the first status lands
                   harmGainDb: 0, harmGlideMs: 0, harmSustain: true, harmHold: false,
                   leadSource: 'voice', attackSound: 'off', attackGainDb: -26,
                   sendChannel: 0, sendContent: 'wet', sendGainDb: 0, sendOn: false,
+                  sampleInstrument: 'piano', sampleMix: 1, sampleVelocity: -1,
                   formantSemitones: 0,
                   hd: [0,0,0,0,0],
                   leadOn: true };
@@ -1236,8 +1243,15 @@ function syncHarm() {
   document.querySelectorAll('#harm-lock button').forEach(b =>
     b.classList.toggle('on', b.dataset.lock === c.harmLock));
   const synth = c.harmSource === 'synth';
+  const smp = c.harmSource === 'sample';
+  $('smp-inst').hidden = $('smp-mix').hidden = !smp;
+  if (document.activeElement !== $('smp-inst'))
+    $('smp-inst').value = c.sampleInstrument || 'piano';
+  if (document.activeElement !== $('smp-mix'))
+    $('smp-mix').value = c.sampleMix === undefined ? 1 : c.sampleMix;
   document.querySelectorAll('#harm-src button').forEach(b =>
-    b.classList.toggle('on', b.dataset.src === (synth ? 'synth' : 'voice')));
+    b.classList.toggle('on',
+      b.dataset.src === (smp ? 'sample' : synth ? 'synth' : 'voice')));
   document.querySelectorAll('#lead-src button').forEach(b =>
     b.classList.toggle('on', b.dataset.lsrc === (c.leadSource === 'synth' ? 'synth' : 'voice')));
   $('lead-on').classList.toggle('on', c.leadOn !== false);
@@ -1309,6 +1323,11 @@ for (const ev of ['pointerup', 'pointerleave', 'pointercancel'])
 $('lead-gain').onchange = e => {
   const v = Math.max(-60, Math.min(12, +e.target.value || 0));
   e.target.value = v; schedulePost({ leadGainDb: v });
+};
+$('smp-inst').onchange = e => schedulePost({ sampleInstrument: e.target.value });
+$('smp-mix').onchange = e => {
+  const v = Math.max(0, Math.min(1, +e.target.value || 0));
+  e.target.value = v; schedulePost({ sampleMix: v });
 };
 $('formant-hold').onchange = e => schedulePost({ formantHold: e.target.checked });
 $('formant-st').onchange = e => {

@@ -248,6 +248,34 @@ static void test_walk (void)
     CHECK (ae_walk_to_enabled (5, 12, none) == 5, "walk: empty mask unchanged");
 }
 
+/* The mask tie-break: at equal distance the walk must go AWAY from the
+   lead, not up by fiat. Up-first is right for a ghost above and exactly
+   wrong for one below -- on a tie it pulls the ghost toward the lead, so a
+   third can collapse onto a second or a unison. */
+static void test_walk_tiebreak (void)
+{
+    bool mask[AE_MAX_EDO];
+    memset (mask, 0, sizeof (mask));
+    /* 12-EDO with pc 5 dark and both neighbours lit: a tie at distance 1. */
+    for (int d = 0; d < 12; ++d) mask[d] = true;
+    mask[5] = false;
+
+    CHECK (ae_walk_to_enabled_dir (5, 12, mask, true) == 6,
+           "tie-break: a ghost ABOVE the lead resolves upward");
+    CHECK (ae_walk_to_enabled_dir (5, 12, mask, false) == 4,
+           "tie-break: a ghost BELOW the lead resolves downward");
+    /* The historical wrapper keeps up-first, which is what a lead being
+       corrected onto the mask still wants (no second voice to stay away
+       from). */
+    CHECK (ae_walk_to_enabled (5, 12, mask) == 6,
+           "tie-break: the plain walk is unchanged (up-first)");
+
+    /* No tie: the nearer side wins whatever the preference. */
+    mask[4] = false;
+    CHECK (ae_walk_to_enabled_dir (5, 12, mask, false) == 6,
+           "tie-break: only applies to a TIE, never overrides distance");
+}
+
 static void test_harmony (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -2311,6 +2339,169 @@ static void test_formant_offset (void)
     free (in); free (out0); free (out4);
 }
 
+/* ---- the sample source ------------------------------------------------- */
+
+/* Write a mono float32 WAV whose content is a decaying sine at `hz`, so a
+   test can read a bank back and hear which recording it got. */
+static void write_wav (const char *path, double hz, double secs, double amp)
+{
+    const int n = (int) (secs * 48000.0);
+    FILE *f = fopen (path, "wb");
+    if (f == NULL) return;
+    const unsigned data = (unsigned) (n * 4), riff = 36 + data;
+    fwrite ("RIFF", 1, 4, f); fwrite (&riff, 4, 1, f); fwrite ("WAVE", 1, 4, f);
+    fwrite ("fmt ", 1, 4, f);
+    const unsigned sz = 16; const unsigned short fmt = 3, ch = 1, bits = 32;
+    const unsigned rate = 48000, byterate = 48000 * 4; const unsigned short align = 4;
+    fwrite (&sz, 4, 1, f); fwrite (&fmt, 2, 1, f); fwrite (&ch, 2, 1, f);
+    fwrite (&rate, 4, 1, f); fwrite (&byterate, 4, 1, f);
+    fwrite (&align, 2, 1, f); fwrite (&bits, 2, 1, f);
+    fwrite ("data", 1, 4, f); fwrite (&data, 4, 1, f);
+    double ph = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        ph += 2.0 * M_PI * hz / 48000.0;
+        const float v = (float) (amp * sin (ph) * exp (-(double) i / (0.5 * 48000.0)));
+        fwrite (&v, 4, 1, f);
+    }
+    fclose (f);
+}
+
+static void test_sampler_bank (void)
+{
+    const char *root = "/tmp/ae-smp-test";
+    char dir[256];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    char cmd[512];
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "sampler: cannot stage fixtures"); return; }
+
+    /* Two zones an octave apart; C4 has 2 main variants + a soft layer,
+       C5 only a bare recording. Each recording sings its own zone pitch. */
+    char pth[512];
+    snprintf (pth, sizeof (pth), "%s/C4.wav",          dir); write_wav (pth, 261.6256, 1.0, 0.5);
+    snprintf (pth, sizeof (pth), "%s/C4_rr2.wav",      dir); write_wav (pth, 261.6256, 1.0, 0.5);
+    snprintf (pth, sizeof (pth), "%s/C4_soft.wav",     dir); write_wav (pth, 261.6256, 1.0, 0.5);
+    snprintf (pth, sizeof (pth), "%s/C4_soft_rr2.wav", dir); write_wav (pth, 261.6256, 1.0, 0.5);
+    snprintf (pth, sizeof (pth), "%s/C5.wav",          dir); write_wav (pth, 523.2511, 1.0, 0.5);
+    snprintf (pth, sizeof (pth), "%s/notanote.wav",    dir); write_wav (pth, 100.0, 0.1, 0.5);
+
+    AeSampleBank b;
+    memset (&b, 0, sizeof (b));
+    char err[256] = "";
+    CHECK (ae_sampler_load (&b, root, "piano", NULL, 48000.0, err, sizeof (err)),
+           "sampler: bank loads (%s)", err);
+    CHECK (b.n_zones == 2, "sampler: two zones (got %d)", b.n_zones);
+    CHECK (b.n_recs == 5, "sampler: five recordings, junk name skipped (got %d)",
+           b.n_recs);
+    CHECK (b.zones[0] == 60 && b.zones[1] == 72,
+           "sampler: C4=60 C5=72 (got %d, %d)", b.zones[0], b.zones[1]);
+
+    /* Nearest zone by PITCH, and a FRACTIONAL rate -- an unquantised rate
+       is what lands a 22-EDO degree exactly off a 12-per-octave map. */
+    const double hz22 = 261.6256 * pow (2.0, 7.0 / 22.0); /* 7 steps of 22 */
+    const int midi = (int) lround (12.0 * log2 (hz22 / 440.0) + 69.0);
+    const int z = ae_sampler_zone (&b, midi);
+    CHECK (z == 0, "sampler: nearest zone by pitch (got %d for midi %d)", z, midi);
+
+    signed char rr[AE_SMP_MAX_ZONES * 2];
+    memset (rr, -1, sizeof (rr));
+    unsigned rng = 12345u;
+
+    /* Soft layer is chosen on VELOCITY, and only where one exists. */
+    const AeSampleRec *soft = ae_sampler_pick (&b, 0, 0.3, rr, &rng);
+    const AeSampleRec *loud = ae_sampler_pick (&b, 0, 0.9, rr, &rng);
+    CHECK (soft != NULL && soft->soft, "sampler: velocity 0.3 takes the soft pool");
+    CHECK (loud != NULL && ! loud->soft, "sampler: velocity 0.9 takes the main pool");
+    const AeSampleRec *nosoft = ae_sampler_pick (&b, 1, 0.1, rr, &rng);
+    CHECK (nosoft != NULL && ! nosoft->soft,
+           "sampler: a zone with no soft layer stays on the main pool");
+
+    /* Round robin never repeats the immediately previous pick -- a repeated
+       note reusing its recording machine-guns at once. */
+    int repeats = 0;
+    const AeSampleRec *prev = NULL;
+    for (int i = 0; i < 200; ++i)
+    {
+        const AeSampleRec *r = ae_sampler_pick (&b, 0, 0.9, rr, &rng);
+        if (r == prev) ++repeats;
+        prev = r;
+    }
+    CHECK (repeats == 0, "sampler: no immediate round-robin repeat (%d in 200)",
+           repeats);
+
+    ae_sampler_free (&b);
+    CHECK (b.n_recs == 0, "sampler: free clears the bank");
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* A sample ghost is STRUCK at the lead's onset and RE-PITCHED after -- it
+   must sound at the ghost's pitch, and a held note must not re-strike. */
+static void test_sample_ghost (void)
+{
+    const char *root = "/tmp/ae-smp-ghost";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "sample ghost: cannot stage"); return; }
+    /* One long, flat-ish zone at C4 so the ghost's pitch comes entirely
+       from the playback rate. */
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir); write_wav (pth, 261.6256, 3.0, 0.5);
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    char err[256] = "";
+    CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+           "sample ghost: bank loads into the corrector (%s)", err);
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;                     /* a fifth above A3 -> E4 */
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_sample (p, 1.0, 0.9);      /* sample only, fixed strike */
+    {
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_VOICE);
+    }
+    ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 400.0);
+
+    const int quiet = 9600, sung = 72704, total = quiet + sung;
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *hl = calloc ((size_t) total, sizeof (float));
+    float *hr = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = quiet; i < total; ++i)
+    {
+        ph += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (ph) + 0.15 * sin (2.0 * ph));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
+    }
+
+    /* The ghost sings E4 (329.63), not the recording's C4 (261.63): the
+       rate did the transposing. */
+    const double p_fifth = goertzel (hl + quiet + 9600, 24000, 329.63, 48000.0);
+    const double p_zone  = goertzel (hl + quiet + 9600, 24000, 261.63, 48000.0);
+    CHECK (p_fifth > 8.0 * p_zone,
+           "sample ghost sings its own pitch, not the zone's (E4 %.3g vs C4 %.3g)",
+           p_fifth, p_zone);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (hl); free (hr);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_makeup_on_plucks (void)
 {
     AeShifter *sh = ae_shifter_create (48000.0,
@@ -2405,6 +2596,7 @@ int main (void)
     test_midi_octave_fold();
     test_synth_envelope();
     test_walk();
+    test_walk_tiebreak();
     test_harmony();
     test_synth_harmony();
     test_synth_string_machine();
@@ -2420,6 +2612,8 @@ int main (void)
     test_96k();
     test_soft_clip();
     test_makeup_on_plucks();
+    test_sampler_bank();
+    test_sample_ghost();
     test_lead_wet_tap();
     test_formant_offset();
 

@@ -671,6 +671,24 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)
 }
 
 
+bool ae_audio_engine_load_samples (AeAudioEngine *e, const char *root,
+                                   const char *instrument, const char *manifest,
+                                   char *err, size_t err_len)
+{
+    if (e == NULL)
+    {
+        snprintf (err, err_len, "engine not running");
+        return false;
+    }
+    const bool ok = ae_corrector_load_samples (&e->corrector, root, instrument,
+                                               manifest, err, err_len);
+    /* Hold off long enough for the audio thread to turn a block over before
+       returning: the slot this load retired must be safely dead before the
+       NEXT load is allowed to refill it. */
+    ae_engine_sleep_ms (60);
+    return ok;
+}
+
 bool ae_audio_engine_load_ir (AeAudioEngine *e, int point, const char *path,
                               const char *hash, double predelay_ms,
                               char *err, size_t err_len)
@@ -707,6 +725,12 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->shift_st_min    = ae_corrector_shift_st_min (&e->corrector);
     out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
     out->lead_makeup     = ae_corrector_lead_makeup (&e->corrector);
+    out->sample_vel      = ae_corrector_sample_vel (&e->corrector);
+    {
+        const int lv = atomic_load_explicit (&e->corrector.smp_live, memory_order_relaxed);
+        out->sample_zones = lv >= 0 ? e->corrector.smp_bank[lv].n_zones : 0;
+        out->sample_files = lv >= 0 ? e->corrector.smp_bank[lv].n_recs  : 0;
+    }
     out->out_peak        = atomic_load_explicit (&e->out_peak, memory_order_relaxed);
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)

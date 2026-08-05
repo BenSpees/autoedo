@@ -29,7 +29,8 @@ else
   PLATFORM ?= stub
 endif
 
-SRC    := src/yin.c src/corrector.c src/json.c src/httpd.c src/main.c src/ir_load.c
+SRC    := src/yin.c src/corrector.c src/json.c src/httpd.c src/main.c src/ir_load.c \
+          src/sampler.c
 CXXSRC := src/shifter.cpp
 
 ifeq ($(PLATFORM),mac)
@@ -79,15 +80,17 @@ $(BUILD)/autoedo$(EXE): $(OBJ)
 $(OBJ): $(wildcard src/*.h)
 
 $(BUILD)/selftest: tests/selftest.c src/yin.c src/corrector.c src/json.c src/ir_load.c \
-                   src/audio_stub.c $(BUILD)/shifter.opp $(BUILD)/irconv.opp | $(BUILD)
+                   src/sampler.c src/audio_stub.c $(BUILD)/shifter.opp $(BUILD)/irconv.opp | $(BUILD)
 	$(CC) $(CFLAGS) -c tests/selftest.c -o $(BUILD)/selftest-main.o
 	$(CC) $(CFLAGS) -c src/yin.c -o $(BUILD)/t-yin.o
 	$(CC) $(CFLAGS) -c src/corrector.c -o $(BUILD)/t-corrector.o
 	$(CC) $(CFLAGS) -c src/json.c -o $(BUILD)/t-json.o
 	$(CC) $(CFLAGS) -c src/audio_stub.c -o $(BUILD)/t-stub.o
 	$(CC) $(CFLAGS) -c src/ir_load.c -o $(BUILD)/t-irload.o
+	$(CC) $(CFLAGS) -c src/sampler.c -o $(BUILD)/t-sampler.o
 	$(CXX) $(CXXFLAGS) $(BUILD)/selftest-main.o $(BUILD)/t-yin.o \
 	    $(BUILD)/t-corrector.o $(BUILD)/t-json.o $(BUILD)/t-stub.o $(BUILD)/t-irload.o \
+	    $(BUILD)/t-sampler.o \
 	    $(BUILD)/shifter.opp $(BUILD)/irconv.opp -lm -lpthread -o $@
 
 test: $(BUILD)/selftest

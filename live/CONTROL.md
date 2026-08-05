@@ -271,6 +271,57 @@ UI behavior you may want to replicate).
 | `droneOn` | bool | live | **drone**: one synth voice pinned to an ABSOLUTE degree, sustained while on regardless of what the singer does (a root-only chart chord means "drone that root"). Uses the current `synthPatch` and attack/release, volume-matched like the ghosts (level rides the frozen input RMS, so it breathes with the set instead of blasting before the first note), centred on the harmony bus, through the ensemble and the tilt but deliberately NOT the vowel transfer (a drone has no mouth to follow — the vocoder's gating would mute it between phrases). `harmOn` still gates it |
 | `droneDeg` | int 0–8·edo | live | the drone's absolute engine degree (`4·edo` = the middle-C-region root, like the MIDI-harmony mapping) |
 
+### Sample voices (the Xentar pitched library)
+
+A third ghost source beside `voice` and `synth`. **Treebrain is the
+librarian**: it transcodes the shipped MP3s once into mono float32 WAV at
+the engine's rate and hands over a cache root. The engine never decodes an
+MP3, never resamples, and refuses any file whose header rate is not the
+engine's — a cache at the wrong rate would play at the wrong pitch *and*
+the wrong speed.
+
+| Key | Type | Applies | Meaning |
+|---|---|---|---|
+| `samplePath` | string | live (reloads) | absolute root of the per-rate cache. The engine reads `<samplePath>/<instrument>/*.wav` |
+| `sampleManifest` | string | live (reloads) | optional file list. **Any JSON shape works**: the engine harvests the `".wav"` strings out of it and derives instrument, zone, layer and variant from the FILENAME, which already carries all four. There is no schema to agree on and a manifest change cannot break the engine. Absent/unreadable → the instrument directory is scanned instead |
+| `sampleHash` | string | live (reloads) | the librarian's "the library changed" token. The bank is re-read only when this moves — 120 WAVs is not a per-POST operation |
+| `sampleInstrument` | string | live (reloads) | `piano` `electric` `acoustic` `bass` `vibraphone` `choir` `harpsichord` `oboe`. **Feature-detect on this key** |
+| `sampleMix` | float 0–1 | live | layer blend against the shifted rendering of the same ghost. `0` = shifted alone, `1` = sample alone, **`0.5` = both at unity** — a plateau at centre with an equal-power taper either side (`g = sin(min(1, 2·d)·π/2)` per side, `d` the distance from the far end), not the textbook crossfade that would drop both to 0.707 in the middle. "sample" is a LAYER, not a swap: at any mix below 1 the voice's shifter keeps running |
+| `sampleVelocity` | float −1…1 | live | fixed strike level; **`-1` (default) = measure it** from the lead's own attack |
+| `harmSource`, `leadSource`, `hSrc[]` | += `"sample"` | live | the source selectors all take it |
+
+Status: `sampleVelLast` (the level the voices were last struck with — a
+strike level you cannot see is one you cannot tune), `sampleZones` /
+`sampleFiles` (what actually loaded), and `sampleError` (the last failed
+load; a failure leaves the **running bank playing** rather than going
+silent, so a bad path during a set is a message, not a hole).
+
+**What is genuinely different here, and where a straight port of a browser
+sampler goes wrong.** A ghost is continuous; a sample is struck. So a
+sample voice is struck at the lead's ONSET — the same energy edge the
+attack sound fires on, several detection hops **before the pitch is
+known** — and then **re-pitched, never re-struck**, for as long as that
+note lasts. A retrigger starts a fresh slot across a 6 ms fade rather than
+cutting a sounding one (Xentar's node-swap discipline, ported).
+
+- **Velocity is a measurement.** Peak over the first 30 ms from the foot of
+  the attack, mapped across 40 dB (−40 dBFS → 0, 0 dBFS → 1). The strike
+  itself cannot wait for that window without giving back the latency, so a
+  voice is struck at the fast follower's reading and the window refines it.
+- **The soft layer is TIMBRE, not level.** `<Note>_soft` files are softer-
+  *played* recordings peak-normalised to the main layer; loudness always
+  comes from the velocity gain. Below velocity 0.6 the soft pool is
+  preferred **where one exists** — harpsichord deliberately has none.
+- **Round robin is per (instrument, zone, layer) and never the previous
+  pick.** A repeated note that reuses its recording machine-guns at once.
+- **Zone then RATE.** Nearest recording by pitch, then a fractional,
+  **unquantised** playback rate — that is what lands a 22-EDO degree
+  exactly off a 12-per-octave map.
+
+`synthAttackMs` / `synthReleaseMs` shape the sample envelope unchanged, as
+they do for every other source. Drums are out of scope by agreement — every
+layer here is voiced by a pitch.
+
 ### The record send
 
 A separate output channel for the recorder, so the stem on disk and the
@@ -312,7 +363,7 @@ Two convolution points from the shared `irconv` library (vendored byte-identical
 | `irLeadOn` | bool | live | off = dry passthrough (the tail rides out through the mix smoothing); a fully faded-off point costs a copy, not a convolution |
 
 A stereo WAV into the mono lead folds to mid; into the harm point its channels convolve L/R independently. IRs cap at 2 s (the engine's prepare ceiling). Status echoes every key plus `irError` (the last load failure, cleared by a success), and a fresh engine reloads the persisted points on start. |
-| `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward, up first per distance) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |
+| `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward; **on a TIE the walk goes AWAY from the lead** — up for a ghost above, down for one below, so a third never collapses onto a second or a unison when both neighbours are equally close. A unison ghost has no apartness to preserve and keeps the historical up-first rule, as does a lead being corrected onto the mask) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |
 | `hm` | int[5], each −72…72 | live | voice intervals in EDO steps; 0 = voice off. Keep within ±`edo` (the pool is ±equave); intervals are *steps*, so re-clamp when you lower the EDO |
 | `hx` | int[5], 0–2 | live | per-voice octave extension, stacking in the voice's direction: `eff = hm + sign(hm)·hx·edo` |
 | `hd` | float[5], −100…+100 | live | **per-voice detune, cents.** Applied *after* the `harmLock` quantize, so the lock cannot snap it back out, and *before* the dedupe, so two voices on the same interval detuned apart both sound instead of collapsing into one. Its other job: `hm[v] = 0` normally means "voice off", but **`hm[v] = 0` with a nonzero `hd[v]` is a UNISON ghost** — the thickener you want at, say, −4 cents. Exact unison with no detune stays "off", because a phase-coherent double of the lead is a comb filter, not a voice |

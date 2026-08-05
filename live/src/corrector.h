@@ -20,9 +20,11 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "irconv.h"
+#include "sampler.h"
 #include "shifter.h"
 #include "tuning.h"
 #include "yin.h"
@@ -39,6 +41,12 @@
    Phase 1: the source applies to all five voices at once. */
 #define AE_HARM_SRC_VOICE 0
 #define AE_HARM_SRC_SYNTH 1
+/* A third source: the Xentar pitched library. Unlike the other two a
+   sample is STRUCK, not continuous -- so a sample ghost is struck at the
+   lead's onset and then RE-PITCHED, never re-struck, for as long as that
+   note lasts. sampleMix layers it against the shifted rendering of the
+   same ghost, so "sample" is a layer with a blend rather than a swap. */
+#define AE_HARM_SRC_SAMPLE 2
 /* Per-voice sentinel: "whatever the global harmSource says". Voices default
    to this, so the single global switch keeps working untouched and a chart
    only names the voices it actually wants to differ. */
@@ -230,6 +238,39 @@ typedef struct
     double tilt_a;      /* one-pole coefficient for the ~700 Hz pivot */
     double tilt_g_lo, tilt_g_hi;
     double tilt_db_cur; /* what the gains were built for */
+
+    /* Sample voices ---------------------------------------------------------- */
+    /* Two bank slots and an atomic index: the control thread fills the
+       idle one and swaps. The slot it refills has been dead since the
+       PREVIOUS swap (the loader holds off long enough for a block to
+       turn over), so no audio-thread voice can still be reading it. */
+    AeSampleBank  smp_bank[2];
+    _Atomic int   smp_live;      /* -1 = no bank loaded */
+    _Atomic int   smp_gen;       /* bumped per swap; a voice from an older
+                                    generation releases instead of reading
+                                    a freed buffer */
+    int           smp_mode;      /* AE_SMP_* placeholder, reserved */
+    double        smp_mix;       /* 0 = shifted only, 1 = sample only */
+    double        smp_vel_fixed; /* >= 0 = fixed strike level; < 0 = measure */
+    _Atomic float smp_vel_out;   /* last strike level, for the read-out */
+    signed char   smp_rr[AE_SMP_MAX_ZONES * 2]; /* last RR pick per zone+layer */
+    unsigned      smp_rng;
+
+    /* Onset: one pulse per note edge, shared by the attack sound and the
+       sample strike -- both need the same "energy appeared" moment, and
+       both need it BEFORE the detector has a pitch. */
+    bool   onset_pulse;
+    int    vel_win;      /* samples left in the velocity measuring window */
+    double vel_peak;     /* running peak inside it */
+
+    struct
+    {
+        const AeSampleRec *rec;
+        double pos, rate, gain, fade;
+        int    gen;
+    } smp[AE_HARM_VOICES + 1][2]; /* [AE_HARM_VOICES] = the lead */
+    int    smp_cur[AE_HARM_VOICES + 1];
+    double smp_env[AE_HARM_VOICES + 1];
 
     /* Attack Sound ---------------------------------------------------------- */
     int    atk_mode;             /* AE_ATK_* */
@@ -448,6 +489,30 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES]);
 
+/* Sample source (audio thread, between blocks): the layer blend against the
+   shifted rendering of the same ghost, and the strike level. `mix` 0 = the
+   shifted voice alone, 1 = the sample alone, 0.5 = BOTH AT UNITY -- a
+   plateau at centre with an equal-power taper either side, so one number
+   means the same thing here as it does in the rig's other layers.
+   `velocity` >= 0 pins the strike level; < 0 measures it from the lead's
+   own attack. */
+void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity);
+
+/* Load one instrument into the idle bank slot and swap it live (CONTROL
+   thread -- reads files, allocates). Returns false with a reason in err;
+   a failed load leaves the running bank untouched. */
+bool ae_corrector_load_samples (AeCorrector *p, const char *root,
+                                const char *instrument, const char *manifest,
+                                char *err, size_t err_len);
+
+/* The last strike level the sample voices were struck with (0..1): a
+   strike level you cannot see is one you cannot tune. */
+static inline float ae_corrector_sample_vel (const AeCorrector *p)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->smp_vel_out,
+                                 memory_order_relaxed);
+}
+
 /* Attack Sound (audio thread, between blocks): mode AE_ATK_*, gain LINEAR.
    Fires on energy onsets whenever a synth voice is in the signal path (a
    synth ghost, a synth lead, not a purely-shifted rig, whose real signal
@@ -595,10 +660,22 @@ static inline int ae_corrector_harm_degree (const AeCorrector *p, int voice)
                                  memory_order_relaxed);
 }
 
-/* Xentar Snap-to-Scale walk: nearest enabled degree to j, up checked first
-   at each distance. `enabled` indexes pitch classes 0..edo-1; a fully
-   disabled mask returns j unchanged. */
-static inline long long ae_walk_to_enabled (long long j, int edo, const bool *enabled)
+/* Xentar Snap-to-Scale walk: nearest enabled degree to j. `enabled` indexes
+   pitch classes 0..edo-1; a fully disabled mask returns j unchanged.
+
+   TIE-BREAK: at equal distance, `prefer_up` decides. A fixed up-first rule
+   is right for a ghost ABOVE the lead and exactly wrong for one below --
+   on a tie it pulls the ghost TOWARD the lead, so a third below can land
+   on the unison and a third above on a second. Both candidates are equally
+   far from what was asked for, but one is still an interval and the other
+   is a beat. So callers pass the direction that keeps the ghost further
+   from the lead: up for a ghost above, down for one below. A voice with no
+   apartness to preserve (a unison ghost, or a lead being corrected onto
+   the mask with no second voice in the picture) passes true and keeps the
+   historical up-first rule. */
+static inline long long ae_walk_to_enabled_dir (long long j, int edo,
+                                                const bool *enabled,
+                                                bool prefer_up)
 {
     bool any = false;
     for (int d = 0; d < edo; ++d)
@@ -611,12 +688,19 @@ static inline long long ae_walk_to_enabled (long long j, int edo, const bool *en
         return j;
     for (int d = 1; d <= edo; ++d)
     {
-        if (enabled[(pc0 + d) % edo])
-            return j + d;
-        if (enabled[((pc0 - d) % edo + edo) % edo])
-            return j - d;
+        const bool up   = enabled[(pc0 + d) % edo];
+        const bool down = enabled[((pc0 - d) % edo + edo) % edo];
+        if (up && down)
+            return prefer_up ? j + d : j - d; /* the tie */
+        if (up)   return j + d;
+        if (down) return j - d;
     }
     return j;
+}
+
+static inline long long ae_walk_to_enabled (long long j, int edo, const bool *enabled)
+{
+    return ae_walk_to_enabled_dir (j, edo, enabled, true);
 }
 
 static inline double ae_corrector_clamp01 (double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }

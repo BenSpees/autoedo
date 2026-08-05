@@ -91,6 +91,9 @@ typedef struct
     bool            ir_dirty[2]; /* changed since last (re)load */
     char            ir_err[256];
     char            send_err[128]; /* last refused send write ("" = none) */
+    char            sample_err[256];
+    char            sample_hash[80];
+    bool            sample_dirty;  /* the bank needs a (re)load */
 
     /* Status is serialized once per pump tick (or config change) and every
        consumer — each WebSocket push and each /api/status GET — is handed
@@ -218,6 +221,12 @@ static void config_defaults (App *app)
     c->params.send_gain_db   = 0.0;
     c->params.send_on        = false; /* the safety: off until asserted */
     app->send_err[0]         = '\0';
+    c->params.sample_mix      = 1.0;  /* the sample alone until layered */
+    c->params.sample_velocity = -1.0; /* measure it from the lead's attack */
+    c->sample_root[0] = c->sample_manifest[0] = '\0';
+    snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
+    app->sample_err[0] = '\0';
+    app->sample_dirty  = false;
     c->params.attack_sound   = 0;     /* off */
     c->params.attack_gain_db = -26.0; /* Xentar's shipped pick level */  /* jump, the classic harmonizer */
     c->params.harm_sustain = true;  /* the release means nothing without it */
@@ -306,6 +315,12 @@ static void config_json (const App *app, char *out, size_t cap)
     ae_json_escape_append (out, cap, c->output_uid);
     strncat (out, "\",\"label\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, app->label);
+    strncat (out, "\",\"samplePath\":\"", cap - strlen (out) - 1);
+    ae_json_escape_append (out, cap, c->sample_root);
+    strncat (out, "\",\"sampleManifest\":\"", cap - strlen (out) - 1);
+    ae_json_escape_append (out, cap, c->sample_manifest);
+    strncat (out, "\",\"sampleHash\":\"", cap - strlen (out) - 1);
+    ae_json_escape_append (out, cap, app->sample_hash);
     strncat (out, "\",\"scaleCat\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, app->scale_cat);
     strncat (out, "\",\"scaleName\":\"", cap - strlen (out) - 1);
@@ -329,8 +344,10 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"synthAttackMs\":%.6g,\"synthReleaseMs\":%.6g,"
               "\"ensembleDepth\":%.6g,\"synthVowel\":%.6g,\"harmTiltDb\":%.6g,"
               "\"vowelMode\":\"%s\",\"droneOn\":%s,\"droneDeg\":%d,\"hSrc\":[",
-              c->params.harm_source == 1 ? "synth" : "voice",
-              c->params.lead_source == 1 ? "synth" : "voice",
+              c->params.harm_source == 1 ? "synth"
+                : c->params.harm_source == 2 ? "sample" : "voice",
+              c->params.lead_source == 1 ? "synth"
+                : c->params.lead_source == 2 ? "sample" : "voice",
               ae_synth_patch_name (c->params.synth_patch),
               c->params.synth_attack_ms, c->params.synth_release_ms,
               c->params.ensemble_depth, c->params.synth_vowel,
@@ -342,7 +359,8 @@ static void config_json (const App *app, char *out, size_t cap)
     {
         const int s = c->params.harm_voice_source[v];
         snprintf (harm, sizeof (harm), "%s\"%s\"", v ? "," : "",
-                  s == 0 ? "voice" : s == 1 ? "synth" : "default");
+                  s == 0 ? "voice" : s == 1 ? "synth"
+                : s == 2 ? "sample" : "default");
         strncat (out, harm, cap - strlen (out) - 1);
     }
     strncat (out, "]", cap - strlen (out) - 1);
@@ -351,6 +369,8 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"harmSustain\":%s,\"harmHold\":%s,\"harmGlideMs\":%.4g,"
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
+              "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,"
+              "\"sampleInstrument\":\"%s\","
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
               "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
@@ -367,6 +387,8 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.midi_fold ? "nearest" : "held",
               c->params.formant_hold ? "true" : "false",
               c->params.formant_st,
+              c->params.sample_mix, c->params.sample_velocity,
+              c->sample_instrument,
               c->send_channel,
               (const char *[]){ "full", "wet", "lead", "harm" }
                   [c->params.send_content >= 0 && c->params.send_content <= 3
@@ -456,6 +478,7 @@ static bool config_apply_json (App *app, const char *json)
     double num;
     bool   b;
     char   str[AE_UID_MAX];
+    char   str2[1024];
 
     if (ae_json_get_number (json, "edo", &num))
     {
@@ -591,6 +614,38 @@ static bool config_apply_json (App *app, const char *json)
                                : strcmp (str, "click") == 0 ? 3 : 0;
     if (ae_json_get_number (json, "attackGainDb", &num))
         c->params.attack_gain_db = num_clamp (num, -60.0, 12.0);
+    if (ae_json_get_number (json, "sampleMix", &num))
+        c->params.sample_mix = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "sampleVelocity", &num))
+        c->params.sample_velocity = num < 0.0 ? -1.0 : num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_string (json, "samplePath", str2, sizeof (str2)))
+    {
+        snprintf (c->sample_root, sizeof (c->sample_root), "%s", str2);
+        app->sample_dirty = true;
+    }
+    if (ae_json_get_string (json, "sampleManifest", str2, sizeof (str2)))
+    {
+        snprintf (c->sample_manifest, sizeof (c->sample_manifest), "%s", str2);
+        app->sample_dirty = true;
+    }
+    if (ae_json_get_string (json, "sampleHash", str2, sizeof (str2)))
+    {
+        /* The librarian's token for "the library changed". Re-read only
+           when it moves -- 120 WAVs is not a per-POST operation. */
+        if (strcmp (str2, app->sample_hash) != 0)
+        {
+            snprintf (app->sample_hash, sizeof (app->sample_hash), "%.79s", str2);
+            app->sample_dirty = true;
+        }
+    }
+    if (ae_json_get_string (json, "sampleInstrument", str, sizeof (str)))
+    {
+        if (strcmp (str, c->sample_instrument) != 0)
+        {
+            snprintf (c->sample_instrument, sizeof (c->sample_instrument), "%.31s", str);
+            app->sample_dirty = true;
+        }
+    }
     if (ae_json_get_number (json, "harmGlideMs", &num))
         c->params.harm_glide_ms = num_clamp (num, 0.0, 5000.0);
     if (ae_json_get_bool (json, "harmSustain", &b))
@@ -598,9 +653,11 @@ static bool config_apply_json (App *app, const char *json)
     if (ae_json_get_bool (json, "harmHold", &b))
         c->params.harm_hold = b;
     if (ae_json_get_string (json, "harmSource", str, sizeof (str)))
-        c->params.harm_source = strcmp (str, "synth") == 0 ? 1 : 0;
+        c->params.harm_source = strcmp (str, "synth") == 0 ? 1
+                              : strcmp (str, "sample") == 0 ? 2 : 0;
     if (ae_json_get_string (json, "leadSource", str, sizeof (str)))
-        c->params.lead_source = strcmp (str, "synth") == 0 ? 1 : 0;
+        c->params.lead_source = strcmp (str, "synth") == 0 ? 1
+                              : strcmp (str, "sample") == 0 ? 2 : 0;
     if (ae_json_get_number (json, "ensembleDepth", &num))
         c->params.ensemble_depth = num_clamp (num, 0.0, 1.0);
     if (ae_json_get_number (json, "synthVowel", &num))
@@ -669,8 +726,9 @@ static bool config_apply_json (App *app, const char *json)
         const int ns = ae_json_get_str_array (json, "hSrc", srcs, 5);
         for (int v = 0; v < ns; ++v)
             c->params.harm_voice_source[v] =
-                strcmp (srcs[v], "synth") == 0 ? 1
-              : strcmp (srcs[v], "voice") == 0 ? 0 : -1;
+                strcmp (srcs[v], "synth")  == 0 ? 1
+              : strcmp (srcs[v], "sample") == 0 ? 2
+              : strcmp (srcs[v], "voice")  == 0 ? 0 : -1;
     }
     if (ae_json_get_string (json, "synthPatch", str, sizeof (str)))
     {
@@ -832,6 +890,30 @@ static void config_load (App *app)
 
 /* ------------------------------------------------------------------ engine */
 
+/* Caller must hold app->lock. (Re)load the sample bank when the librarian's
+   binding changed -- path, manifest, instrument, or the library hash. A
+   failed load leaves the running bank playing and puts the reason in
+   status.sampleError; a cleared path unloads. */
+static void samples_reload_locked (App *app)
+{
+    if (app->engine == NULL || ! app->sample_dirty)
+        return;
+    app->sample_dirty = false;
+    AeEngineConfig *c = &app->engine_cfg;
+    if (c->sample_root[0] == '\0')
+    {
+        app->sample_err[0] = '\0';
+        return;
+    }
+    char err[256] = "";
+    if (! ae_audio_engine_load_samples (app->engine, c->sample_root,
+                                        c->sample_instrument,
+                                        c->sample_manifest, err, sizeof (err)))
+        snprintf (app->sample_err, sizeof (app->sample_err), "%s", err);
+    else
+        app->sample_err[0] = '\0';
+}
+
 /* Caller must hold app->lock. */
 /* (Re)load configured IR points into the running engine. A fresh engine
    needs everything; a config edit only what it dirtied. Failures land in
@@ -876,6 +958,8 @@ static void engine_restart_locked (App *app)
     if (app->engine == NULL)
         fprintf (stderr, "autoedo: engine start failed: %s\n", app->engine_err);
     ir_reload_locked (app, false); /* a fresh corrector needs its spaces back */
+    app->sample_dirty = true;      /* ...and its sample bank */
+    samples_reload_locked (app);
 }
 
 /* --------------------------------------------------------------------- api */
@@ -899,8 +983,10 @@ static void status_refresh (App *app)
     char in_name[2 * AE_NAME_MAX] = "", out_name[2 * AE_NAME_MAX] = "", err[2 * 256] = "";
     char ir_err[2 * 256] = "";
     char send_err_esc[2 * 128] = "";
+    char sample_err_esc[2 * 256] = "";
     ae_json_escape_append (in_name,  sizeof (in_name),  st.input_name);
     ae_json_escape_append (send_err_esc, sizeof (send_err_esc), app->send_err);
+    ae_json_escape_append (sample_err_esc, sizeof (sample_err_esc), app->sample_err);
     ae_json_escape_append (out_name, sizeof (out_name), st.output_name);
     ae_json_escape_append (err,      sizeof (err),      app->engine_err);
     ae_json_escape_append (ir_err,   sizeof (ir_err),   app->ir_err);
@@ -966,7 +1052,8 @@ static void status_refresh (App *app)
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
-        "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\","
+        "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
+        "\"sampleVelLast\":%.3f,\"sampleZones\":%d,\"sampleFiles\":%d,"
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
@@ -980,7 +1067,8 @@ static void status_refresh (App *app)
         hdeg, midi,
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
-        patches, ir_err, send_err_esc,
+        patches, ir_err, send_err_esc, sample_err_esc,
+        (double) st.sample_vel, st.sample_zones, st.sample_files,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),
@@ -1070,6 +1158,7 @@ static void api_config_post (App *app, const char *body, AeHttpResponse *resp)
     {
         ae_audio_engine_set_params (app->engine, &app->engine_cfg.params);
         ir_reload_locked (app, true); /* only what this edit dirtied */
+        samples_reload_locked (app);
     }
 
     config_save (app);

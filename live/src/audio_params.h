@@ -66,6 +66,8 @@ typedef struct
     _Atomic bool     midi_fold;
     _Atomic bool     formant_hold;
     _Atomic double   formant_st;
+    _Atomic double   sample_mix;
+    _Atomic double   sample_velocity;
     _Atomic int      attack_sound;
     _Atomic double   attack_gain_lin;
     _Atomic bool     harm_sustain;
@@ -143,6 +145,8 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->midi_fold,    p->midi_fold,    memory_order_relaxed);
     atomic_store_explicit (&a->formant_hold, p->formant_hold, memory_order_relaxed);
     atomic_store_explicit (&a->formant_st,   p->formant_st,   memory_order_relaxed);
+    atomic_store_explicit (&a->sample_mix,      p->sample_mix,      memory_order_relaxed);
+    atomic_store_explicit (&a->sample_velocity, p->sample_velocity, memory_order_relaxed);
     atomic_store_explicit (&a->attack_sound, p->attack_sound, memory_order_relaxed);
     atomic_store_explicit (&a->attack_gain_lin,
                            pow (10.0, p->attack_gain_db / 20.0),
@@ -226,6 +230,9 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->formant_hold, memory_order_relaxed));
     ae_corrector_set_formant_st (ps,
                           atomic_load_explicit (&a->formant_st, memory_order_relaxed));
+    ae_corrector_set_sample (ps,
+                          atomic_load_explicit (&a->sample_mix, memory_order_relaxed),
+                          atomic_load_explicit (&a->sample_velocity, memory_order_relaxed));
     ae_corrector_set_attack (ps,
                           atomic_load_explicit (&a->attack_sound, memory_order_relaxed),
                           atomic_load_explicit (&a->attack_gain_lin, memory_order_relaxed));

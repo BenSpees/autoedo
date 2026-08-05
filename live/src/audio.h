@@ -119,9 +119,11 @@ typedef struct
     /* Harmony source: pitch-shifted live audio (0) or the built-in synth
        voice (1), which adds a patch and an attack/release envelope. Applies
        to all five voices. */
-    int      harm_source;
+    int      harm_source;            /* 0 shifted, 1 synth, 2 sample */
     int      harm_voice_source[5];   /* per voice; -1 = follow harm_source */
-    int      lead_source;            /* the corrected lead: 0 shifted, 1 synth */
+    int      lead_source;            /* the corrected lead: 0/1/2 as above */
+    double   sample_mix;             /* 0..1 layer blend, 0.5 = both at unity */
+    double   sample_velocity;        /* >= 0 fixed strike level; < 0 = measure */
     int      synth_patch;            /* index into the engine's patch table */
     double   ensemble_depth;         /* 0..1 */
     double   synth_vowel;            /* 0..1 formant transfer */
@@ -176,6 +178,9 @@ typedef struct
     int          input_channel;          /* 1-based capture channel of the input
                                             device; 0 = backend default (mac:
                                             first channel, win: mix of all) */
+    char         sample_root[1024];      /* per-rate WAV cache root */
+    char         sample_manifest[1024];  /* optional file list (JSON) */
+    char         sample_instrument[32];
     int          send_channel;           /* record send: 1-based output device
                                             channel; 0 = no send. Restart-
                                             scoped (device channel map). Must
@@ -212,6 +217,9 @@ typedef struct
     float  shift_st_min;    /* decaying (~1 s) extremes, so spikes between
                                10 Hz status ticks are still visible */
     float  shift_st_max;
+    float  sample_vel;      /* last strike level the sample voices used */
+    int    sample_zones;    /* loaded bank: distinct recording pitches */
+    int    sample_files;    /* ...and total recordings behind them */
     float  lead_makeup;     /* the lead shifter's level-match gain, linear */
     float  out_peak;        /* decaying peak of the summed output BEFORE the
                                soft clip, linear: > ~0.79 means the clip is
@@ -255,6 +263,15 @@ int ae_audio_list_midi_sources (char out[][AE_NAME_MAX], int max);
    thread; file read, hash verify and FFT fills happen here, the audio
    thread crossfades to the result over ~30 ms. An empty path clears the
    point. Returns false with a reason in err. */
+/* A short control-thread hold, used to let the audio thread turn a block
+   over before a retired resource is considered dead. */
+void ae_engine_sleep_ms (int ms);
+
+/* Load a sample instrument into the running engine (CONTROL thread). */
+bool ae_audio_engine_load_samples (AeAudioEngine *e, const char *root,
+                                   const char *instrument, const char *manifest,
+                                   char *err, size_t err_len);
+
 bool ae_audio_engine_load_ir (AeAudioEngine *e, int point, const char *path,
                               const char *hash, double predelay_ms,
                               char *err, size_t err_len);

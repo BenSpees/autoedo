@@ -682,6 +682,17 @@ void ae_corrector_reset (AeCorrector *p)
     p->atk_amp    = 0.0;
     p->atk_rng    = 0x9e3779b9u;
     p->atk_last_range = -1;
+    atomic_store_explicit (&p->smp_live, -1, memory_order_relaxed);
+    if (p->smp_mix <= 0.0) p->smp_mix = 1.0;
+    if (p->smp_vel_fixed == 0.0) p->smp_vel_fixed = -1.0;
+    p->smp_rng = 0x2545f491u;
+    p->onset_pulse = false;
+    p->vel_win = 0; p->vel_peak = 0.0;
+    memset (p->smp_rr, -1, sizeof (p->smp_rr));
+    memset (p->smp, 0, sizeof (p->smp));
+    memset (p->smp_cur, 0, sizeof (p->smp_cur));
+    memset (p->smp_env, 0, sizeof (p->smp_env));
+    atomic_store_explicit (&p->smp_vel_out, 0.7f, memory_order_relaxed);
     p->atk_last_dir   = 0;
     if (p->atk_gain <= 0.0)
         p->atk_gain = pow (10.0, -26.0 / 20.0); /* Xentar's shipped 5% */
@@ -818,6 +829,9 @@ void ae_corrector_free (AeCorrector *p)
     irc_point_destroy (p->ir_harm[1]);
     p->ir_lead = p->ir_harm[0] = p->ir_harm[1] = NULL;
     ae_yin_free (&p->detector);
+    ae_sampler_free (&p->smp_bank[0]);
+    ae_sampler_free (&p->smp_bank[1]);
+    atomic_store_explicit (&p->smp_live, -1, memory_order_relaxed);
 }
 
 bool ae_corrector_load_ir (AeCorrector *p, int point, const float *ir_l,
@@ -940,6 +954,91 @@ static void capture_sustain (AeCorrector *p, long long end)
     p->sus_read = 0;
 }
 
+void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity)
+{
+    p->smp_mix = mix < 0.0 ? 0.0 : (mix > 1.0 ? 1.0 : mix);
+    p->smp_vel_fixed = velocity < 0.0 ? -1.0 : (velocity > 1.0 ? 1.0 : velocity);
+}
+
+bool ae_corrector_load_samples (AeCorrector *p, const char *root,
+                                const char *instrument, const char *manifest,
+                                char *err, size_t err_len)
+{
+    const int live = atomic_load_explicit (&p->smp_live, memory_order_relaxed);
+    const int idle = live == 0 ? 1 : 0;
+    /* The idle slot has been dead since the previous swap, which held off
+       long enough for the audio thread to turn a block over -- so freeing
+       and refilling it cannot pull a buffer out from under a voice. */
+    if (! ae_sampler_load (&p->smp_bank[idle], root, instrument, manifest,
+                           p->fs, err, err_len))
+        return false;                     /* the running bank is untouched */
+    atomic_store_explicit (&p->smp_gen,
+                           atomic_load_explicit (&p->smp_gen, memory_order_relaxed) + 1,
+                           memory_order_relaxed);
+    atomic_store_explicit (&p->smp_live, idle, memory_order_release);
+    memset (p->smp_rr, -1, sizeof (p->smp_rr));
+    return true;
+}
+
+/* Strike one voice: pick the recording, set the read cursor and the
+   fractional rate. The OLD slot is left ringing on a 6 ms fade rather than
+   cut, which is the sampler equivalent of Xentar's node-swap retrigger --
+   never interrupt a live voice, crossfade past it. */
+static void sample_strike (AeCorrector *p, int v, double hz, double vel)
+{
+    const int live = atomic_load_explicit (&p->smp_live, memory_order_acquire);
+    if (live < 0 || hz <= 0.0)
+        return;
+    const AeSampleBank *bank = &p->smp_bank[live];
+    if (bank->n_recs == 0)
+        return;
+
+    const int midi = (int) lround (12.0 * log2 (hz / 440.0) + 69.0);
+    const int zone = ae_sampler_zone (bank, midi);
+    const AeSampleRec *rec = ae_sampler_pick (bank, zone, vel, p->smp_rr, &p->smp_rng);
+    if (rec == NULL)
+        return;
+
+    const int old = p->smp_cur[v];
+    const int nxt = old == 0 ? 1 : 0;
+    p->smp[v][old].fade = p->smp[v][old].rec != NULL ? p->smp[v][old].fade : 0.0;
+    p->smp_cur[v] = nxt;
+
+    const double rec_hz = 440.0 * pow (2.0, (rec->midi - 69) / 12.0);
+    p->smp[v][nxt].rec  = rec;
+    p->smp[v][nxt].pos  = 0.0;
+    /* Fractional and UNQUANTISED -- that is what lands a 22-EDO degree
+       exactly off a 12-per-octave map. */
+    p->smp[v][nxt].rate = hz / rec_hz;
+    p->smp[v][nxt].gain = vel;
+    p->smp[v][nxt].fade = 1.0;
+    p->smp[v][nxt].gen  = atomic_load_explicit (&p->smp_gen, memory_order_relaxed);
+}
+
+/* Read one slot into the accumulator. Linear interpolation at the slot's
+   own rate; a slot that runs off the end of its recording simply stops. */
+static double sample_tick (AeCorrector *p, int v, int slot)
+{
+    if (p->smp[v][slot].rec == NULL)
+        return 0.0;
+    if (p->smp[v][slot].gen != atomic_load_explicit (&p->smp_gen, memory_order_relaxed))
+    {
+        p->smp[v][slot].rec = NULL; /* the bank moved under it */
+        return 0.0;
+    }
+    const AeSampleRec *r = p->smp[v][slot].rec;
+    const int k = (int) p->smp[v][slot].pos;
+    if (k >= r->len - 1)
+    {
+        p->smp[v][slot].rec = NULL;
+        return 0.0;
+    }
+    const double f = p->smp[v][slot].pos - k;
+    const double x = (1.0 - f) * r->pcm[k] + f * r->pcm[k + 1];
+    p->smp[v][slot].pos += p->smp[v][slot].rate;
+    return x * p->smp[v][slot].gain * p->smp[v][slot].fade;
+}
+
 void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin)
 {
     p->atk_mode = mode < 0 ? 0 : (mode > 3 ? 3 : mode);
@@ -1025,12 +1124,25 @@ static void attack_trigger (AeCorrector *p)
    hit is playing, add it to the harmony bus -- BEFORE the bus IR, tilt and
    master, so it sits in the same space as the ghosts it covers, but through
    no envelope and no vocoder: its own gain is the whole of its level law. */
-static void attack_process (AeCorrector *p, float *harm_l, float *harm_r,
-                            int num_samples)
+/* The note EDGE, and the strike level that goes with it. Runs before
+   anything that needs either, because both the attack sound and the sample
+   strike must fire before the detector has a pitch -- that head start is
+   the whole point of both features.
+
+   Velocity is a MEASUREMENT, not a constant: the peak over the first 30 ms
+   from the foot of the attack, mapped across 40 dB. The strike itself
+   cannot wait for that window (waiting would give back the latency), so a
+   voice is struck at the fast follower's reading and the window's verdict
+   refines it -- which is audible as the note settling, not as a re-strike. */
+static void detect_onset (AeCorrector *p, int num_samples)
 {
-    double sum = 0.0;
+    double sum = 0.0, peak = 0.0;
     for (int i = 0; i < num_samples; ++i)
+    {
+        const double a = fabs ((double) p->in_block[i]);
+        if (a > peak) peak = a;
         sum += (double) p->in_block[i] * p->in_block[i];
+    }
     const double rms = sqrt (sum / num_samples);
 
     const double a_fast = 1.0 - exp (-(double) num_samples / (0.003 * p->fs));
@@ -1041,28 +1153,48 @@ static void attack_process (AeCorrector *p, float *harm_l, float *harm_r,
     if (p->atk_refract > 0)
         p->atk_refract -= num_samples;
 
-    /* One hit per onset EDGE. The naive version -- fire whenever fast
-       overtakes slow, refractory as the only guard -- double-fires: 80 ms
-       into a note the slow follower is still climbing, the ratio condition
-       is STILL true, and the expiring refractory refires the pick into the
-       middle of the same note. So the trigger is a Schmitt: it fires once,
-       disarms, and re-arms only when the ratio collapses (the note settled
-       or ended). The refractory stays as a belt for pathological input. */
+    /* One pulse per onset EDGE (Schmitt: re-arms only when the fast/slow
+       ratio collapses, so a refractory expiring mid-note cannot double). */
     if (! p->atk_armed
         && (p->atk_fast < 1.2 * p->atk_slow || p->atk_fast < AE_GATE_RMS))
         p->atk_armed = true;
 
-    if (p->atk_mode != AE_ATK_OFF && harm_l != NULL
-        && p->atk_armed
-        && p->atk_refract <= 0
+    p->onset_pulse = false;
+    if (p->atk_armed && p->atk_refract <= 0
         && p->atk_fast > 2.0 * AE_GATE_RMS
-        && p->atk_fast > 2.5 * slow_prev
-        && attack_relevant (p))
+        && p->atk_fast > 2.5 * slow_prev)
     {
-        attack_trigger (p);
+        p->onset_pulse = true;
         p->atk_armed   = false;
         p->atk_refract = (int) (0.060 * p->fs);
+        p->vel_win     = (int) (0.030 * p->fs);
+        p->vel_peak    = 0.0;
     }
+
+    if (p->vel_win > 0)
+    {
+        if (peak > p->vel_peak) p->vel_peak = peak;
+        p->vel_win -= num_samples;
+        if (p->vel_win <= 0)
+        {
+            const double db = p->vel_peak > 1e-6 ? 20.0 * log10 (p->vel_peak) : -120.0;
+            double vel = (db + 40.0) / 40.0;   /* -40 dBFS -> 0, 0 dBFS -> 1 */
+            if (vel < 0.0) vel = 0.0;
+            if (vel > 1.0) vel = 1.0;
+            atomic_store_explicit (&p->smp_vel_out, (float) vel, memory_order_relaxed);
+        }
+    }
+}
+
+static void attack_process (AeCorrector *p, float *harm_l, float *harm_r,
+                            int num_samples)
+{
+
+    /* The edge is decided in detect_onset (shared with the sample strike);
+       this only decides whether to voice it. */
+    if (p->atk_mode != AE_ATK_OFF && harm_l != NULL && p->onset_pulse
+        && attack_relevant (p))
+        attack_trigger (p);
 
     if (p->atk_active == 0 || harm_l == NULL)
         return;
@@ -1481,8 +1613,14 @@ static void run_detection (AeCorrector *p)
                    nobody is hearing. */
                 long long gj = cand + p->lead_shift + eff;
                 if (p->harm_lock == 1) /* MIDI notes override the mask here too */
-                    gj = ae_walk_to_enabled (gj, p->edo,
-                                             midi_active ? held_mask : p->enabled_deg);
+                    /* Break a tie AWAY from the lead: up for a ghost above,
+                       down for one below, so a third never collapses onto a
+                       second or a unison when both neighbours are equally
+                       close. A unison ghost has no apartness to preserve
+                       and keeps the up-first rule. */
+                    gj = ae_walk_to_enabled_dir (gj, p->edo,
+                                                 midi_active ? held_mask : p->enabled_deg,
+                                                 eff >= 0);
 
                 double ghost_cents = (double) gj * period / (double) p->edo;
                 if (p->harm_lock == 2)
@@ -1988,6 +2126,102 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         render_ensemble (p, harm_l, harm_r, num_samples);
 }
 
+/* The layer law, shared by every sample voice: 0 = the shifted rendering
+   alone, 1 = the sample alone, and 0.5 = BOTH AT UNITY -- a plateau at
+   centre with an equal-power taper either side, rather than the textbook
+   crossfade that would drop both to 0.707 in the middle. One number means
+   the same thing here as in the rig's other layers. */
+static void sample_layer_gains (double mix, double *g_shift, double *g_smp)
+{
+    const double a = mix <= 0.5 ? 1.0 : 2.0 * (1.0 - mix);
+    const double b = mix >= 0.5 ? 1.0 : 2.0 * mix;
+    *g_shift = sin (a * (AE_PI / 2.0));
+    *g_smp   = sin (b * (AE_PI / 2.0));
+}
+
+/* 4c. Sample harmony. A ghost is continuous; a sample is struck -- so a
+   sample voice is struck at the LEAD'S ONSET (the same edge the attack
+   sound uses, fired before the detector has a pitch) and then re-pitched,
+   never re-struck, for as long as that note lasts. Xentar's legato
+   discipline, ported: repitch the live voice, and retrigger by starting a
+   fresh slot across a short fade rather than cutting a sounding one. */
+static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
+                                   int num_samples)
+{
+    if (atomic_load_explicit (&p->smp_live, memory_order_acquire) < 0)
+        return;
+
+    double atk_a, rel_a;
+    harm_env_coeffs (p, &atk_a, &rel_a);
+    double g_shift, g_smp;
+    sample_layer_gains (p->smp_mix, &g_shift, &g_smp);
+
+    const double vel = p->smp_vel_fixed >= 0.0
+        ? p->smp_vel_fixed
+        : (double) atomic_load_explicit (&p->smp_vel_out, memory_order_relaxed);
+    const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
+    const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
+
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        if (ae_corrector_voice_source (p, v) != AE_HARM_SRC_SAMPLE)
+            continue;
+        p->h_fed[v] = false;
+
+        const bool gate = p->h_active[v];
+        const double hz = ref * pow (2.0, p->h_cents_cur[v] / 1200.0);
+        (void) period;
+
+        /* Strike on the note edge; otherwise only the RATE moves, which is
+           what keeps a held note one struck note instead of a stutter. */
+        if (gate && p->onset_pulse)
+            sample_strike (p, v, hz, vel);
+        for (int k = 0; k < 2; ++k)
+            if (p->smp[v][k].rec != NULL && p->smp[v][k].rate > 0.0)
+            {
+                const AeSampleRec *r = p->smp[v][k].rec;
+                const double rec_hz = 440.0 * pow (2.0, (r->midi - 69) / 12.0);
+                if (k == p->smp_cur[v] && hz > 0.0)
+                    p->smp[v][k].rate = hz / rec_hz; /* repitch, not restrike */
+            }
+
+        double env = p->smp_env[v];
+        if (! gate && env < 1e-4
+            && p->smp[v][0].rec == NULL && p->smp[v][1].rec == NULL)
+        {
+            p->smp_env[v] = 0.0;
+            continue;
+        }
+
+        const double gl = p->h_gl[v], gr = p->h_gr[v];
+        const double want = gate ? 1.0 : 0.0;
+        const double a = gate ? atk_a : rel_a;
+        const int    cur = p->smp_cur[v], old = cur == 0 ? 1 : 0;
+        /* 6 ms retirement fade on the slot being replaced -- crossfade past
+           a sounding voice, never interrupt it. */
+        const double fade_step = 1.0 / (0.006 * p->fs);
+        for (int i = 0; i < num_samples; ++i)
+        {
+            env += (want - env) * a;
+            double x = sample_tick (p, v, cur);
+            if (p->smp[v][old].rec != NULL)
+            {
+                x += sample_tick (p, v, old);
+                p->smp[v][old].fade -= fade_step;
+                if (p->smp[v][old].fade <= 0.0)
+                {
+                    p->smp[v][old].fade = 0.0;
+                    p->smp[v][old].rec  = NULL;
+                }
+            }
+            const double sv = x * env * g_smp;
+            harm_l[i] += (float) (gl * sv);
+            harm_r[i] += (float) (gr * sv);
+        }
+        p->smp_env[v] = env;
+    }
+}
+
 /* The harmony-bus master: the LAST thing on the ghost bus and the only
    thing on all of it. Smoothed over ~5 ms so a controller sweeping the
    fader cannot zipper, and deliberately applied after the IR and the tilt
@@ -2051,6 +2285,11 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             run_detection (p);
     }
 
+    /* 1a. The note edge and its strike level, before anything that needs
+       either -- the attack sound and the sample strike both fire ahead of
+       the detector having a pitch. */
+    detect_onset (p, num_samples);
+
     /* 1b. Vowel analysis runs on the input whatever the sources are: it is
        one pass, and having the envelopes already tracking means switching
        the transfer on mid-phrase lands on the vowel being sung rather than
@@ -2073,7 +2312,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             voc_analyze (p, p->in_block, num_samples);
     }
 
-    const bool lead_synth = p->lead_source == AE_HARM_SRC_SYNTH;
+    const bool lead_synth  = p->lead_source == AE_HARM_SRC_SYNTH;
+    const bool lead_sample = p->lead_source == AE_HARM_SRC_SAMPLE;
 
     /* 2. Shift. The detection above is centred about half an analysis frame
        behind the newest input, which is close to where the shifter's own
@@ -2082,7 +2322,38 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
        and plays the corrected pitch instead. */
     const double base_hz =
         atomic_load_explicit (&p->detected_hz_out, memory_order_relaxed);
-    if (lead_synth)
+    if (lead_sample)
+    {
+        /* A sampled LEAD: struck at the onset, re-pitched after. Same
+           discipline as a sample ghost, aimed at the corrected target. */
+        const double hz =
+            (double) atomic_load_explicit (&p->target_hz_out, memory_order_relaxed);
+        const double vel = p->smp_vel_fixed >= 0.0 ? p->smp_vel_fixed
+            : (double) atomic_load_explicit (&p->smp_vel_out, memory_order_relaxed);
+        const int L = AE_HARM_VOICES;
+        if (p->onset_pulse && hz > 0.0)
+            sample_strike (p, L, hz, vel);
+        const int cur = p->smp_cur[L], old = cur == 0 ? 1 : 0;
+        if (p->smp[L][cur].rec != NULL && hz > 0.0)
+        {
+            const AeSampleRec *r = p->smp[L][cur].rec;
+            p->smp[L][cur].rate = hz / (440.0 * pow (2.0, (r->midi - 69) / 12.0));
+        }
+        const double fade_step = 1.0 / (0.006 * p->fs);
+        for (int i = 0; i < num_samples; ++i)
+        {
+            double x = sample_tick (p, L, cur);
+            if (p->smp[L][old].rec != NULL)
+            {
+                x += sample_tick (p, L, old);
+                p->smp[L][old].fade -= fade_step;
+                if (p->smp[L][old].fade <= 0.0)
+                { p->smp[L][old].fade = 0.0; p->smp[L][old].rec = NULL; }
+            }
+            p->wet_buf[i] = (float) x;
+        }
+    }
+    else if (lead_synth)
     {
         const AeSynthPatch *pat = &k_synth_patches[p->synth_patch];
         const double hz =
@@ -2128,7 +2399,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         v_gain += (target - v_gain) * gain_alpha;
 
         const long long t_out = block_start + i - p->latency;
-        const float dry = (lead_synth || t_out < 0)
+        const float dry = (lead_synth || lead_sample || t_out < 0)
                               ? 0.0f : p->in_buf[t_out & p->buf_mask];
         const double wet_only = v_gain * p->wet_buf[i];
         if (wet_out != NULL)
@@ -2160,13 +2431,21 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     bool any_synth = false, any_shift = false;
     for (int v = 0; v < AE_HARM_VOICES; ++v)
     {
-        if (ae_corrector_voice_source (p, v) == AE_HARM_SRC_SYNTH)
+        const int src = ae_corrector_voice_source (p, v);
+        if (src == AE_HARM_SRC_SYNTH)
             any_synth = true;
+        else if (src == AE_HARM_SRC_SAMPLE)
+        {
+            /* A sample voice still drives its shifter whenever the blend
+               asks for any of it -- "sample" is a LAYER, not a swap. */
+            if (p->smp_mix < 1.0) any_shift = true;
+        }
         else
             any_shift = true;
     }
     if (any_synth || p->drone_on || p->drone_env >= 1e-4)
         render_synth_harmony (p, harm_l, harm_r, num_samples);
+    render_sample_harmony (p, harm_l, harm_r, num_samples);
     if (! any_shift)
     {
         attack_process (p, harm_l, harm_r, num_samples);
@@ -2228,9 +2507,11 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
 
     for (int v = 0; v < AE_HARM_VOICES; ++v)
     {
+        const int  vsrc = ae_corrector_voice_source (p, v);
         const bool configured = p->harm_on && ae_harm_voice_on (&p->harm[v])
                               && p->h_shifter[v] != NULL
-                              && ae_corrector_voice_source (p, v) == AE_HARM_SRC_VOICE;
+                              && (vsrc == AE_HARM_SRC_VOICE
+                                  || (vsrc == AE_HARM_SRC_SAMPLE && p->smp_mix < 1.0));
         if (! configured)
         {
             p->h_fed[v] = false; /* history is stale; reset before reuse */
@@ -2261,11 +2542,14 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const double want = gate ? 1.0 : 0.0;
         const double a    = gate ? h_atk : h_rel;
         const double gl = p->h_gl[v], gr = p->h_gr[v];
+        double lay_shift = 1.0, lay_smp;
+        if (vsrc == AE_HARM_SRC_SAMPLE)
+            sample_layer_gains (p->smp_mix, &lay_shift, &lay_smp);
         double mix = p->h_mix[v];
         for (int i = 0; i < num_samples; ++i)
         {
             mix += (want - mix) * a;
-            const double s = p->voice_buf[i] * mix;
+            const double s = p->voice_buf[i] * mix * lay_shift;
             harm_l[i] += (float) (gl * s);
             harm_r[i] += (float) (gr * s);
         }
