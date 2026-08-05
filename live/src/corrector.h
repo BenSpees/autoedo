@@ -137,6 +137,12 @@ typedef struct
     long long last_detect_at; /* in_write at last detection */
 
     double shift_semitones;   /* current correction shift, semitones */
+    _Atomic float shift_st_out; /* the same, for the status read-out: lets a
+                                   panel SEE the lead's ratio swing instead
+                                   of diagnosing bassiness by ear */
+    bool   formant_hold;      /* hold formants still under the shift; off =
+                                 no formant processing at all (a guitar has
+                                 no vocal tract to preserve) */
     bool   voiced;
     bool   primed;            /* becomes true once first pitch is found */
 
@@ -163,6 +169,14 @@ typedef struct
        is the pivot, mapping to degree 4*edo (the root, four equaves up);
        each MIDI semitone is one EDO step. No notes held = normal behavior. */
     bool     midi_mode;
+    bool     midi_fold; /* fold the chosen held note by whole equaves into
+                           the register actually being played (retune to the
+                           held PITCH CLASS where the player is), instead of
+                           yanking the note to the held note's absolute
+                           octave. Chord voicings live wherever the chord
+                           track puts them -- often octaves below a lead
+                           line -- and absolute snapping turns that distance
+                           into a standing transpose. */
     uint64_t midi_lo; /* held-note bitset, notes 0..63 */
     uint64_t midi_hi; /* notes 64..127 */
 
@@ -214,6 +228,11 @@ typedef struct
     double atk_gain;             /* linear; its own volume, no envelope */
     double atk_fast, atk_slow;   /* onset follower (block RMS) */
     int    atk_refract;          /* samples until the next hit may fire */
+    bool   atk_armed;            /* Schmitt: a hit fires once per onset EDGE;
+                                    re-arms only when the fast/slow ratio
+                                    collapses (note settled or ended), so a
+                                    refractory expiring mid-swell cannot
+                                    double-fire */
     const short *atk_smp;        /* playing pick sample, NULL = synthesized */
     int    atk_smp_len;
     double atk_smp_rms;
@@ -247,6 +266,19 @@ typedef struct
     double sus_mix;          /* smoothed live(0) / loop(1) source blend */
     float *sus_block;        /* per-block harmony input when the loop is up */
     double last_voiced_hz;   /* f0 at the moment voicing dropped */
+
+    /* Release rewind: the last few hops before voicing drops are
+       contaminated by the release itself -- the mute or finger-lift bends
+       the string while the level is still above the gate -- and a ghost
+       that follows them ends its note somewhere the player never played.
+       A short ring of recent voiced detections lets the note END on what
+       was true ~40 ms before the artifact. */
+#define AE_REL_RING 16
+    float   rel_det[AE_REL_RING];                 /* detected Hz per hop */
+    float   rel_rms[AE_REL_RING];                 /* frame RMS per hop */
+    float   rel_hc[AE_REL_RING][AE_HARM_VOICES];  /* ghost glide position */
+    float   rel_hs[AE_REL_RING][AE_HARM_VOICES];  /* ghost shift, st */
+    uint8_t rel_pos;
 
     /* HOLD: freeze the ghosts where they are and let them ring on their own
        while the lead carries on. Momentary by design -- a controller maps it
@@ -505,6 +537,21 @@ static inline void ae_corrector_set_midi (AeCorrector *p, bool mode,
     p->midi_mode = mode;
     p->midi_lo   = held_lo;
     p->midi_hi   = held_hi;
+}
+
+static inline void ae_corrector_set_midi_fold (AeCorrector *p, bool fold)
+{
+    p->midi_fold = fold;
+}
+
+static inline void ae_corrector_set_formant_hold (AeCorrector *p, bool hold)
+{
+    p->formant_hold = hold;
+}
+
+static inline float ae_corrector_shift_st (const AeCorrector *p)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->shift_st_out, memory_order_relaxed);
 }
 
 /* Live ghost degree of a voice (signed steps re root), AE_HARM_DEG_OFF when

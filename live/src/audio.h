@@ -55,6 +55,9 @@ typedef struct
     /* MIDI Harmony: held notes override the mask (middle C = degree 4*edo,
        one EDO step per semitone). Off = held notes are ignored. */
     bool     midi_mode;
+    bool     midi_fold;       /* fold held-note targets into the played
+                                 register (retune to the held pitch class
+                                 where the player is); false = absolute */
 
     /* Smart harmony (Xentar emulation): five independent ghost voices. */
     bool     harm_on;
@@ -85,6 +88,10 @@ typedef struct
        envelope, with its own gain. 0 off, 1 noise, 2 pick, 3 click. */
     int      attack_sound;
     double   attack_gain_db;         /* -60..+12, default -26 */
+
+    bool     formant_hold;           /* hold formants under the shift (voice);
+                                        false = formant stage fully off
+                                        (guitar). Default true */
 
     /* Harmony source: pitch-shifted live audio (0) or the built-in synth
        voice (1), which adds a patch and an attack/release envelope. Applies
@@ -151,6 +158,9 @@ typedef struct
     int    latency_samples; /* total corrector + buffering latency, output frames */
     float  detected_hz;     /* live read-out from the corrector */
     float  target_hz;
+    float  shift_st;        /* the lead's current shift, semitones: a panel
+                               can SEE the ratio swing instead of diagnosing
+                               a wrong-octave correction by ear */
     bool   voiced;
     /* Pitch trace, oldest first: detected (0 = unvoiced) and target per
        detection hop, ending at absolute detection count trace_seq. */

@@ -315,6 +315,34 @@ Voices landing on one pitch dedupe (no gain doubling) but still report their
 degree in `harmDeg`. Down-shift depth is bounded by the detection range's
 longest period.
 
+### Detection & rendering guards (no keys — behavior contract)
+
+Three engine-side guards a controller should know exist, all always-on:
+
+- **Octave re-vote rebase**: a same-hop equave jump in both detected and
+  target pitch is treated as the detector re-labeling a sustained note, not
+  motion; the correction ratio stays continuous.
+- **Release rewind + slope-freeze**: a mute or lift drops level far faster
+  than a string decays naturally, while often staying "voiced" through tens
+  of ms of bent, dying pitch. While the level is collapsing (> ~4 dB down
+  in 40 ms) harmony retargeting is frozen; at the voiced→unvoiced edge the
+  ghosts and the sustain-loop capture rewind ~40 ms to the last clean
+  detection. A note that was stable while held ends on that pitch. HOLD is
+  exempt (its pitches were chosen at the press).
+- **Attack-sound Schmitt trigger**: one hit per onset *edge*; the trigger
+  re-arms only when the fast/slow envelope ratio collapses, so a refractory
+  expiring mid-note cannot double-fire.
+
+| Key | Type | Applies | Meaning |
+|---|---|---|---|
+| `formantHold` | bool | live | hold formants still under the pitch shift (default **true** — right for a voice). **Set `false` on guitar** and other non-vocal sources: they have no vocal tract to preserve, and off removes the formant stage from the signal path entirely (the library skips its envelope machinery), taking it off the table as a tone suspect and saving CPU. Applies to the lead and every shifted ghost |
+| `midiOctaves` | `"nearest"` \| `"held"` | live | how MIDI Harmony picks the correction octave. **`nearest` (default): the held note names the pitch CLASS, the player names the register** — the played note retunes to the held class right where it was played. `held`: snap to the held note's absolute octave (the original middle-C-pivot mapping) — which turns a chord voicing octaves below the lead line into a standing transpose: the "incredibly bassy corrected guitar" when MIDI mode is driving. Use `held` only when the chord track deliberately places the voice's register |
+
+Status additions: `shiftSt` (the lead's current shift in semitones — graph it;
+a wrong-octave correction is visible as the ratio swinging instead of a
+bass mystery) and `engineBuild` (git short hash of the running binary —
+"which build is the rig actually on" is now data).
+
 ### Attack Sound
 
 | Key | Type | Applies | Meaning |

@@ -285,6 +285,15 @@
             <option value="wide">Wide (40–2000 Hz)</option>
           </select>
         </div>
+        <div class="prow"><label>Formant hold</label>
+          <label class="switch" style="display:flex" title="hold formants still under the pitch shift (a voice keeps sounding like the same singer). Turn OFF for guitar and other non-vocal sources: they have no vocal tract to preserve, and off removes the formant stage from the signal path entirely."><input type="checkbox" id="formant-hold" checked></label>
+        </div>
+        <div class="prow"><label>MIDI octaves</label>
+          <select id="midi-oct" title="how MIDI Harmony picks the octave: 'nearest' retunes to the held pitch class in the register you are playing (default); 'held' snaps to the held note's absolute octave — which yanks the note to wherever the chord voicing sits.">
+            <option value="nearest" selected>Nearest (played register)</option>
+            <option value="held">Held note's octave</option>
+          </select>
+        </div>
         <div class="prow"><label>Output gain</label>
           <input type="range" id="gain" min="-60" max="12" step="0.5" value="0" style="flex:1">
           <span class="tab" id="gain-val" style="flex:0 0 56px;text-align:right">0.0 dB</span>
@@ -1222,6 +1231,9 @@ function syncHarm() {
   if (document.activeElement !== $('synth-patch')) $('synth-patch').value = c.synthPatch;
   if (document.activeElement !== $('synth-atk')) $('synth-atk').value = c.synthAttackMs;
   if (document.activeElement !== $('synth-rel')) $('synth-rel').value = c.synthReleaseMs;
+  $('formant-hold').checked = c.formantHold !== false;
+  if (document.activeElement !== $('midi-oct'))
+    $('midi-oct').value = c.midiOctaves === 'held' ? 'held' : 'nearest';
   if (document.activeElement !== $('atk-sound'))
     $('atk-sound').value = c.attackSound === undefined ? 'off' : c.attackSound;
   if (document.activeElement !== $('atk-gain'))
@@ -1269,6 +1281,8 @@ for (const ev of ['pointerup', 'pointerleave', 'pointercancel'])
     if (!$('harm-hold').classList.contains('on')) return;
     $('harm-hold').classList.remove('on'); schedulePost({ harmHold: false });
   });
+$('formant-hold').onchange = e => schedulePost({ formantHold: e.target.checked });
+$('midi-oct').onchange = e => schedulePost({ midiOctaves: e.target.value });
 $('atk-sound').onchange = e => schedulePost({ attackSound: e.target.value });
 $('atk-gain').onchange = e => {
   const v = Math.max(-60, Math.min(12, +e.target.value || 0));

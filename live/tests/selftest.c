@@ -964,6 +964,109 @@ static void test_lead_shift (void)
 /* Attack Sound: an onset fires a transient into the harmony bus BEFORE the
    synth ghost's envelope has risen -- the cover for a long synthAttackMs --
    at its own gain, outside every envelope. */
+/* The field complaint, verbatim: "the same pitch that is totally stable
+   while I'm holding the note just changes when I release it." A release is
+   a bend: the mute pulls the string sharp/flat while the level collapses,
+   the last voiced hops track it, and an unguarded ghost ends the note
+   somewhere the player never played -- sometimes a whole re-snapped scale
+   step away. The slope-freeze plus the rewind ring must make the ringing
+   ghost keep the held note's pitch. */
+/* midiOctaves: the held note names the PITCH CLASS, the player names the
+   register (default "nearest"). Absolute mode ("held") retunes to the held
+   note's own octave -- the standing-transpose "incredibly bassy" trap when
+   chord voicings sit octaves below the lead line. */
+static void test_midi_octave_fold (void)
+{
+    double shift[2];
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        ae_corrector_set_midi (p, true, 1ull << 48, 0); /* hold C3 */
+        ae_corrector_set_midi_fold (p, c == 0);
+
+        const int total = 49152;
+        float *in = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * 523.25 / 48000.0; /* playing C5 */
+            in[i] = (float) (0.4 * sin (ph) + 0.1 * sin (2.0 * ph));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, in + off, NULL, NULL, 512);
+        shift[c] = p->shift_semitones;
+        ae_corrector_free (p);
+        free (p); free (in);
+    }
+    CHECK (fabs (shift[0]) < 1.0,
+           "midiOctaves nearest: C5 against held C3 stays put (%.2f st)",
+           shift[0]);
+    CHECK (shift[1] < -20.0,
+           "midiOctaves held: absolute snap reaches down two octaves (%.2f st)",
+           shift[1]);
+}
+
+static void test_release_pitch_stability (void)
+{
+    const int hold = 48000, rel = 3600, quiet = 48000;
+    const int total = hold + rel + quiet;
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 20.0);
+    ae_corrector_set_transition_ms (p, 50.0);
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7; /* P5 above A3: E4 */
+    ae_corrector_set_harmony (p, true, 1, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("sine"), 5.0, 800.0);
+
+    /* A3 held; then a 75 ms release: pitch bends up ~80 cents while the
+       level collapses (the mute), then silence. */
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *hl = calloc ((size_t) total, sizeof (float));
+    float *hr = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < hold + rel; ++i)
+    {
+        double hz = 220.0, amp = 0.4;
+        if (i >= hold)
+        {
+            const double w = (double) (i - hold) / rel;
+            hz  = 220.0 * pow (2.0, 80.0 * w / 1200.0);
+            amp = 0.4 * pow (10.0, -30.0 * w / 20.0); /* -30 dB across */
+        }
+        ph += 2.0 * M_PI * hz / 48000.0;
+        in[i] = (float) (amp * (sin (ph) + 0.4 * sin (2.0 * ph)));
+    }
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, hl + off, hr + off, n);
+    }
+
+    /* The ghost during the note... */
+    const double held = peak_near (hl + hold - 24000, 20000, 329.63, 48000.0);
+    /* ...and 150-450 ms into the ring-out, past the release artifact. */
+    const double rung = peak_span (hl + hold + rel + 7200, 14400,
+                                   329.63 * 0.93, 329.63 * 1.08, 48000.0);
+    const double drift = 1200.0 * log2 (rung / held);
+    CHECK (fabs (drift) < 15.0,
+           "release keeps the held pitch (note %.2f Hz, tail %.2f Hz, "
+           "drift %.1f cents)", held, rung, drift);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (hl); free (hr);
+}
+
 static void test_attack_sound (void)
 {
     const int quiet = 9600, sung = 48000, total = quiet + sung;
@@ -2048,6 +2151,8 @@ int main (void)
     test_lead_shift();
     test_octave_revote_rebase();
     test_attack_sound();
+    test_release_pitch_stability();
+    test_midi_octave_fold();
     test_synth_envelope();
     test_walk();
     test_harmony();

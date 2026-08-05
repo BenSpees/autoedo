@@ -44,6 +44,12 @@
 
 #define DEFAULT_PORT 8017
 
+/* Git short hash stamped by the Makefile; "which binary am I actually
+   running" should never again be a field question. */
+#ifndef AE_BUILD_ID
+#define AE_BUILD_ID "unknown"
+#endif
+
 typedef struct
 {
     AeEngineConfig  engine_cfg;
@@ -201,6 +207,9 @@ static void config_defaults (App *app)
     c->params.harm_mute = 0;
     c->params.harm_solo = 0;
     c->params.harm_glide_ms = 0.0;
+    c->params.midi_fold      = true;  /* retune to the held class in the
+                                          PLAYED register; "held" = absolute */
+    c->params.formant_hold   = true;  /* voice default; guitars want off */
     c->params.attack_sound   = 0;     /* off */
     c->params.attack_gain_db = -26.0; /* Xentar's shipped pick level */  /* jump, the classic harmonizer */
     c->params.harm_sustain = true;  /* the release means nothing without it */
@@ -332,6 +341,7 @@ static void config_json (const App *app, char *out, size_t cap)
               ",\"harmOn\":%s,\"harmLock\":\"%s\",\"harmGainDb\":%.4g,"
               "\"harmSustain\":%s,\"harmHold\":%s,\"harmGlideMs\":%.4g,"
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
+              "\"midiOctaves\":\"%s\",\"formantHold\":%s,"
               "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
@@ -344,6 +354,8 @@ static void config_json (const App *app, char *out, size_t cap)
                   [c->params.attack_sound >= 0 && c->params.attack_sound <= 3
                        ? c->params.attack_sound : 0],
               c->params.attack_gain_db,
+              c->params.midi_fold ? "nearest" : "held",
+              c->params.formant_hold ? "true" : "false",
               c->params.midi_mode ? "true" : "false");
     strncat (out, harm, cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->midi_source);
@@ -518,6 +530,10 @@ static bool config_apply_json (App *app, const char *json)
         c->params.harm_on = b;
     if (ae_json_get_number (json, "harmGainDb", &num))
         c->params.harm_master_db = num_clamp (num, -24.0, 12.0);
+    if (ae_json_get_string (json, "midiOctaves", str, sizeof (str)))
+        c->params.midi_fold = strcmp (str, "held") != 0;
+    if (ae_json_get_bool (json, "formantHold", &b))
+        c->params.formant_hold = b;
     if (ae_json_get_string (json, "attackSound", str, sizeof (str)))
         c->params.attack_sound = strcmp (str, "noise") == 0 ? 1
                                : strcmp (str, "pick")  == 0 ? 2
@@ -880,20 +896,21 @@ static void status_refresh (App *app)
     snprintf (patches + pn, sizeof (patches) - pn, "]");
 
     snprintf (buf, sizeof (buf),
-        "{\"running\":%s,\"error\":\"%s\","
+        "{\"running\":%s,\"engineBuild\":\"%s\",\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,"
-        "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"voiced\":%s,"
+        "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"voiced\":%s,"
         "\"traceSeq\":%u,\"trace\":%s,"
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
         "\"synthPatches\":%s,\"irError\":\"%s\","
         "\"stepCents\":%.4f,\"config\":%s}",
-        st.running ? "true" : "false", err,
+        st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
         st.latency_samples, lat_ms,
-        (double) st.detected_hz, (double) st.target_hz, st.voiced ? "true" : "false",
+        (double) st.detected_hz, (double) st.target_hz, (double) st.shift_st,
+        st.voiced ? "true" : "false",
         st.trace_seq, trace,
         hdeg, midi,
         in_name, out_name,

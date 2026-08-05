@@ -531,6 +531,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->latency_samples = e->latency_frames;
     out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
     out->target_hz       = ae_corrector_target_hz (&e->corrector);
+    out->shift_st        = ae_corrector_shift_st (&e->corrector);
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);

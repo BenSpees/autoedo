@@ -59,6 +59,8 @@ typedef struct
     _Atomic double   harm_gain_lin[AE_HARM_VOICES];
     _Atomic double   harm_detune_cents[AE_HARM_VOICES];
     _Atomic double   harm_glide_ms;
+    _Atomic bool     midi_fold;
+    _Atomic bool     formant_hold;
     _Atomic int      attack_sound;
     _Atomic double   attack_gain_lin;
     _Atomic bool     harm_sustain;
@@ -127,6 +129,8 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
                                memory_order_relaxed);
     }
     atomic_store_explicit (&a->harm_glide_ms, p->harm_glide_ms, memory_order_relaxed);
+    atomic_store_explicit (&a->midi_fold,    p->midi_fold,    memory_order_relaxed);
+    atomic_store_explicit (&a->formant_hold, p->formant_hold, memory_order_relaxed);
     atomic_store_explicit (&a->attack_sound, p->attack_sound, memory_order_relaxed);
     atomic_store_explicit (&a->attack_gain_lin,
                            pow (10.0, p->attack_gain_db / 20.0),
@@ -205,6 +209,10 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->harm_on, memory_order_relaxed),
                           atomic_load_explicit (&a->harm_lock, memory_order_relaxed),
                           voices);
+    ae_corrector_set_midi_fold (ps,
+                          atomic_load_explicit (&a->midi_fold, memory_order_relaxed));
+    ae_corrector_set_formant_hold (ps,
+                          atomic_load_explicit (&a->formant_hold, memory_order_relaxed));
     ae_corrector_set_attack (ps,
                           atomic_load_explicit (&a->attack_sound, memory_order_relaxed),
                           atomic_load_explicit (&a->attack_gain_lin, memory_order_relaxed));

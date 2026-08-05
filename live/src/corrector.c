@@ -668,6 +668,9 @@ void ae_corrector_reset (AeCorrector *p)
         p->harm_master = 1.0;
     p->harm_master_cur = p->harm_master;
     p->lead_on         = true;
+    p->formant_hold = true;
+    p->midi_fold    = true;
+    atomic_store_explicit (&p->shift_st_out, 0.0f, memory_order_relaxed);
     p->atk_fast   = p->atk_slow = 0.0;
     p->atk_refract = 0;
     p->atk_active = 0;
@@ -682,6 +685,10 @@ void ae_corrector_reset (AeCorrector *p)
     p->sus_read        = 0;
     p->sus_mix         = 0.0;
     p->last_voiced_hz  = 0.0;
+    memset (p->rel_det, 0, sizeof (p->rel_det));
+    memset (p->rel_rms, 0, sizeof (p->rel_rms));
+    p->rel_pos = 0;
+    p->atk_armed = true;
     p->hold_latched    = false;
     p->hold_level      = 0.0;
 
@@ -895,7 +902,8 @@ static void capture_sustain (AeCorrector *p, long long end)
     const int xf = period; /* one period of crossfade */
     while (k > 2 && len + xf > p->sus_cap)
         len = --k * period;
-    if (len + xf > p->sus_cap || end - (long long) (len + xf) < 0)
+    if (len + xf > p->sus_cap || end - (long long) (len + xf) < 0
+        || p->in_write - (end - (long long) (len + xf)) > (long long) p->buf_size)
         return;
 
     const long long s0 = end - len;
@@ -1013,14 +1021,27 @@ static void attack_process (AeCorrector *p, float *harm_l, float *harm_r,
     if (p->atk_refract > 0)
         p->atk_refract -= num_samples;
 
+    /* One hit per onset EDGE. The naive version -- fire whenever fast
+       overtakes slow, refractory as the only guard -- double-fires: 80 ms
+       into a note the slow follower is still climbing, the ratio condition
+       is STILL true, and the expiring refractory refires the pick into the
+       middle of the same note. So the trigger is a Schmitt: it fires once,
+       disarms, and re-arms only when the ratio collapses (the note settled
+       or ended). The refractory stays as a belt for pathological input. */
+    if (! p->atk_armed
+        && (p->atk_fast < 1.2 * p->atk_slow || p->atk_fast < AE_GATE_RMS))
+        p->atk_armed = true;
+
     if (p->atk_mode != AE_ATK_OFF && harm_l != NULL
+        && p->atk_armed
         && p->atk_refract <= 0
         && p->atk_fast > 2.0 * AE_GATE_RMS
         && p->atk_fast > 2.5 * slow_prev
         && attack_relevant (p))
     {
         attack_trigger (p);
-        p->atk_refract = (int) (0.080 * p->fs);
+        p->atk_armed   = false;
+        p->atk_refract = (int) (0.060 * p->fs);
     }
 
     if (p->atk_active == 0 || harm_l == NULL)
@@ -1200,6 +1221,23 @@ static void run_detection (AeCorrector *p)
                 const double d = fabs (steps - (double) held_j[i]);
                 if (d < best) { best = d; cand = held_j[i]; }
             }
+            /* Register fold (default): the held note names a PITCH CLASS;
+               the player names the register. Chord voicings sit wherever
+               the chord track puts them -- often octaves below a lead line
+               -- and unfolded absolute snapping turns that distance into a
+               standing transpose: the "incredibly bassy corrected guitar"
+               when the nearest held note lives an octave or two down.
+               Folding by whole equaves retunes the played note to the held
+               class right where it was played. midiOctaves:"held" restores
+               the absolute behavior for rigs that use the chord octave to
+               place the voice. */
+            if (p->midi_fold)
+            {
+                while (steps - (double) cand > (double) p->edo * 0.5)
+                    cand += p->edo;
+                while ((double) cand - steps > (double) p->edo * 0.5)
+                    cand -= p->edo;
+            }
         }
         else
         {
@@ -1339,11 +1377,26 @@ static void run_detection (AeCorrector *p)
                                      -36.0, 36.0);
 
         p->primed = true;
+        atomic_store_explicit (&p->shift_st_out, (float) p->shift_semitones,
+                               memory_order_relaxed);
         p->prev_det_cents  = detected_cents;
         p->prev_tgt_cents  = target_cents;
         p->prev_pair_valid = true;
 
         /* ---- harmony voices (Xentar emulation) --------------------------- */
+        /* Release slope-freeze. A mute or finger-lift drops the level far
+           faster than a string ever decays on its own (a natural ring is a
+           few dB/s; a damp is hundreds) while often staying "voiced" for
+           tens of milliseconds of bent, dying pitch. A note that was
+           stable the whole time it was held must not change at the moment
+           it is let go -- so while the level is collapsing, the ghosts
+           keep the pitch they had and the rewind ring stops recording. */
+        {
+            const int rb = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
+            if (p->rel_rms[rb] > 0.0f && rms < 0.6 * (double) p->rel_rms[rb])
+                goto harmony_done;
+        }
+
         /* HOLD: the ghosts are frozen where they were, so none of the
            retargeting below runs. The LEAD above still tracked normally --
            that is the whole point, you go on singing over the held choir. */
@@ -1491,6 +1544,7 @@ harmony_done: ;
     else
     {
         p->shift_semitones = 0.0; /* identity; the crossfade handles the rest */
+        atomic_store_explicit (&p->shift_st_out, 0.0f, memory_order_relaxed);
         p->prev_pair_valid = false;
         p->target_valid    = false;
         p->sustain_s       = 0.0;
@@ -1506,9 +1560,48 @@ harmony_done: ;
     }
 
     if (now_voiced)
-        p->last_voiced_hz = res.frequency_hz;
+    {
+        /* The rewind ring records only while the level is NOT collapsing:
+           an entry written during the damp would be exactly the artifact
+           the rewind exists to skip. */
+        const int rb = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
+        const bool releasing = p->rel_rms[rb] > 0.0f
+                            && rms < 0.6 * (double) p->rel_rms[rb];
+        if (! releasing)
+        {
+            p->last_voiced_hz = res.frequency_hz;
+            p->rel_pos = (uint8_t) ((p->rel_pos + 1) % AE_REL_RING);
+            p->rel_det[p->rel_pos] = (float) res.frequency_hz;
+            p->rel_rms[p->rel_pos] = (float) rms;
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+            {
+                p->rel_hc[p->rel_pos][v] = (float) p->h_cents_cur[v];
+                p->rel_hs[p->rel_pos][v] = (float) p->h_semitones[v];
+            }
+        }
+    }
     else if (p->voiced)
-        capture_sustain (p, p->in_write); /* the note just ended: keep its end */
+    {
+        /* The note just ended. The final hops tracked the RELEASE -- the
+           mute or lift bending the string on its way out -- so rewind the
+           ghosts (and the pitch the sustain slice will be cut by) to ~40 ms
+           before the drop, and cut the slice from back there too. A held
+           choir is exempt: its pitches were chosen at the press and must
+           not move. */
+        const int back = 8; /* hops of ~5 ms */
+        const int idx = (p->rel_pos + AE_REL_RING - back) % AE_REL_RING;
+        if (p->rel_det[idx] > 0.0f && ! (p->harm_hold && p->hold_latched))
+        {
+            p->last_voiced_hz = p->rel_det[idx];
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+            {
+                p->h_cents_cur[v]  = p->rel_hc[idx][v];
+                p->h_cents_t[v]    = p->rel_hc[idx][v];
+                p->h_semitones[v]  = p->rel_hs[idx][v];
+            }
+        }
+        capture_sustain (p, p->in_write - (long long) (0.045 * p->fs));
+    }
     p->voiced = now_voiced;
     atomic_store_explicit (&p->voiced_out, now_voiced, memory_order_relaxed);
 
@@ -1537,15 +1630,28 @@ harmony_done: ;
 
 /* `base_hz` is the detected fundamental, which the library's formant
    analysis wants in order to separate formants from the harmonic series. */
-static void set_shift (AeShifter *s, double semitones, double base_hz)
+static void set_shift (AeShifter *s, double semitones, double base_hz,
+                       bool formant_hold)
 {
     ae_shifter_set_semitones (s, semitones,
                               fabs (semitones) >= AE_TONALITY_MIN_ST
                                 ? AE_TONALITY_HZ : 0.0);
-    /* Hold the formants still while the pitch moves, so a transposed voice
-       still sounds like the same singer instead of chipmunking. */
-    ae_shifter_set_formant_semitones (s, 0.0, true);
-    ae_shifter_set_formant_base (s, base_hz);
+    if (formant_hold)
+    {
+        /* Hold the formants still while the pitch moves, so a transposed
+           voice still sounds like the same singer instead of chipmunking. */
+        ae_shifter_set_formant_semitones (s, 0.0, true);
+        ae_shifter_set_formant_base (s, base_hz);
+    }
+    else
+    {
+        /* Fully out of the path (the library skips its envelope machinery
+           at multiplier 1 with compensation off): a guitar has no vocal
+           tract to preserve, and this removes the formant stage from the
+           list of suspects entirely. */
+        ae_shifter_set_formant_semitones (s, 0.0, false);
+        ae_shifter_set_formant_base (s, 0.0);
+    }
 }
 
 /* The string-machine ensemble: three delay taps swept by their own pairs of
@@ -1967,7 +2073,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     }
     else
     {
-        set_shift (p->shifter, p->shift_semitones, base_hz);
+        set_shift (p->shifter, p->shift_semitones, base_hz, p->formant_hold);
         ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
     }
 
@@ -2100,7 +2206,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->h_mix[v] = 0.0; /* fade in from silence */
         }
 
-        set_shift (p->h_shifter[v], p->h_semitones[v], base_hz);
+        set_shift (p->h_shifter[v], p->h_semitones[v], base_hz, p->formant_hold);
         ae_shifter_process (p->h_shifter[v], harm_in, p->voice_buf, num_samples);
 
         /* Same envelope the synth ghosts get. It used to be a fixed 5 ms
