@@ -181,6 +181,8 @@ typedef struct
     char         sample_root[1024];      /* per-rate WAV cache root */
     char         sample_manifest[1024];  /* optional file list (JSON) */
     char         sample_instrument[32];
+    int          sample_octave;          /* filename->sounding semitones;
+                                            AE_SMP_OCTAVE_AUTO = the table */
     int          send_channel;           /* record send: 1-based output device
                                             channel; 0 = no send. Restart-
                                             scoped (device channel map). Must
@@ -220,6 +222,9 @@ typedef struct
     float  sample_vel;      /* last strike level the sample voices used */
     int    sample_zones;    /* loaded bank: distinct recording pitches */
     int    sample_files;    /* ...and total recordings behind them */
+    float  sample_norm_db;  /* level normalisation the bank measured for
+                               itself -- the shipped sets span ~20 dB */
+    int    sample_octave;   /* filename->sounding offset actually applied */
     float  lead_makeup;     /* the lead shifter's level-match gain, linear */
     float  out_peak;        /* decaying peak of the summed output BEFORE the
                                soft clip, linear: > ~0.79 means the clip is
@@ -270,7 +275,7 @@ void ae_engine_sleep_ms (int ms);
 /* Load a sample instrument into the running engine (CONTROL thread). */
 bool ae_audio_engine_load_samples (AeAudioEngine *e, const char *root,
                                    const char *instrument, const char *manifest,
-                                   char *err, size_t err_len);
+                                   int octave, char *err, size_t err_len);
 
 bool ae_audio_engine_load_ir (AeAudioEngine *e, int point, const char *path,
                               const char *hash, double predelay_ms,

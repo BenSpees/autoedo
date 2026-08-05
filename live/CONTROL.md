@@ -288,9 +288,12 @@ the wrong speed.
 | `sampleInstrument` | string | live (reloads) | which instrument folder to load. **The engine carries no instrument list** — it is whatever `<samplePath>/` actually holds, so adding one (e.g. `pizzicato`) is dropping a folder in the cache and needs no engine or controller change. Status echoes `sampleInstruments` (what was found, sorted); build the picker from that, as with `synthPatches`. The shipped set is `piano` `electric` `acoustic` `bass` `vibraphone` `choir` `harpsichord` `oboe` `pizzicato`. **Feature-detect on this key** |
 | `sampleMix` | float 0–1 | live | layer blend against the shifted rendering of the same ghost. `0` = shifted alone, `1` = sample alone, **`0.5` = both at unity** — a plateau at centre with an equal-power taper either side (`g = sin(min(1, 2·d)·π/2)` per side, `d` the distance from the far end), not the textbook crossfade that would drop both to 0.707 in the middle. "sample" is a LAYER, not a swap: at any mix below 1 the voice's shifter keeps running |
 | `sampleVelocity` | float −1…1 | live | fixed strike level; **`-1` (default) = measure it** from the lead's own attack |
+| `sampleOctave` | `"auto"` \| int −24…+24 | live (reloads) | filename-to-**sounding** pitch offset in semitones. `"auto"` (default) uses the built-in table for the two shipped sets whose filenames are not their sounding pitch — **bass** is named an octave ABOVE what it sounds, **harpsichord** an octave BELOW — and 0 for everything else. A number overrides it for any set not in that table. Wrong here means the ghost is a clean octave off, so it is worth checking on any new instrument |
 | `harmSource`, `leadSource`, `hSrc[]` | += `"sample"` | live | the source selectors all take it |
 
-Status: `sampleInstruments` (the instruments discovered under `samplePath`
+Status: `sampleNormDb` (the level correction the bank measured for itself)
+and `sampleOctaveApplied` (the filename→sounding offset in force),
+`sampleInstruments` (the instruments discovered under `samplePath`
 — a directory counts when it holds at least one file the zone parser
 recognises), `sampleVelLast` (the level the voices were last struck with — a
 strike level you cannot see is one you cannot tune), `sampleZones` /
@@ -321,6 +324,18 @@ cutting a sounding one (Xentar's node-swap discipline, ported).
   (the older instruments) can sit side by side in one cache.
 - **Round robin is per (instrument, zone, layer) and never the previous
   pick.** A repeated note that reuses its recording machine-guns at once.
+- **Level is measured per BANK, not assumed.** The shipped sets are
+  peak-normalised to their own targets, and those targets are ~20 dB apart
+  (measured here: piano −10.7 dBFS, acoustic −31.9, over the first 300 ms
+  of each main-layer recording). The balance between instruments therefore
+  lives in the file mastering, not in any runtime constant — so the engine
+  measures each bank at load (median over the main layer) and normalises it
+  to a common −22 dBFS reference. Switching instrument changes the timbre
+  and not the level, and a set dropped into the cache at any mastering
+  arrives usable. Status reports `sampleNormDb`, the correction applied.
+  The measurement deliberately excludes the soft layer, which is
+  peak-matched to its main layer on purpose: normalising per file would
+  destroy exactly the relationship that makes the swap a timbre change.
 - **Zone then RATE.** Nearest recording by pitch, then a fractional,
   **unquantised** playback rate — that is what lands a 22-EDO degree
   exactly off a 12-per-octave map.

@@ -35,6 +35,15 @@ typedef struct
     bool   soft;
 } AeSampleRec;
 
+/* Filename pitch vs SOUNDING pitch. Two shipped sets are named an octave
+   off what they actually sound: bass filenames sit an octave ABOVE the
+   sounding note, harpsichord an octave BELOW. Every other set is named at
+   true pitch. The zone map and the rate math are self-consistent either
+   way -- but a ghost asked for E4 has to SOUND E4, so the offset is folded
+   in as files are indexed and everything downstream is in sounding pitch.
+   `octave_override` (from sampleOctave) covers any set not in this table. */
+typedef struct { const char *name; int semitones; } AeSampleOctave;
+
 typedef struct
 {
     AeSampleRec recs[AE_SMP_MAX_RECS];
@@ -50,6 +59,16 @@ typedef struct
     char   instrument[32];
     double rate;      /* the rate the files were cached at */
     size_t bytes;     /* total PCM footprint, for the status read-out */
+    /* Per-BANK level normalisation, measured at load. The shipped sets are
+       peak-normalised to targets spanning ~16 dB, so the balance between
+       instruments lives in the FILE MASTERING, not in any runtime
+       constant -- switching instruments without this drops or lifts the
+       ghosts by up to that much. Measured over the main layer only and
+       applied to the whole bank, which is what preserves the soft layer's
+       deliberate peak-match to it (a timbre swap, never a level change). */
+    double norm;
+    double meas_rms;  /* what was measured, for the read-out */
+    int    octave;    /* filename -> sounding offset actually applied */
 } AeSampleBank;
 
 /* Load one instrument from the <root>/<instrument> directory (control thread;
@@ -58,9 +77,15 @@ typedef struct
    of it, because the filename already carries instrument, zone, layer and
    variant. NULL/"" scans the directory instead. Returns false with a
    reason in err. */
+/* `octave_override` shifts filename pitch to sounding pitch in SEMITONES;
+   AE_SMP_OCTAVE_AUTO uses the built-in table for the known sets and 0
+   otherwise. */
+#define AE_SMP_OCTAVE_AUTO 99
+
 bool ae_sampler_load (AeSampleBank *bank, const char *root,
                       const char *instrument, const char *manifest,
-                      double engine_rate, char *err, size_t err_len);
+                      double engine_rate, int octave_override,
+                      char *err, size_t err_len);
 
 void ae_sampler_free (AeSampleBank *bank);
 

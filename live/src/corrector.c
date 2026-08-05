@@ -688,6 +688,7 @@ void ae_corrector_reset (AeCorrector *p)
     if (p->smp_mix <= 0.0) p->smp_mix = 1.0;
     if (p->smp_vel_fixed == 0.0) p->smp_vel_fixed = -1.0;
     p->smp_rng = 0x2545f491u;
+    if (p->smp_octave == 0) p->smp_octave = AE_SMP_OCTAVE_AUTO;
     /* Voices default to "follow the global source" -- the documented
        meaning of AE_HARM_SRC_DEFAULT. A zeroed struct would otherwise read
        as an explicit per-voice AE_HARM_SRC_VOICE override and silently
@@ -971,6 +972,11 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity)
     p->smp_vel_fixed = velocity < 0.0 ? -1.0 : (velocity > 1.0 ? 1.0 : velocity);
 }
 
+void ae_corrector_set_sample_octave (AeCorrector *p, int semitones)
+{
+    p->smp_octave = semitones;
+}
+
 bool ae_corrector_load_samples (AeCorrector *p, const char *root,
                                 const char *instrument, const char *manifest,
                                 char *err, size_t err_len)
@@ -981,7 +987,7 @@ bool ae_corrector_load_samples (AeCorrector *p, const char *root,
        long enough for the audio thread to turn a block over -- so freeing
        and refilling it cannot pull a buffer out from under a voice. */
     if (! ae_sampler_load (&p->smp_bank[idle], root, instrument, manifest,
-                           p->fs, err, err_len))
+                           p->fs, p->smp_octave, err, err_len))
         return false;                     /* the running bank is untouched */
     atomic_store_explicit (&p->smp_gen,
                            atomic_load_explicit (&p->smp_gen, memory_order_relaxed) + 1,
@@ -1033,6 +1039,9 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
     p->smp[v][nxt].rate = hz / rec_hz;
     p->smp[v][nxt].gain   = vel;
     p->smp[v][nxt].gain_t = vel;
+    /* The bank's measured level travels with the strike, so a slot still
+       ringing from the previous instrument keeps ITS normalisation. */
+    p->smp[v][nxt].norm   = bank->norm;
     p->smp[v][nxt].fade = 1.0;
     p->smp[v][nxt].gen  = atomic_load_explicit (&p->smp_gen, memory_order_relaxed);
 }
@@ -1063,7 +1072,7 @@ static double sample_tick (AeCorrector *p, int v, int slot)
        heard as a second event. */
     p->smp[v][slot].gain += (p->smp[v][slot].gain_t - p->smp[v][slot].gain)
                           * p->smp_gain_a;
-    return x * p->smp[v][slot].gain * p->smp[v][slot].fade;
+    return x * p->smp[v][slot].gain * p->smp[v][slot].fade * p->smp[v][slot].norm;
 }
 
 void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin)

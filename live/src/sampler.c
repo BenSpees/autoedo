@@ -1,6 +1,7 @@
 #include "sampler.h"
 
 #include <dirent.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -140,6 +141,22 @@ static int parse_name (const char *name, bool *soft)
     return 12 * (oct + 1) + pc;
 }
 
+/* The two shipped sets whose filenames are not their sounding pitch. */
+static const AeSampleOctave k_octaves[] = {
+    { "bass",        -12 }, /* named an octave ABOVE what it sounds */
+    { "harpsichord",  12 }, /* named an octave BELOW */
+};
+
+static int octave_for (const char *instrument, int override_st)
+{
+    if (override_st != AE_SMP_OCTAVE_AUTO)
+        return override_st;
+    for (size_t i = 0; i < sizeof (k_octaves) / sizeof (k_octaves[0]); ++i)
+        if (strcmp (instrument, k_octaves[i].name) == 0)
+            return k_octaves[i].semitones;
+    return 0;
+}
+
 static int zone_slot (AeSampleBank *b, int midi)
 {
     for (int i = 0; i < b->n_zones; ++i)
@@ -157,9 +174,10 @@ static void add_file (AeSampleBank *b, const char *dir, const char *name,
                       double engine_rate)
 {
     bool soft = false;
-    const int midi = parse_name (name, &soft);
+    int midi = parse_name (name, &soft);
     if (midi < 0 || b->n_recs >= AE_SMP_MAX_RECS)
         return;
+    midi += b->octave; /* index in SOUNDING pitch, not filename pitch */
     const int z = zone_slot (b, midi);
     if (z < 0)
         return;
@@ -250,9 +268,57 @@ static int load_from_manifest (AeSampleBank *b, const char *manifest,
     return found;
 }
 
+/* The bank's own level, measured over the first 300 ms of each MAIN-layer
+   recording -- the note's body, not its tail, which on a long decay would
+   dominate an over-the-whole-file figure and read a piano as quiet. The
+   median is taken rather than the mean so one hot or dead zone cannot move
+   the instrument. */
+static void measure_bank (AeSampleBank *b)
+{
+    b->norm = 1.0;
+    b->meas_rms = 0.0;
+    if (b->n_recs == 0)
+        return;
+
+    double rms[AE_SMP_MAX_RECS];
+    int n = 0;
+    const int win = (int) (0.300 * (b->rate > 0.0 ? b->rate : 48000.0));
+    for (int i = 0; i < b->n_recs; ++i)
+    {
+        if (b->recs[i].soft)
+            continue; /* the soft layer rides its mastered relationship */
+        const int len = b->recs[i].len < win ? b->recs[i].len : win;
+        if (len <= 0)
+            continue;
+        double sq = 0.0;
+        for (int k = 0; k < len; ++k)
+            sq += (double) b->recs[i].pcm[k] * b->recs[i].pcm[k];
+        rms[n++] = sqrt (sq / len);
+    }
+    if (n == 0)
+        return;
+    for (int i = 1; i < n; ++i)
+        for (int j = i; j > 0 && rms[j] < rms[j - 1]; --j)
+        {
+            const double t = rms[j]; rms[j] = rms[j - 1]; rms[j - 1] = t;
+        }
+    b->meas_rms = rms[n / 2];
+    /* Reference: -22 dBFS, the median of the shipped sets' own levels, so
+       an instrument at the middle of the library is left alone and the
+       outliers are brought to it. Clamped so a pathological bank cannot
+       turn into a boost. */
+    if (b->meas_rms > 1e-6)
+    {
+        b->norm = 0.0794328 / b->meas_rms; /* 10^(-22/20) */
+        if (b->norm < 0.1)  b->norm = 0.1;
+        if (b->norm > 10.0) b->norm = 10.0;
+    }
+}
+
 bool ae_sampler_load (AeSampleBank *bank, const char *root,
                       const char *instrument, const char *manifest,
-                      double engine_rate, char *err, size_t err_len)
+                      double engine_rate, int octave_override,
+                      char *err, size_t err_len)
 {
     ae_sampler_free (bank);
     if (root == NULL || root[0] == '\0' || instrument == NULL || instrument[0] == '\0')
@@ -261,7 +327,9 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
         return false;
     }
     snprintf (bank->instrument, sizeof (bank->instrument), "%s", instrument);
-    bank->rate = engine_rate;
+    bank->rate   = engine_rate;
+    bank->octave = octave_for (instrument, octave_override);
+    bank->norm   = 1.0;
 
     char dir[1100];
     snprintf (dir, sizeof (dir), "%s/%s", root, instrument);
@@ -311,6 +379,7 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
                 bank->soft_idx[j-1][k] = c;
             }
         }
+    measure_bank (bank);
     err[0] = '\0';
     return true;
 }

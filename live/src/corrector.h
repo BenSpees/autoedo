@@ -255,6 +255,7 @@ typedef struct
     _Atomic float smp_vel_out;   /* last strike level, for the read-out */
     signed char   smp_rr[AE_SMP_MAX_ZONES * 2]; /* last RR pick per zone+layer */
     unsigned      smp_rng;
+    int           smp_octave;    /* filename -> sounding offset, or AUTO */
     double        smp_gain_a;    /* per-sample coefficient of the ~15 ms
                                     ramp the velocity refinement rides */
 
@@ -268,7 +269,7 @@ typedef struct
     struct
     {
         const AeSampleRec *rec;
-        double pos, rate, gain, gain_t, fade;
+        double pos, rate, gain, gain_t, fade, norm;
         int    gen;
     } smp[AE_HARM_VOICES + 1][2]; /* [AE_HARM_VOICES] = the lead */
     int    smp_cur[AE_HARM_VOICES + 1];
@@ -506,6 +507,10 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity);
 /* Load one instrument into the idle bank slot and swap it live (CONTROL
    thread -- reads files, allocates). Returns false with a reason in err;
    a failed load leaves the running bank untouched. */
+/* Filename-to-sounding pitch offset in semitones for the NEXT load;
+   AE_SMP_OCTAVE_AUTO uses the built-in table. */
+void ae_corrector_set_sample_octave (AeCorrector *p, int semitones);
+
 bool ae_corrector_load_samples (AeCorrector *p, const char *root,
                                 const char *instrument, const char *manifest,
                                 char *err, size_t err_len);

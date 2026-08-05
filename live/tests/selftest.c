@@ -2389,7 +2389,7 @@ static void test_sampler_bank (void)
     AeSampleBank b;
     memset (&b, 0, sizeof (b));
     char err[256] = "";
-    CHECK (ae_sampler_load (&b, root, "piano", NULL, 48000.0, err, sizeof (err)),
+    CHECK (ae_sampler_load (&b, root, "piano", NULL, 48000.0, AE_SMP_OCTAVE_AUTO, err, sizeof (err)),
            "sampler: bank loads (%s)", err);
     CHECK (b.n_zones == 2, "sampler: two zones (got %d)", b.n_zones);
     CHECK (b.n_recs == 5, "sampler: five recordings, junk name skipped (got %d)",
@@ -2436,7 +2436,7 @@ static void test_sampler_bank (void)
     snprintf (pth, sizeof (pth), "%s/Gs1.wav", dir); write_wav (pth, 51.91, 0.5, 0.4);
     AeSampleBank sh;
     memset (&sh, 0, sizeof (sh));
-    CHECK (ae_sampler_load (&sh, root, "piano", NULL, 48000.0, err, sizeof (err)),
+    CHECK (ae_sampler_load (&sh, root, "piano", NULL, 48000.0, AE_SMP_OCTAVE_AUTO, err, sizeof (err)),
            "sampler: sharps reload (%s)", err);
     bool got30 = false, got32 = false;
     for (int i = 0; i < sh.n_zones; ++i)
@@ -2449,16 +2449,84 @@ static void test_sampler_bank (void)
            (int) got30, (int) got32);
     ae_sampler_free (&sh);
 
+    /* Per-BANK level normalisation. The shipped sets are peak-normalised
+       to targets ~20 dB apart, so without this, switching instrument moves
+       the ghosts by that much. Measured on the MAIN layer and applied to
+       the whole bank, which is what preserves the soft layer's deliberate
+       peak-match (timbre swap, never a level change). */
+    {
+        char qdir[256], qp[512];
+        snprintf (qdir, sizeof (qdir), "%s/quietset", root);
+        snprintf (cmd, sizeof (cmd), "mkdir -p %s", qdir);
+        if (system (cmd) == 0)
+        {
+            /* Same content as piano's C4, 20 dB down. */
+            snprintf (qp, sizeof (qp), "%s/C4.wav", qdir);
+            write_wav (qp, 261.6256, 1.0, 0.05);
+            AeSampleBank q;
+            memset (&q, 0, sizeof (q));
+            if (ae_sampler_load (&q, root, "quietset", NULL, 48000.0,
+                                 AE_SMP_OCTAVE_AUTO, err, sizeof (err)))
+            {
+                /* The loud bank was written at 0.5, this one at 0.05: the
+                   normalisations must differ by ~20 dB in the other
+                   direction, bringing both to the same reference. */
+                const double d = 20.0 * log10 (q.norm / b.norm);
+                CHECK (d > 15.0 && d < 25.0,
+                       "sampler: bank level normalised (%.1f dB apart, "
+                       "sources are 20 dB apart)", d);
+                const double la = b.norm * b.meas_rms, lb = q.norm * q.meas_rms;
+                CHECK (fabs (20.0 * log10 (la / lb)) < 1.0,
+                       "sampler: both banks land on one reference (%.2f dB apart)",
+                       20.0 * log10 (la / lb));
+                ae_sampler_free (&q);
+            }
+        }
+    }
+
+    /* Filename pitch is not always sounding pitch: bass is named an octave
+       ABOVE what it sounds, harpsichord an octave BELOW. A ghost asked for
+       a pitch has to SOUND it, so the offset is folded in at index time. */
+    {
+        char bdir[256], bp[512];
+        snprintf (bdir, sizeof (bdir), "%s/bass", root);
+        snprintf (cmd, sizeof (cmd), "mkdir -p %s", bdir);
+        if (system (cmd) == 0)
+        {
+            snprintf (bp, sizeof (bp), "%s/A2.wav", bdir);
+            write_wav (bp, 110.0, 0.5, 0.4);
+            AeSampleBank bb;
+            memset (&bb, 0, sizeof (bb));
+            if (ae_sampler_load (&bb, root, "bass", NULL, 48000.0,
+                                 AE_SMP_OCTAVE_AUTO, err, sizeof (err)))
+            {
+                CHECK (bb.n_zones == 1 && bb.zones[0] == 33,
+                       "sampler: bass A2 indexes as sounding A1=33 (got %d)",
+                       bb.n_zones ? bb.zones[0] : -1);
+                ae_sampler_free (&bb);
+            }
+            /* An explicit override beats the table, for any other set. */
+            memset (&bb, 0, sizeof (bb));
+            if (ae_sampler_load (&bb, root, "bass", NULL, 48000.0, 0,
+                                 err, sizeof (err)))
+            {
+                CHECK (bb.n_zones == 1 && bb.zones[0] == 45,
+                       "sampler: sampleOctave overrides the table (got %d)",
+                       bb.n_zones ? bb.zones[0] : -1);
+                ae_sampler_free (&bb);
+            }
+        }
+    }
+
     /* Instrument discovery: the engine carries no instrument list, so a
        cache directory is the only source of truth. */
     char names[AE_SMP_MAX_INSTRUMENTS][32];
     const int ni = ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS);
-    CHECK (ni == 1 && strcmp (names[0], "piano") == 0,
-           "sampler: discovery finds the instrument folder (%d found)", ni);
+    CHECK (ni == 3, "sampler: discovery finds every instrument folder (%d)", ni);
     snprintf (cmd, sizeof (cmd), "mkdir -p %s/emptyish && touch %s/emptyish/readme.txt",
               root, root);
     if (system (cmd) == 0)
-        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 1,
+        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 3,
                "sampler: a folder with no recordings is not an instrument");
 
     ae_sampler_free (&b);

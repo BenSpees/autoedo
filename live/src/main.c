@@ -228,6 +228,7 @@ static void config_defaults (App *app)
     c->params.sample_velocity = -1.0; /* measure it from the lead's attack */
     c->sample_root[0] = c->sample_manifest[0] = '\0';
     snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
+    c->sample_octave = AE_SMP_OCTAVE_AUTO;
     app->sample_err[0] = '\0';
     app->sample_dirty  = false;
     c->params.attack_sound   = 0;     /* off */
@@ -288,6 +289,11 @@ static void config_sync (App *app)
 static void config_json (const App *app, char *out, size_t cap)
 {
     const AeEngineConfig *c = &app->engine_cfg;
+    char sample_oct_str[16];
+    if (c->sample_octave == AE_SMP_OCTAVE_AUTO)
+        snprintf (sample_oct_str, sizeof (sample_oct_str), "\"auto\"");
+    else
+        snprintf (sample_oct_str, sizeof (sample_oct_str), "%d", c->sample_octave);
     snprintf (out, cap,
               "{\"edo\":%d,\"retuneMs\":%.6g,\"transitionMs\":%.6g,"
               "\"amount\":%.6g,\"toleranceCents\":%.6g,\"stickiness\":%.6g,"
@@ -373,7 +379,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,"
-              "\"sampleInstrument\":\"%s\","
+              "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
               "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
@@ -391,7 +397,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.formant_hold ? "true" : "false",
               c->params.formant_st,
               c->params.sample_mix, c->params.sample_velocity,
-              c->sample_instrument,
+              c->sample_instrument, sample_oct_str,
               c->send_channel,
               (const char *[]){ "full", "wet", "lead", "harm" }
                   [c->params.send_content >= 0 && c->params.send_content <= 3
@@ -640,6 +646,20 @@ static bool config_apply_json (App *app, const char *json)
             snprintf (app->sample_hash, sizeof (app->sample_hash), "%.79s", str2);
             app->sample_dirty = true;
         }
+    }
+    /* "auto" = the built-in table for the sets whose filenames are not
+       their sounding pitch; a number overrides it for any other set. */
+    if (ae_json_get_string (json, "sampleOctave", str, sizeof (str))
+        && strcmp (str, "auto") == 0)
+    {
+        if (c->sample_octave != AE_SMP_OCTAVE_AUTO) app->sample_dirty = true;
+        c->sample_octave = AE_SMP_OCTAVE_AUTO;
+    }
+    else if (ae_json_get_number (json, "sampleOctave", &num))
+    {
+        const int oct = (int) num_clamp (num, -24.0, 24.0);
+        if (oct != c->sample_octave) app->sample_dirty = true;
+        c->sample_octave = oct;
     }
     if (ae_json_get_string (json, "sampleInstrument", str, sizeof (str)))
     {
@@ -914,8 +934,8 @@ static void samples_reload_locked (App *app)
     }
     char err[256] = "";
     if (! ae_audio_engine_load_samples (app->engine, c->sample_root,
-                                        c->sample_instrument,
-                                        c->sample_manifest, err, sizeof (err)))
+                                        c->sample_instrument, c->sample_manifest,
+                                        c->sample_octave, err, sizeof (err)))
         snprintf (app->sample_err, sizeof (app->sample_err), "%s", err);
     else
         app->sample_err[0] = '\0';
@@ -1072,6 +1092,7 @@ static void status_refresh (App *app)
         "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
         "\"sampleVelLast\":%.3f,\"sampleZones\":%d,\"sampleFiles\":%d,"
         "\"sampleInstruments\":%s,"
+        "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,"
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
@@ -1087,6 +1108,7 @@ static void status_refresh (App *app)
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
         patches, ir_err, send_err_esc, sample_err_esc,
         (double) st.sample_vel, st.sample_zones, st.sample_files, insts,
+        (double) st.sample_norm_db, st.sample_octave,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),

@@ -541,13 +541,14 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)
 
 bool ae_audio_engine_load_samples (AeAudioEngine *e, const char *root,
                                    const char *instrument, const char *manifest,
-                                   char *err, size_t err_len)
+                                   int octave, char *err, size_t err_len)
 {
     if (e == NULL)
     {
         snprintf (err, err_len, "engine not running");
         return false;
     }
+    ae_corrector_set_sample_octave (&e->corrector, octave);
     const bool ok = ae_corrector_load_samples (&e->corrector, root, instrument,
                                                manifest, err, err_len);
     /* Hold off long enough for the audio thread to turn a block over before
@@ -598,6 +599,9 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
         const int lv = atomic_load_explicit (&e->corrector.smp_live, memory_order_relaxed);
         out->sample_zones = lv >= 0 ? e->corrector.smp_bank[lv].n_zones : 0;
         out->sample_files = lv >= 0 ? e->corrector.smp_bank[lv].n_recs  : 0;
+        out->sample_norm_db = lv >= 0 && e->corrector.smp_bank[lv].norm > 0.0
+            ? (float) (20.0 * log10 (e->corrector.smp_bank[lv].norm)) : 0.0f;
+        out->sample_octave  = lv >= 0 ? e->corrector.smp_bank[lv].octave : 0;
     }
     out->out_peak        = atomic_load_explicit (&e->out_peak, memory_order_relaxed);
     out->voiced          = ae_corrector_voiced (&e->corrector);
