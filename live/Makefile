@@ -13,7 +13,7 @@ CC     ?= cc
 CXX    ?= c++
 CFLAGS ?= -O2
 CXXFLAGS ?= -O2
-CFLAGS   += -std=c11 -Wall -Wextra -Isrc -Ibuild -Ithird_party/irconv
+CFLAGS   += -std=c11 -Wall -Wextra -Isrc -I$(BUILD) -Ithird_party/irconv
 # Signalsmith Stretch is C++11; -ffast-math is explicitly supported by it.
 CXXFLAGS += -std=c++11 -Wall -Wextra -Isrc -isystem third_party
 BUILD  := build
