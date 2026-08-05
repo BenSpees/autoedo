@@ -1045,8 +1045,20 @@ static void run_detection (AeCorrector *p)
         const double target_hz    = ae_degree_hz ((long) cand, p->edo, ref, period);
         const double target_cents = 1200.0 * log2 (target_hz / ref);
 
+        /* The static lead transpose (leadShiftSteps), applied AFTER the
+           snap. Everything above -- detection, quantize, stickiness,
+           tolerance, retune -- ran against the real note; the shift only
+           moves what comes out. In whole EDO steps, so +-edo is an exact
+           equave and the degree mask never notices. The published target is
+           the SHIFTED one: it is what the audience hears, what the pitch
+           graph should draw, and what a synth lead must play. */
+        const double lead_shift_c = p->edo > 0
+            ? (double) p->lead_shift * period / (double) p->edo : 0.0;
+
         atomic_store_explicit (&p->detected_hz_out, (float) res.frequency_hz, memory_order_relaxed);
-        atomic_store_explicit (&p->target_hz_out,   (float) target_hz,        memory_order_relaxed);
+        atomic_store_explicit (&p->target_hz_out,
+                               (float) (target_hz * pow (2.0, lead_shift_c / 1200.0)),
+                               memory_order_relaxed);
 
         /* On a fresh onset, start from the pitch actually sung so the
            correction glides from there (retune speed) instead of jumping
@@ -1100,10 +1112,11 @@ static void run_detection (AeCorrector *p)
         const double alpha   = (tau_sec <= 0.0) ? 1.0 : (1.0 - exp (-elapsed / tau_sec));
         p->out_cents += (eff_cents - p->out_cents) * alpha;
 
-        /* The shifter takes semitones. Correction ratios stay near 1; the
-           clamp is a safety net against a wild detection. */
-        p->shift_semitones = dclamp ((p->out_cents - detected_cents) / 100.0,
-                                     -12.0, 12.0);
+        /* The shifter takes semitones. Correction alone stays near 1; the
+           lead transpose can be octaves, so the clamp is the same +-36 the
+           harmony voices get (a safety net, not a musical bound). */
+        p->shift_semitones = dclamp ((p->out_cents + lead_shift_c - detected_cents) / 100.0,
+                                     -36.0, 36.0);
 
         p->primed = true;
 
@@ -1135,7 +1148,11 @@ static void run_detection (AeCorrector *p)
            fully corrected (Amount below 1, inside the tolerance dead zone,
            or still gliding), the lead sits off its ideal degree and a ghost
            pinned to that ideal beats against it. */
-        const double anchor_cents = p->lead_on ? p->out_cents : detected_cents;
+        /* The shift is part of the audible lead, so it is part of the
+           anchor. With the lead muted the audience hears the raw
+           instrument, which the shift does not touch. */
+        const double anchor_cents = p->lead_on ? p->out_cents + lead_shift_c
+                                               : detected_cents;
 
         for (int v = 0; v < AE_HARM_VOICES; ++v)
         {
@@ -1148,7 +1165,12 @@ static void run_detection (AeCorrector *p)
                 /* eff = interval + sign(interval) * extOct * equaveSteps */
                 const int eff = hv->interval
                               + (hv->interval > 0 ? 1 : -1) * hv->ext_oct * p->edo;
-                long long gj = cand + eff;
+                /* Intervals stack on the SHIFTED lead degree: an octave-up
+                   lead with a "third above" wants the third above the
+                   octave-up note, and the mask walk has to happen up there
+                   too or the ghost lands a scale interval from a note
+                   nobody is hearing. */
+                long long gj = cand + p->lead_shift + eff;
                 if (p->harm_lock == 1) /* MIDI notes override the mask here too */
                     gj = ae_walk_to_enabled (gj, p->edo,
                                              midi_active ? held_mask : p->enabled_deg);
@@ -1190,7 +1212,7 @@ static void run_detection (AeCorrector *p)
                            number, so a shifted voice and a synth voice on
                            the same interval land on the same pitch. */
                         const double voice_cents =
-                            anchor_cents + (ghost_cents - target_cents);
+                            anchor_cents + (ghost_cents - (target_cents + lead_shift_c));
                         p->h_cents_t[v] = voice_cents;
 
                         /* Portamento. A voice already sounding slides; one

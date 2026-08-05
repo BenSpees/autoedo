@@ -54,6 +54,7 @@ typedef struct
     _Atomic int      harm_lock;
     _Atomic int      harm_interval[AE_HARM_VOICES];
     _Atomic int      harm_ext[AE_HARM_VOICES];
+    _Atomic int      lead_shift_steps;
     _Atomic double   harm_master_lin;
     _Atomic double   harm_gain_lin[AE_HARM_VOICES];
     _Atomic double   harm_detune_cents[AE_HARM_VOICES];
@@ -108,6 +109,8 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->midi_mode, p->midi_mode, memory_order_relaxed);
     atomic_store_explicit (&a->harm_on,   p->harm_on,   memory_order_relaxed);
     atomic_store_explicit (&a->harm_lock, p->harm_lock, memory_order_relaxed);
+    atomic_store_explicit (&a->lead_shift_steps, p->lead_shift_steps,
+                           memory_order_relaxed);
     atomic_store_explicit (&a->harm_master_lin,
                            pow (10.0, p->harm_master_db / 20.0),
                            memory_order_relaxed);
@@ -204,6 +207,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->harm_hold, memory_order_relaxed));
     ae_corrector_set_harm_master (ps,
                           atomic_load_explicit (&a->harm_master_lin, memory_order_relaxed));
+    ae_corrector_set_lead_shift (ps,
+                          atomic_load_explicit (&a->lead_shift_steps, memory_order_relaxed));
     ae_corrector_set_lead_on (ps,
                           atomic_load_explicit (&a->lead_on, memory_order_relaxed));
     ae_corrector_set_synth (ps,

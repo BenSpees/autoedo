@@ -349,6 +349,9 @@
     <select id="ref-note" style="width:auto"></select>
     <input type="number" id="a4" class="num" step="0.01" min="8" max="8000" value="261.63">
     <span class="dimtxt">Hz</span>
+    <span class="dotsep">·</span>
+    <span class="dimtxt" title="static transpose of the corrected lead, in EDO steps, applied after the snap — the detector still tracks the real note. ±EDO is an exact equave (keeps the pitch class). Locked harmony stacks on the shifted lead.">Shift</span>
+    <input type="number" id="lead-shift" class="num" min="-72" max="72" step="1" value="0" style="width:52px">
     <span id="readout" class="tab unvoiced"><span class="in">—</span> <span class="dimtxt">&rarr;</span> <span class="tgt">—</span></span>
   </div>
 
@@ -409,7 +412,8 @@
       <span class="seg" id="harm-lock">
         <button data-lock="off">Off</button><button data-lock="mask">Mask</button><button data-lock="ji">JI</button>
       </span>
-      <span class="seg" id="harm-src" title="ghost source: pitch-shifted live audio, or the built-in synth (volume-matched to the voice, rings by the release time)">
+      <span class="dimtxt">Harm sound</span>
+      <span class="seg" id="harm-src" title="what the ghosts are made of: pitch-shifted live audio, or the built-in synth (volume-matched to the voice, rings by the release time)">
         <button data-src="voice">Voice</button><button data-src="synth">Synth</button>
       </span>
       <select id="synth-patch" title="synth sound" style="width:auto" hidden></select>
@@ -420,6 +424,10 @@
       <span id="harm-master-wrap" style="display:inline-flex;align-items:center;gap:6px" title="harmony bus master — one gain over every ghost (shifted and synth alike), on top of the per-voice trims. Never touches the lead.">
         <input type="range" id="harm-master" min="-24" max="12" step="0.5" value="0" style="width:88px">
         <span class="tab" id="harm-master-val" style="min-width:52px;text-align:right">0.0 dB</span>
+      </span>
+      <span class="dimtxt">Lead sound</span>
+      <span class="seg" id="lead-src" title="what the corrected lead is made of: the shifter's corrected live voice, or the built-in synth playing that same corrected pitch (a synth lead has no dry component — unvoiced is silence)">
+        <button data-lsrc="voice">Voice</button><button data-lsrc="synth">Synth</button>
       </span>
       <button id="lead-on" title="the corrected lead voice in the output mix — off = harmony only (ghosts still follow the sung pitch, the singer stays out of this engine's output)">Lead</button>
       <button id="midi-mode"
@@ -1016,6 +1024,7 @@ function harmCfg() { // defaults until the first status lands
                   hg: [0,0,0,0,0], hp: [0,0,0,0,0], hMute: [0,0,0,0,0], hSolo: [0,0,0,0,0],
                   harmSource: 'voice', synthPatch: 'pad', synthAttackMs: 80, synthReleaseMs: 500,
                   harmGainDb: 0, harmGlideMs: 0, harmSustain: true, harmHold: false,
+                  leadSource: 'voice',
                   hd: [0,0,0,0,0],
                   leadOn: true };
 }
@@ -1200,6 +1209,8 @@ function syncHarm() {
   const synth = c.harmSource === 'synth';
   document.querySelectorAll('#harm-src button').forEach(b =>
     b.classList.toggle('on', b.dataset.src === (synth ? 'synth' : 'voice')));
+  document.querySelectorAll('#lead-src button').forEach(b =>
+    b.classList.toggle('on', b.dataset.lsrc === (c.leadSource === 'synth' ? 'synth' : 'voice')));
   $('lead-on').classList.toggle('on', c.leadOn !== false);
   $('synth-patch').hidden = $('synth-atk').hidden = $('synth-rel').hidden = !synth;
   if (document.activeElement !== $('synth-patch')) $('synth-patch').value = c.synthPatch;
@@ -1259,6 +1270,9 @@ $('harm-master').oninput = e => {
 };
 document.querySelectorAll('#harm-lock button').forEach(b => {
   b.onclick = () => { schedulePost({ harmLock: b.dataset.lock }); syncHarm(); };
+});
+document.querySelectorAll('#lead-src button').forEach(b => {
+  b.onclick = () => { schedulePost({ leadSource: b.dataset.lsrc }); syncHarm(); };
 });
 document.querySelectorAll('#harm-src button').forEach(b => {
   b.onclick = () => { schedulePost({ harmSource: b.dataset.src }); syncHarm(); };
@@ -1456,6 +1470,10 @@ for (let i = 0; i < 12; i++) {
   $('ref-note').appendChild(o);
 }
 $('ref-note').onchange = e => schedulePost({ refNote: parseInt(e.target.value, 10) });
+$('lead-shift').onchange = e => {
+  const v = Math.max(-72, Math.min(72, Math.round(+e.target.value || 0)));
+  e.target.value = v; schedulePost({ leadShiftSteps: v });
+};
 $('a4').onchange = e => {
   // The field is the reference NOTE's frequency; the engine clamps the
   // anchor it derives and echoes back what it kept.
@@ -1789,6 +1807,8 @@ function setControls(c) {
   if (document.activeElement !== $('root-cents')) $('root-cents').value = c.rootCents;
   if (document.activeElement !== $('a4'))
     $('a4').value = (c.refNoteHz === undefined ? c.refA4 : c.refNoteHz).toFixed(2);
+  if (document.activeElement !== $('lead-shift'))
+    $('lead-shift').value = c.leadShiftSteps === undefined ? 0 : c.leadShiftSteps;
   if (document.activeElement !== $('ref-note'))
     $('ref-note').value = c.refNote === undefined ? 9 : c.refNote;
   $('stretch').value = c.stretchCents;

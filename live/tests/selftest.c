@@ -812,6 +812,64 @@ static void test_harmony_glide (void)
            "(%.1f Hz, between %.1f and %.1f)", got[1], g0, g1);
 }
 
+/* leadShiftSteps: applied after the snap (the detector still classifies the
+   real note), moves the lead by an exact interval, and locked ghosts stack
+   their intervals on the SHIFTED lead so the harmony stays a scale interval
+   from the note the audience hears. */
+static void test_lead_shift (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    ae_corrector_set_lead_shift (p, 12); /* one equave up */
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7; /* a fifth above the (shifted) lead */
+    ae_corrector_set_harmony (p, true, 1, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("sine"), 5.0, 200.0);
+
+    const int total = 98304;
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *hl = calloc ((size_t) total, sizeof (float));
+    float *hr = calloc ((size_t) total, sizeof (float));
+    float *lead = malloc ((size_t) total * sizeof (float));
+    double phase = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        phase += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (phase) + 0.15 * sin (2.0 * phase));
+    }
+    memcpy (lead, in, (size_t) total * sizeof (float));
+    for (int off = 0; off < total; off += 512)
+        ae_corrector_process (p, lead + off, hl + off, hr + off, 512);
+
+    /* The lead comes out an octave up... */
+    const double l440 = goertzel (lead + total - 24000, 24000, 440.0, 48000.0);
+    const double l220 = goertzel (lead + total - 24000, 24000, 220.0, 48000.0);
+    CHECK (l440 > 4.0 * l220,
+           "leadShiftSteps: lead is an equave up (440 %.3g vs 220 %.3g)",
+           l440, l220);
+    /* ...the published target says so (what a UI should draw)... */
+    CHECK (fabs (ae_corrector_target_hz (p) - 440.0) < 2.0,
+           "leadShiftSteps: published target is shifted (%.1f Hz)",
+           ae_corrector_target_hz (p));
+    /* ...and the ghost is the fifth above the SHIFTED lead: E5, not E4. */
+    const double g659 = goertzel (hl + total - 24000, 24000, 659.26, 48000.0);
+    const double g330 = goertzel (hl + total - 24000, 24000, 329.63, 48000.0);
+    CHECK (g659 > 4.0 * g330,
+           "leadShiftSteps: ghost stacks on the shifted lead (E5 %.3g vs E4 %.3g)",
+           g659, g330);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (hl); free (hr); free (lead);
+}
+
 static void test_midi_harmony (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -1836,6 +1894,7 @@ int main (void)
     test_harm_master();
     test_harmony_anchor();
     test_harmony_glide();
+    test_lead_shift();
     test_synth_envelope();
     test_walk();
     test_harmony();

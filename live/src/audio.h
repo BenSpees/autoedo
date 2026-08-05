@@ -48,6 +48,9 @@ typedef struct
     double   output_gain_db;  /* -60..+12 */
     bool     lead_on;         /* corrected lead voice in the mix; false =
                                  harmony only (bypass still wins) */
+    int      lead_shift_steps;/* -72..72: static lead transpose in EDO steps,
+                                 applied after the snap; +-edo keeps the
+                                 pitch class. Locked ghosts follow it. */
 
     /* MIDI Harmony: held notes override the mask (middle C = degree 4*edo,
        one EDO step per semitone). Off = held notes are ignored. */

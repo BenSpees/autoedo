@@ -174,6 +174,7 @@ static void config_defaults (App *app)
     c->params.degrees_hi      = 0xffull;
     c->params.bypass          = false;
     c->params.lead_on         = true;
+    c->params.lead_shift_steps = 0;
     c->params.output_gain_db  = 0.0;
 
     app->root_note     = 0;      /* C */
@@ -264,7 +265,8 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"refNote\":%d,\"refNoteHz\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
-              "\"bypass\":%s,\"leadOn\":%s,\"outputGainDb\":%.6g,"
+              "\"bypass\":%s,\"leadOn\":%s,\"leadShiftSteps\":%d,"
+              "\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
@@ -276,6 +278,7 @@ static void config_json (const App *app, char *out, size_t cap)
               app->det_min_hz, app->det_max_hz,
               c->params.bypass ? "true" : "false",
               c->params.lead_on ? "true" : "false",
+              c->params.lead_shift_steps,
               c->params.output_gain_db, c->buffer_frames, c->input_channel,
               c->output_channel);
     ae_json_escape_append (out, cap, c->input_uid);
@@ -502,6 +505,8 @@ static bool config_apply_json (App *app, const char *json)
         c->params.output_gain_db = num_clamp (num, -60.0, 12.0);
 
     /* Harmony. */
+    if (ae_json_get_number (json, "leadShiftSteps", &num))
+        c->params.lead_shift_steps = (int) num_clamp (num, -72.0, 72.0);
     if (ae_json_get_bool (json, "harmOn", &b))
         c->params.harm_on = b;
     if (ae_json_get_number (json, "harmGainDb", &num))

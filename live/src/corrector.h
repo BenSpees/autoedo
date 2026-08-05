@@ -150,6 +150,7 @@ typedef struct
 
     /* Harmony voices -------------------------------------------------------- */
     bool        harm_on;
+    int         lead_shift; /* static lead transpose, EDO steps (see setter) */
     bool        lead_on;   /* corrected lead is in the output: decides which
                               pitch the ghosts anchor to (see set_lead_on) */
     int         harm_lock; /* 0 = off, 1 = mask, 2 = JI landmarks */
@@ -496,6 +497,16 @@ static inline long long ae_walk_to_enabled (long long j, int edo, const bool *en
 static inline double ae_corrector_clamp01 (double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
 static inline void ae_corrector_set_edo (AeCorrector *p, int edo)          { p->edo = edo; }
+/* Static transpose of the corrected LEAD, in EDO steps, applied AFTER the
+   snap: the detector still hears and classifies the real note; the shift
+   moves what comes out. A whole number of steps, so +-edo is an exact
+   equave and keeps the pitch class -- the degree mask never notices.
+   Locked ghosts take their intervals from the SHIFTED lead target, so the
+   harmony stays a scale interval from the note the audience hears. */
+static inline void ae_corrector_set_lead_shift (AeCorrector *p, int steps)
+{
+    p->lead_shift = steps < -72 ? -72 : (steps > 72 ? 72 : steps);
+}
 static inline void ae_corrector_set_retune_ms (AeCorrector *p, double ms)  { p->retune_ms = ms < 0.0 ? 0.0 : ms; }
 static inline void ae_corrector_set_transition_ms (AeCorrector *p, double ms) { p->transition_ms = ms < 0.0 ? 0.0 : ms; }
 static inline void ae_corrector_set_amount (AeCorrector *p, double a)      { p->amount = ae_corrector_clamp01 (a); }

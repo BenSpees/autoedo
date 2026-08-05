@@ -207,6 +207,8 @@ C-anchored rig at concert pitch is `{"rootNote": 0, "refNote": 0,
 "refNoteHz": 261.6256}` — which is what a default install already computes,
 so if that is your standard there is nothing to change.
 
+| `leadShiftSteps` | int −72…+72 | live | **static transpose of the corrected lead, in EDO steps, applied after the snap.** The detector still hears and classifies the real note — tolerance, stickiness and retune all run against what was played; the shift only moves what comes out. Whole steps, so `±edo` is an exact equave and keeps the pitch class: the degree mask never notices. **Locked ghosts stack their intervals on the shifted lead** (and the mask walk happens up there), so the harmony stays a scale interval from the note the audience hears. The published `targetHz` and pitch trace show the shifted target. Effective total shift (correction + transpose) is safety-clamped at ±36 semitones in the audio path. Pairs with `detectMinHz`: on a guitar channel, raise the detection floor off the low strings to kill octave-down locks, then `+edo` here for an octave-up lead — instead of asking the detector to work down where the subharmonics live |
+
 ### Scale mask
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
