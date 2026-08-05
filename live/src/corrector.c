@@ -852,6 +852,20 @@ void ae_corrector_set_ir_params (AeCorrector *p, int point, double mix,
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES])
 {
+    /* Rising edge of the master switch: forget every portamento position.
+       A voice can still be ringing out its release from before the OFF
+       (long releases outlive a quick toggle, and h_glide_valid only clears
+       once the tail has fully died), and without this the first note after
+       re-enable would SLIDE in from wherever harmony last sang -- the
+       exact swoop the arriving-from-silence rule exists to prevent.
+       Turning harmony on is a fresh start: the first note lands on pitch. */
+    if (on && ! p->harm_on)
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+        {
+            p->h_glide_valid[v] = false;
+            p->h_glide_rate[v]  = 0.0;
+        }
+
     p->harm_on   = on;
     p->harm_lock = lock < 0 ? 0 : (lock > 2 ? 2 : lock);
     for (int v = 0; v < AE_HARM_VOICES; ++v)

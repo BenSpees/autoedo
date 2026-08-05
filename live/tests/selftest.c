@@ -907,6 +907,76 @@ static void test_octave_revote_rebase (void)
     free (p); free (in);
 }
 
+/* Toggling harmony off and back on clears the portamento memory: the first
+   note after re-enable lands ON pitch instead of sliding in from wherever
+   harmony last sang -- even when a long release kept the old voice's glide
+   state alive across a quick toggle. */
+static void test_harm_toggle_clears_glide (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    ae_corrector_set_harm_glide_ms (p, 2000.0); /* a long, audible slide */
+
+    AeHarmVoice voices[AE_HARM_VOICES];
+    memset (voices, 0, sizeof (voices));
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        voices[v].gain = 1.0;
+    voices[0].interval = 7;
+    ae_corrector_set_harmony (p, true, 0, voices);
+    ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                            ae_synth_patch_find ("sine"), 5.0, 3000.0);
+
+    const int seg = 24576;
+    float *in = calloc ((size_t) seg, sizeof (float));
+    float *hl = calloc ((size_t) seg, sizeof (float));
+    float *hr = calloc ((size_t) seg, sizeof (float));
+
+    /* 1. Sing A3: the ghost settles on E4 and the glide state points there. */
+    double ph = 0.0;
+    for (int i = 0; i < seg; ++i)
+    {
+        ph += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (ph) + 0.1 * sin (2.0 * ph));
+    }
+    for (int off = 0; off < seg; off += 512)
+        ae_corrector_process (p, in + off, hl + off, hr + off, 512);
+
+    /* 2. Harmony off, then ~200 ms of silence: the 3 s release keeps the
+       old voice ringing (and its glide state alive) across the gap, which
+       is exactly the leak -- without the edge-clear the next note would
+       slide in from the tail's pitch. */
+    ae_corrector_set_harmony (p, false, 0, voices);
+    memset (in, 0, 9728 * sizeof (float));
+    for (int off = 0; off < 9728; off += 512)
+        ae_corrector_process (p, in + off, hl + off, hr + off, 512);
+    ae_corrector_set_harmony (p, true, 0, voices);
+
+    /* 3. Sing C4. Without the clear, the ghost slides from E4 toward G4
+       over two seconds; with it, the first note lands on G4. */
+    ph = 0.0;
+    for (int i = 0; i < seg; ++i)
+    {
+        ph += 2.0 * M_PI * 261.6256 / 48000.0;
+        in[i] = (float) (0.4 * sin (ph) + 0.1 * sin (2.0 * ph));
+    }
+    for (int off = 0; off < seg; off += 512)
+        ae_corrector_process (p, in + off, hl + off, hr + off, 512);
+
+    /* Measure 150-450 ms after re-enable: past the attack, far inside what
+       a 2 s slide from E4 (329.6) to G4 (392.0) would still be climbing. */
+    const double got = peak_span (hl + 7200, 14400, 329.63 * 0.97,
+                                  392.0 * 1.03, 48000.0);
+    CHECK (fabs (1200.0 * log2 (got / 392.0)) < 20.0,
+           "harmony re-enable starts on pitch (%.1f Hz, target 392.0; a "
+           "leaked glide reads ~340-360)", got);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (hl); free (hr);
+}
+
 static void test_lead_shift (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -2208,6 +2278,7 @@ int main (void)
     test_harm_master();
     test_harmony_anchor();
     test_harmony_glide();
+    test_harm_toggle_clears_glide();
     test_lead_shift();
     test_octave_revote_rebase();
     test_attack_sound();
