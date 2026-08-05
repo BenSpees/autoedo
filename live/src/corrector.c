@@ -671,6 +671,8 @@ void ae_corrector_reset (AeCorrector *p)
     p->formant_hold = true;
     p->midi_fold    = true;
     atomic_store_explicit (&p->shift_st_out, 0.0f, memory_order_relaxed);
+    atomic_store_explicit (&p->shift_st_min, 0.0f, memory_order_relaxed);
+    atomic_store_explicit (&p->shift_st_max, 0.0f, memory_order_relaxed);
     p->atk_fast   = p->atk_slow = 0.0;
     p->atk_refract = 0;
     p->atk_active = 0;
@@ -1379,6 +1381,19 @@ static void run_detection (AeCorrector *p)
         p->primed = true;
         atomic_store_explicit (&p->shift_st_out, (float) p->shift_semitones,
                                memory_order_relaxed);
+        {
+            /* Decaying extremes: snap outward instantly, relax toward the
+               current value with ~1 s of memory. */
+            const float sh = (float) p->shift_semitones;
+            float mn = atomic_load_explicit (&p->shift_st_min, memory_order_relaxed);
+            float mx = atomic_load_explicit (&p->shift_st_max, memory_order_relaxed);
+            mn += (sh - mn) * 0.005f;
+            mx += (sh - mx) * 0.005f;
+            if (sh < mn) mn = sh;
+            if (sh > mx) mx = sh;
+            atomic_store_explicit (&p->shift_st_min, mn, memory_order_relaxed);
+            atomic_store_explicit (&p->shift_st_max, mx, memory_order_relaxed);
+        }
         p->prev_det_cents  = detected_cents;
         p->prev_tgt_cents  = target_cents;
         p->prev_pair_valid = true;

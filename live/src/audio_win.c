@@ -513,18 +513,19 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
     memcpy (e->dry, e->proc, n * sizeof (float));
 
     bool  bypass = false;
+    float lead_g = 1.0f;
     bool  lead   = true;
     float gain   = 1.0f;
     ae_atomic_params_apply (&e->params, &e->corrector,
                             atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
                             atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
-                            &bypass, &lead, &gain);
+                            &bypass, &lead, &lead_g, &gain);
     ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
     /* Lead mute is harmony-only output; bypass still wins (a dry passthrough
        with the lead "muted" would be silence). */
     const float *src = bypass ? e->dry : e->proc;
-    const float  lg  = (bypass || lead) ? 1.0f : 0.0f;
+    const float  lg  = bypass ? 1.0f : (lead ? lead_g : 0.0f);
     const int    ch  = e->out_fmt.channels;
     const int    sel = e->out_channel_sel; /* -1 = stereo on channels 1-2 */
 
@@ -673,6 +674,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
     out->target_hz       = ae_corrector_target_hz (&e->corrector);
     out->shift_st        = ae_corrector_shift_st (&e->corrector);
+    out->shift_st_min    = ae_corrector_shift_st_min (&e->corrector);
+    out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);

@@ -400,11 +400,12 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     /* Apply live parameters, then correct. */
     bool  bypass = false;
     bool  lead   = true;
+    float lead_g = 1.0f;
     float gain   = 1.0f;
     ae_atomic_params_apply (&e->params, &e->corrector,
                             atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
                             atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
-                            &bypass, &lead, &gain);
+                            &bypass, &lead, &lead_g, &gain);
     ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
     const float *src = bypass ? e->dry : e->proc;
@@ -420,7 +421,7 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
             if (i >= n) { dst[i] = 0.0f; continue; }
             /* Lead mute is harmony-only output; bypass still wins (a dry
                passthrough with the lead "muted" would be silence). */
-            float s = (bypass || lead) ? src[i] : 0.0f;
+            float s = bypass ? src[i] : (lead ? lead_g * src[i] : 0.0f);
             if (! bypass)
                 s += harm != NULL ? harm[i]
                                   : 0.5f * (e->harm_l[i] + e->harm_r[i]); /* mono out */
@@ -532,6 +533,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
     out->target_hz       = ae_corrector_target_hz (&e->corrector);
     out->shift_st        = ae_corrector_shift_st (&e->corrector);
+    out->shift_st_min    = ae_corrector_shift_st_min (&e->corrector);
+    out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);

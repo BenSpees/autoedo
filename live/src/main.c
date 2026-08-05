@@ -180,6 +180,7 @@ static void config_defaults (App *app)
     c->params.degrees_hi      = 0xffull;
     c->params.bypass          = false;
     c->params.lead_on         = true;
+    c->params.lead_gain_db    = 0.0;
     c->params.lead_shift_steps = 0;
     c->params.output_gain_db  = 0.0;
 
@@ -276,7 +277,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"refNote\":%d,\"refNoteHz\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
-              "\"bypass\":%s,\"leadOn\":%s,\"leadShiftSteps\":%d,"
+              "\"bypass\":%s,\"leadOn\":%s,\"leadGainDb\":%.4g,\"leadShiftSteps\":%d,"
               "\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
@@ -289,6 +290,7 @@ static void config_json (const App *app, char *out, size_t cap)
               app->det_min_hz, app->det_max_hz,
               c->params.bypass ? "true" : "false",
               c->params.lead_on ? "true" : "false",
+              c->params.lead_gain_db,
               c->params.lead_shift_steps,
               c->params.output_gain_db, c->buffer_frames, c->input_channel,
               c->output_channel);
@@ -524,6 +526,8 @@ static bool config_apply_json (App *app, const char *json)
         c->params.output_gain_db = num_clamp (num, -60.0, 12.0);
 
     /* Harmony. */
+    if (ae_json_get_number (json, "leadGainDb", &num))
+        c->params.lead_gain_db = num_clamp (num, -60.0, 12.0);
     if (ae_json_get_number (json, "leadShiftSteps", &num))
         c->params.lead_shift_steps = (int) num_clamp (num, -72.0, 72.0);
     if (ae_json_get_bool (json, "harmOn", &b))
@@ -899,7 +903,7 @@ static void status_refresh (App *app)
         "{\"running\":%s,\"engineBuild\":\"%s\",\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,"
-        "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"voiced\":%s,"
+        "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"shiftStMin\":%.2f,\"shiftStMax\":%.2f,\"voiced\":%s,"
         "\"traceSeq\":%u,\"trace\":%s,"
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
@@ -910,6 +914,7 @@ static void status_refresh (App *app)
         st.input_rate, st.output_rate,
         st.latency_samples, lat_ms,
         (double) st.detected_hz, (double) st.target_hz, (double) st.shift_st,
+        (double) st.shift_st_min, (double) st.shift_st_max,
         st.voiced ? "true" : "false",
         st.trace_seq, trace,
         hdeg, midi,

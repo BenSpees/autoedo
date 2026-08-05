@@ -47,7 +47,15 @@ typedef struct
     bool     bypass;          /* true = pass input through uncorrected */
     double   output_gain_db;  /* -60..+12 */
     bool     lead_on;         /* corrected lead voice in the mix; false =
-                                 harmony only (bypass still wins) */
+                                 harmony only (bypass still wins). NOTE:
+                                 also flips the ghosts' anchor to the
+                                 detected pitch -- to silence the lead
+                                 while ghosts keep tracking the CORRECTED
+                                 lead, keep lead_on true and pull
+                                 lead_gain_db down instead */
+    double   lead_gain_db;    /* -60..+12: the lead's own fader, after the
+                                 wet/dry mix, before the output sum. The
+                                 ghosts never pass through it */
     int      lead_shift_steps;/* -72..72: static lead transpose in EDO steps,
                                  applied after the snap; +-edo keeps the
                                  pitch class. Locked ghosts follow it. */
@@ -161,6 +169,9 @@ typedef struct
     float  shift_st;        /* the lead's current shift, semitones: a panel
                                can SEE the ratio swing instead of diagnosing
                                a wrong-octave correction by ear */
+    float  shift_st_min;    /* decaying (~1 s) extremes, so spikes between
+                               10 Hz status ticks are still visible */
+    float  shift_st_max;
     bool   voiced;
     /* Pitch trace, oldest first: detected (0 = unvoiced) and target per
        detection hop, ending at absolute detection count trace_seq. */

@@ -343,6 +343,40 @@ a wrong-octave correction is visible as the ratio swinging instead of a
 bass mystery) and `engineBuild` (git short hash of the running binary —
 "which build is the rig actually on" is now data).
 
+### Diagnosing a wrong-sounding lead (the bisection)
+
+The lead and a unison ghost share everything upstream (same input, same
+detection, same shifter code) and differ in exactly four places: the ratio
+each is told, the wet/dry crossfade (lead only), the lead IR point, and the
+lead's output stage. That makes a wrong lead bisectable in four steps, each
+flipping ONE difference:
+
+1. **Read the ratio.** `shiftSt` / `shiftStMin` / `shiftStMax` in status
+   while the problem is audible. Near 0 the whole time → the ratio is
+   innocent, go to 3. Sitting or spiking octaves away → targeting: check
+   the echo for `midiMode` (+`midiOctaves`), `leadShiftSteps`, the mask,
+   and `detectMinHz`.
+2. **`{"amount": 0}`.** Correction math out, audio path intact. Still
+   wrong → not the targeting; go to 3. Clean → targeting confirmed.
+3. **Ghost-as-control, done right.** `{"leadGainDb": -60}` with a unison
+   ghost (`hm[0]:0, hd[0]:-4`) and **`leadOn` still true**: the ghost now
+   carries the lead's exact correction ratio through the ghost path.
+   (Toggling `leadOn` off instead re-anchors ghosts to the raw played
+   pitch — ratio ≈ 1 — which tests nothing.) Ghost wrong too → the ratio
+   really is bad despite step 1 (report `shiftSt` history). Ghost clean →
+   the fault is lead-only: go to 4.
+4. **Lead-only stages.** `{"formantHold": false}` (formant stage out);
+   `irLeadMix: 0` / `irLeadOn: false` (IR out); `quality` low↔high (block
+   size change — if the character changes, it is inside the shifter);
+   `{"bypass": true}` (hardware sanity). One of these four flips is the
+   answer.
+
+Attach `engineBuild` to every report.
+
+| Key | Type | Applies | Meaning |
+|---|---|---|---|
+| `leadGainDb` | float −60…+12 | live | the lead's own fader, after the wet/dry mix, before the output sum; ghosts never pass through it. Unlike `leadOn:false` it does NOT re-anchor the ghosts — they keep tracking the corrected lead. The mixing control the diagnosis above needs, and generally the lead-vs-choir balance |
+
 ### Attack Sound
 
 | Key | Type | Applies | Meaning |

@@ -444,6 +444,7 @@
       <span class="seg" id="lead-src" title="what the corrected lead is made of: the shifter's corrected live voice, or the built-in synth playing that same corrected pitch (a synth lead has no dry component — unvoiced is silence)">
         <button data-lsrc="voice">Voice</button><button data-lsrc="synth">Synth</button>
       </span>
+      <input type="number" id="lead-gain" class="num" min="-60" max="12" step="1" title="lead fader, dB — the corrected lead's own gain, after correction, before the output sum. Unlike toggling Lead off, pulling this down keeps the ghosts anchored to the CORRECTED lead (Lead off re-anchors them to the raw played pitch)." style="width:52px">
       <button id="lead-on" title="the corrected lead voice in the output mix — off = harmony only (ghosts still follow the sung pitch, the singer stays out of this engine's output)">Lead</button>
       <button id="midi-mode"
         title="MIDI Harmony: held MIDI notes override the mask — retune snaps to the nearest held note, harmony locks to the held pitch classes. Middle C = the root in octave 4; one EDO step per semitone. No notes held = normal behavior. Pick the input in ⚙.">MIDI</button>
@@ -1231,6 +1232,8 @@ function syncHarm() {
   if (document.activeElement !== $('synth-patch')) $('synth-patch').value = c.synthPatch;
   if (document.activeElement !== $('synth-atk')) $('synth-atk').value = c.synthAttackMs;
   if (document.activeElement !== $('synth-rel')) $('synth-rel').value = c.synthReleaseMs;
+  if (document.activeElement !== $('lead-gain'))
+    $('lead-gain').value = c.leadGainDb === undefined ? 0 : c.leadGainDb;
   $('formant-hold').checked = c.formantHold !== false;
   if (document.activeElement !== $('midi-oct'))
     $('midi-oct').value = c.midiOctaves === 'held' ? 'held' : 'nearest';
@@ -1281,6 +1284,10 @@ for (const ev of ['pointerup', 'pointerleave', 'pointercancel'])
     if (!$('harm-hold').classList.contains('on')) return;
     $('harm-hold').classList.remove('on'); schedulePost({ harmHold: false });
   });
+$('lead-gain').onchange = e => {
+  const v = Math.max(-60, Math.min(12, +e.target.value || 0));
+  e.target.value = v; schedulePost({ leadGainDb: v });
+};
 $('formant-hold').onchange = e => schedulePost({ formantHold: e.target.checked });
 $('midi-oct').onchange = e => schedulePost({ midiOctaves: e.target.value });
 $('atk-sound').onchange = e => schedulePost({ attackSound: e.target.value });

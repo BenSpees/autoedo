@@ -140,6 +140,10 @@ typedef struct
     _Atomic float shift_st_out; /* the same, for the status read-out: lets a
                                    panel SEE the lead's ratio swing instead
                                    of diagnosing bassiness by ear */
+    _Atomic float shift_st_min; /* decaying extremes (~1 s memory): status
+                                   ticks at 10 Hz and a 50 ms spike between
+                                   ticks would otherwise never be seen */
+    _Atomic float shift_st_max;
     bool   formant_hold;      /* hold formants still under the shift; off =
                                  no formant processing at all (a guitar has
                                  no vocal tract to preserve) */
@@ -552,6 +556,14 @@ static inline void ae_corrector_set_formant_hold (AeCorrector *p, bool hold)
 static inline float ae_corrector_shift_st (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->shift_st_out, memory_order_relaxed);
+}
+static inline float ae_corrector_shift_st_min (const AeCorrector *p)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->shift_st_min, memory_order_relaxed);
+}
+static inline float ae_corrector_shift_st_max (const AeCorrector *p)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->shift_st_max, memory_order_relaxed);
 }
 
 /* Live ghost degree of a voice (signed steps re root), AE_HARM_DEG_OFF when
