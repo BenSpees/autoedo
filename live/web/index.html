@@ -287,6 +287,17 @@
         </div>
         <div class="prow"><label>Formant hold</label>
           <label class="switch" style="display:flex" title="hold formants still under the pitch shift (a voice keeps sounding like the same singer). Turn OFF for guitar and other non-vocal sources: they have no vocal tract to preserve, and off removes the formant stage from the signal path entirely."><input type="checkbox" id="formant-hold" checked></label>
+          <span class="dimtxt">offset</span>
+          <input type="number" id="formant-st" class="num" min="-12" max="12" step="0.5" value="0" title="formant offset, semitones — a character control: + toward a smaller instrument, − a larger one. Independent of pitch; works with hold on or off." style="width:52px">
+        </div>
+        <div class="prow"><label>Record send</label>
+          <input type="number" id="send-ch" class="num" min="0" max="32" step="1" value="0" title="output channel the record send leaves on (0 = off; restart). Refused if it collides with the live output." style="width:48px">
+          <select id="send-content" title="what rides the send" style="width:auto">
+            <option value="wet" selected>wet (stem)</option><option value="full">full</option>
+            <option value="lead">lead</option><option value="harm">harm</option>
+          </select>
+          <input type="number" id="send-gain" class="num" min="-60" max="12" step="1" value="0" title="send trim, dB" style="width:52px">
+          <button id="send-on" title="send mute — the safety">Send</button>
         </div>
         <div class="prow"><label>MIDI octaves</label>
           <select id="midi-oct" title="how MIDI Harmony picks the octave: 'nearest' retunes to the held pitch class in the register you are playing (default); 'held' snaps to the held note's absolute octave — which yanks the note to wherever the chord voicing sits.">
@@ -1041,6 +1052,8 @@ function harmCfg() { // defaults until the first status lands
                   harmSource: 'voice', synthPatch: 'pad', synthAttackMs: 80, synthReleaseMs: 500,
                   harmGainDb: 0, harmGlideMs: 0, harmSustain: true, harmHold: false,
                   leadSource: 'voice', attackSound: 'off', attackGainDb: -26,
+                  sendChannel: 0, sendContent: 'wet', sendGainDb: 0, sendOn: false,
+                  formantSemitones: 0,
                   hd: [0,0,0,0,0],
                   leadOn: true };
 }
@@ -1235,6 +1248,15 @@ function syncHarm() {
   if (document.activeElement !== $('lead-gain'))
     $('lead-gain').value = c.leadGainDb === undefined ? 0 : c.leadGainDb;
   $('formant-hold').checked = c.formantHold !== false;
+  if (document.activeElement !== $('formant-st'))
+    $('formant-st').value = c.formantSemitones === undefined ? 0 : c.formantSemitones;
+  if (document.activeElement !== $('send-ch'))
+    $('send-ch').value = c.sendChannel === undefined ? 0 : c.sendChannel;
+  if (document.activeElement !== $('send-content'))
+    $('send-content').value = c.sendContent === undefined ? 'wet' : c.sendContent;
+  if (document.activeElement !== $('send-gain'))
+    $('send-gain').value = c.sendGainDb === undefined ? 0 : c.sendGainDb;
+  $('send-on').classList.toggle('on', !!c.sendOn);
   if (document.activeElement !== $('midi-oct'))
     $('midi-oct').value = c.midiOctaves === 'held' ? 'held' : 'nearest';
   if (document.activeElement !== $('atk-sound'))
@@ -1289,6 +1311,20 @@ $('lead-gain').onchange = e => {
   e.target.value = v; schedulePost({ leadGainDb: v });
 };
 $('formant-hold').onchange = e => schedulePost({ formantHold: e.target.checked });
+$('formant-st').onchange = e => {
+  const v = Math.max(-12, Math.min(12, +e.target.value || 0));
+  e.target.value = v; schedulePost({ formantSemitones: v });
+};
+$('send-ch').onchange = e => {
+  const v = Math.max(0, Math.min(32, Math.round(+e.target.value || 0)));
+  e.target.value = v; schedulePost({ sendChannel: v });
+};
+$('send-content').onchange = e => schedulePost({ sendContent: e.target.value });
+$('send-gain').onchange = e => {
+  const v = Math.max(-60, Math.min(12, +e.target.value || 0));
+  e.target.value = v; schedulePost({ sendGainDb: v });
+};
+$('send-on').onclick = () => schedulePost({ sendOn: !(harmCfg().sendOn) });
 $('midi-oct').onchange = e => schedulePost({ midiOctaves: e.target.value });
 $('atk-sound').onchange = e => schedulePost({ attackSound: e.target.value });
 $('atk-gain').onchange = e => {

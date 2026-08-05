@@ -2192,6 +2192,125 @@ static void test_96k (void)
    drove the output soft clip: the field's "incredibly bassy" that survived
    every live flip and vanished on restart). Aligned and bounded, the
    makeup must stay near unity on plucks at ratio 1. */
+/* The record send's "wet" tap: the corrected lead with the dry blend
+   removed. Its defining property: while VOICED it carries the lead; while
+   UNVOICED -- where the live output passes the dry input through -- it
+   carries (near) silence. That is what makes the stem mixable against the
+   dry track the interface records, instead of double-counting it. */
+static void test_lead_wet_tap (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+
+    const int seg = 24576;
+    float *in = calloc ((size_t) seg, sizeof (float));
+    float *mono = malloc ((size_t) seg * sizeof (float));
+
+    /* Voiced: a tone. wet ~ mono. */
+    double ph = 0.0;
+    for (int i = 0; i < seg; ++i)
+    {
+        ph += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (ph) + 0.1 * sin (2.0 * ph));
+    }
+    memcpy (mono, in, (size_t) seg * sizeof (float));
+    double wet_sq = 0.0, mono_sq = 0.0;
+    for (int off = 0; off < seg; off += 512)
+    {
+        ae_corrector_process (p, mono + off, NULL, NULL, 512);
+        const float *w = ae_corrector_lead_wet (p);
+        if (off >= seg / 2)
+            for (int i = 0; i < 512; ++i)
+            {
+                wet_sq  += (double) w[i] * w[i];
+                mono_sq += (double) mono[off + i] * mono[off + i];
+            }
+    }
+    CHECK (wet_sq > 0.5 * mono_sq,
+           "wet tap carries the voiced lead (wet %.3g vs mono %.3g)",
+           wet_sq, mono_sq);
+
+    /* Unvoiced: aperiodic noise. The live output passes dry; the tap must
+       be near-silent -- that is the whole point of the stem. */
+    unsigned rng = 1;
+    for (int i = 0; i < seg; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        in[i] = (float) ((double) (rng >> 8) / 8388608.0 - 1.0) * 0.2f;
+    }
+    memcpy (mono, in, (size_t) seg * sizeof (float));
+    wet_sq = mono_sq = 0.0;
+    for (int off = 0; off < seg; off += 512)
+    {
+        ae_corrector_process (p, mono + off, NULL, NULL, 512);
+        const float *w = ae_corrector_lead_wet (p);
+        if (off >= seg / 2)
+            for (int i = 0; i < 512; ++i)
+            {
+                wet_sq  += (double) w[i] * w[i];
+                mono_sq += (double) mono[off + i] * mono[off + i];
+            }
+    }
+    CHECK (mono_sq > 1e-4 && wet_sq < 0.05 * mono_sq,
+           "wet tap drops the dry blend while unvoiced (wet %.3g vs mono %.3g)",
+           wet_sq, mono_sq);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (mono);
+}
+
+/* formantSemitones moves the spectral envelope without moving the pitch. */
+static void test_formant_offset (void)
+{
+    const int total = 98304;
+    float *in = calloc ((size_t) total, sizeof (float));
+    float *out0 = calloc ((size_t) total, sizeof (float));
+    float *out4 = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        ph += 2.0 * M_PI * 165.0 / 48000.0;
+        in[i] = (float) (0.25 * sin (ph) + 0.25 * sin (2.0 * ph)
+                       + 0.20 * sin (3.0 * ph) + 0.15 * sin (4.0 * ph)
+                       + 0.10 * sin (5.0 * ph) + 0.08 * sin (6.0 * ph));
+    }
+    for (int c = 0; c < 2; ++c)
+    {
+        AeShifter *sh = ae_shifter_create (48000.0,
+                            ae_shifter_block_samples (48000.0, AE_SHIFT_QUALITY_BALANCED));
+        ae_shifter_set_semitones (sh, 0.0, 0.0);
+        ae_shifter_set_formant_semitones (sh, c == 0 ? 0.0 : 5.0, true);
+        ae_shifter_set_formant_base (sh, 165.0);
+        float *out = c == 0 ? out0 : out4;
+        for (int off = 0; off < total; off += 512)
+            ae_shifter_process (sh, in + off, out + off, 512);
+        ae_shifter_destroy (sh);
+    }
+    /* Pitch unchanged... */
+    const double f0 = peak_near (out4 + total - 48000, 48000, 165.0, 48000.0);
+    CHECK (fabs (1200.0 * log2 (f0 / 165.0)) < 15.0,
+           "formant offset leaves the pitch alone (f0 %.2f Hz)", f0);
+    /* ...but the harmonic balance moves: +5 st of tract tilts energy from
+       the low partials toward the high ones relative to neutral. */
+    const double lo0 = goertzel (out0 + total - 48000, 48000, 165.0, 48000.0)
+                     + goertzel (out0 + total - 48000, 48000, 330.0, 48000.0);
+    const double hi0 = goertzel (out0 + total - 48000, 48000, 660.0, 48000.0)
+                     + goertzel (out0 + total - 48000, 48000, 825.0, 48000.0);
+    const double lo4 = goertzel (out4 + total - 48000, 48000, 165.0, 48000.0)
+                     + goertzel (out4 + total - 48000, 48000, 330.0, 48000.0);
+    const double hi4 = goertzel (out4 + total - 48000, 48000, 660.0, 48000.0)
+                     + goertzel (out4 + total - 48000, 48000, 825.0, 48000.0);
+    const double tilt0 = hi0 / (lo0 > 1e-9 ? lo0 : 1e-9);
+    const double tilt4 = hi4 / (lo4 > 1e-9 ? lo4 : 1e-9);
+    CHECK (tilt4 > 1.3 * tilt0 || tilt4 < 0.77 * tilt0,
+           "formant offset moves the envelope (tilt %.3g -> %.3g)",
+           tilt0, tilt4);
+    free (in); free (out0); free (out4);
+}
+
 static void test_makeup_on_plucks (void)
 {
     AeShifter *sh = ae_shifter_create (48000.0,
@@ -2301,6 +2420,8 @@ int main (void)
     test_96k();
     test_soft_clip();
     test_makeup_on_plucks();
+    test_lead_wet_tap();
+    test_formant_offset();
 
     if (failures == 0)
     {

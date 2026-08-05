@@ -211,6 +211,8 @@ struct AeAudioEngine
     float *proc;       /* mono processing block */
     float *dry;        /* latency-free dry copy for bypass */
     _Atomic float out_peak; /* decaying pre-clip peak of the summed output */
+    int   send_client;  /* client channel index of the record send; -1 = none */
+    float send_g_cur;   /* smoothed send gain (click-free mute) */
     float *harm_l;     /* harmony-voice mix, left / right */
     float *harm_r;
 
@@ -399,25 +401,56 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     memcpy (e->dry, e->proc, n * sizeof (float));
 
     /* Apply live parameters, then correct. */
-    bool  bypass = false;
-    bool  lead   = true;
-    float lead_g = 1.0f;
-    float gain   = 1.0f;
+    AeMixParams mix;
     ae_atomic_params_apply (&e->params, &e->corrector,
                             atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
                             atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
-                            &bypass, &lead, &lead_g, &gain);
+                            &mix);
+    const bool  bypass = mix.bypass;
+    const bool  lead   = mix.lead_on;
+    const float lead_g = mix.lead_gain;
+    const float gain   = mix.master_gain;
     ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
     const float *src = bypass ? e->dry : e->proc;
-    const bool   stereo = io->mNumberBuffers >= 2;
+    const bool   stereo = (int) io->mNumberBuffers - (e->send_client >= 0 ? 1 : 0) >= 2;
 
     float pk = atomic_load_explicit (&e->out_peak, memory_order_relaxed) * 0.98f;
+
+    /* The record send: its own client channel, its own content and trim,
+       never the PA's. Gain is smoothed so sendOn is a click-free mute. */
+    const float *wet = ae_corrector_lead_wet (&e->corrector);
+    const float  send_target = mix.send_on ? mix.send_gain : 0.0f;
 
     for (UInt32 b = 0; b < io->mNumberBuffers; ++b)
     {
         float *dst = io->mBuffers[b].mData;
         const UInt32 cap = io->mBuffers[b].mDataByteSize / (UInt32) sizeof (float);
+        if (e->send_client >= 0 && b == (UInt32) e->send_client)
+        {
+            float sg = e->send_g_cur;
+            for (UInt32 i = 0; i < n_frames && i < cap; ++i)
+            {
+                if (i >= n) { dst[i] = 0.0f; continue; }
+                sg += (send_target - sg) * 0.0005f;
+                const float hm = 0.5f * (e->harm_l[i] + e->harm_r[i]);
+                float sv;
+                switch (mix.send_content)
+                {
+                    case AE_SEND_WET:  sv = (wet ? wet[i] : 0.0f) + hm; break;
+                    case AE_SEND_LEAD: sv = wet ? wet[i] : 0.0f;       break;
+                    case AE_SEND_HARM: sv = hm;                        break;
+                    default: /* FULL: exactly the live mono mix */
+                        sv = (bypass ? e->dry[i]
+                                     : (lead ? lead_g * src[i] : 0.0f) + hm)
+                           * gain;
+                        break;
+                }
+                dst[i] = ae_soft_clip (sv * sg);
+            }
+            e->send_g_cur = sg;
+            continue;
+        }
         const float *harm = ! stereo ? NULL : (b == 0 ? e->harm_l : e->harm_r);
         for (UInt32 i = 0; i < n_frames && i < cap; ++i)
         {
@@ -614,7 +647,18 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
         free (e);
         return NULL;
     }
+    if (cfg->send_channel > 0 && cfg->send_channel > out_ch)
+    {
+        snprintf (err, err_len, "device \"%s\" has no output channel %d for the record send (%d available)",
+                  e->out_name, cfg->send_channel, out_ch);
+        free (e);
+        return NULL;
+    }
     e->out_channels  = cfg->output_channel > 0 ? 1 : (out_ch < 2 ? out_ch : 2);
+    e->send_client   = cfg->send_channel > 0 ? e->out_channels : -1;
+    if (e->send_client >= 0)
+        e->out_channels += 1; /* one extra client channel rides to the map */
+    e->send_g_cur    = 0.0f;
     e->buffer_frames = cfg->buffer_frames >= 32 && cfg->buffer_frames <= 2048
                          ? cfg->buffer_frames : 256;
 
@@ -758,7 +802,7 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     /* Route the mono client onto the one requested device channel. The output
        map has one entry PER DEVICE CHANNEL, each naming the client channel
        that feeds it (-1 = silence) -- the mirror of the input map's shape. */
-    if (cfg->output_channel > 0)
+    if (cfg->output_channel > 0 || cfg->send_channel > 0)
     {
         SInt32 map[64];
         int n_map = out_ch;
@@ -766,13 +810,20 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
             n_map = 64;
         for (int i = 0; i < n_map; ++i)
             map[i] = -1;
-        map[cfg->output_channel - 1] = 0;
+        if (cfg->output_channel > 0)
+            map[cfg->output_channel - 1] = 0;      /* mono live path */
+        else
+        {
+            if (n_map > 0) map[0] = 0;             /* default stereo */
+            if (n_map > 1) map[1] = 1;
+        }
+        if (e->send_client >= 0 && cfg->send_channel <= n_map)
+            map[cfg->send_channel - 1] = e->send_client;
         if ((st = AudioUnitSetProperty (e->out_unit, kAudioOutputUnitProperty_ChannelMap,
                                         kAudioUnitScope_Output, 0, map,
                                         (UInt32) (n_map * (int) sizeof (SInt32)))) != noErr)
         {
-            snprintf (err, err_len, "output channel %d not accepted (%d)",
-                      cfg->output_channel, (int) st);
+            snprintf (err, err_len, "output channel map not accepted (%d)", (int) st);
             engine_teardown (e);
             return NULL;
         }

@@ -271,6 +271,33 @@ UI behavior you may want to replicate).
 | `droneOn` | bool | live | **drone**: one synth voice pinned to an ABSOLUTE degree, sustained while on regardless of what the singer does (a root-only chart chord means "drone that root"). Uses the current `synthPatch` and attack/release, volume-matched like the ghosts (level rides the frozen input RMS, so it breathes with the set instead of blasting before the first note), centred on the harmony bus, through the ensemble and the tilt but deliberately NOT the vowel transfer (a drone has no mouth to follow — the vocoder's gating would mute it between phrases). `harmOn` still gates it |
 | `droneDeg` | int 0–8·edo | live | the drone's absolute engine degree (`4·edo` = the middle-C-region root, like the MIDI-harmony mapping) |
 
+### The record send
+
+A separate output channel for the recorder, so the stem on disk and the
+level on stage are independent. What leaves on it never passes through
+`outputGainDb`, and nothing about the live path — routing, level, latency —
+changes when the send is configured.
+
+| Key | Type | Applies | Meaning |
+|---|---|---|---|
+| `sendChannel` | int 0–32 | **restart** | 1-based output-device channel the send leaves on; `0` = no send. Restart-scoped like `outputChannel` (it lives in the device channel map). A channel past the device's count fails engine start naming the channel. **Collisions with the live output are refused, not summed**: a write putting the send on the live channel (or the live output onto the send) is rejected, the old value stays, and `status.sendError` names the refusal — a silent sum is a feedback loop with a friendly face. `sendError` is `""` after any accepted send write |
+| `sendContent` | `"full"` \| `"wet"` \| `"lead"` \| `"harm"` | live | what rides the send. `wet` (default): everything the engine produced with the dry blend removed — the corrected wet lead plus the harmony bus, near-silent while unvoiced instead of passing the dry through, which is what makes it a real stem against the dry track the interface is already recording. `lead` / `harm` split that in two (`lead` is pre-lead-IR). `full`: exactly the live mono mix, dry blend and `outputGainDb` included — the "second copy of the PA" the send exists to improve on |
+| `sendGainDb` | float −60…+12 | live | trim on the send only; record level and stage level are independent |
+| `sendOn` | bool | live | **the safety.** Mute the send (click-free, ~10 ms smoothed) without touching routing. Defaults **off** and is deliberately **not restored at launch as on** — assert it from the controller at song load, and drop it on panic, exactly like the `harmOn` guards |
+
+Status: `sendError` (above) and `processLatencyMs` — the engine's whole
+input-to-output latency at current settings, algorithmic plus buffering
+(an alias of `latencyMs`, present so send-aware controllers can probe it
+by name). It changes with `quality`, devices and `bufferFrames`; re-read
+it from the echo after any restart-scoped write. Use it to align a
+recorded return against a dry track captured at the interface: the two
+then stay phase-sane instead of combing.
+
+Loopback-capable interfaces close the circuit internally: aim
+`sendChannel` at a spare output pair and record its loopback input — no
+cable, no engine work beyond this section. A shared-memory or UDP tap was
+considered and deliberately not built while the send covers the need.
+
 ### IR points (convolution spaces)
 
 Two convolution points from the shared `irconv` library (vendored byte-identical with Treebrain): **lead** — the corrected voice, whose first partition is direct time-domain so the live monitored path gains ZERO samples of latency — and **harm** — the stereo harmony bus, sitting post-ensemble and **pre-tilt** (the tilt stays the performer's final tone trim over whatever space the IR imposes). The spec's `irLead {…}` / `irHarm {…}` objects are spoken as flat keys here (this parser's shape); substitute `Harm` for `Lead` throughout:
@@ -335,6 +362,7 @@ Three engine-side guards a controller should know exist, all always-on:
 
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
+| `formantSemitones` | float −12…+12 | live | **formant OFFSET** — a deliberate shift of the vocal tract in semitones, independent of pitch: + toward a smaller instrument, − toward a larger one. A character control, not a correction; 0 = neutral. Composes with `formantHold`: hold on = tract held still under the pitch shift, then offset; hold off = tract follows the pitch, then offset. The formant stage engages when either is non-neutral, so an offset works on a `formantHold:false` guitar channel too. Applies to the lead and every shifted ghost |
 | `formantHold` | bool | live | hold formants still under the pitch shift (default **true** — right for a voice). **Set `false` on guitar** and other non-vocal sources: they have no vocal tract to preserve, and off removes the formant stage from the signal path entirely (the library skips its envelope machinery), taking it off the table as a tone suspect and saving CPU. Applies to the lead and every shifted ghost |
 | `midiOctaves` | `"nearest"` \| `"held"` | live | how MIDI Harmony picks the correction octave. **`nearest` (default): the held note names the pitch CLASS, the player names the register** — the played note retunes to the held class right where it was played. `held`: snap to the held note's absolute octave (the original middle-C-pivot mapping) — which turns a chord voicing octaves below the lead line into a standing transpose: the "incredibly bassy corrected guitar" when MIDI mode is driving. Use `held` only when the chord track deliberately places the voice's register |
 

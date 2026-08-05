@@ -56,6 +56,14 @@ typedef struct
     double   lead_gain_db;    /* -60..+12: the lead's own fader, after the
                                  wet/dry mix, before the output sum. The
                                  ghosts never pass through it */
+
+    /* The record send: a separate output channel for the recorder, so the
+       stem on disk and the level on stage are independent. Content/gain/
+       mute are live; the channel itself is restart-scoped (it needs the
+       device's channel map). The send never passes through outputGainDb. */
+    int      send_content;    /* AE_SEND_* */
+    double   send_gain_db;    /* -60..+12 */
+    bool     send_on;
     int      lead_shift_steps;/* -72..72: static lead transpose in EDO steps,
                                  applied after the snap; +-edo keeps the
                                  pitch class. Locked ghosts follow it. */
@@ -100,6 +108,13 @@ typedef struct
     bool     formant_hold;           /* hold formants under the shift (voice);
                                         false = formant stage fully off
                                         (guitar). Default true */
+    double   formant_st;             /* -12..+12: deliberate formant OFFSET in
+                                        semitones -- a character control, not
+                                        a correction. 0 = neutral. Works with
+                                        hold on (tract held, then shifted) or
+                                        off (tract follows pitch, then
+                                        shifted); the stage engages if either
+                                        is nonneutral */
 
     /* Harmony source: pitch-shifted live audio (0) or the built-in synth
        voice (1), which adds a patch and an attack/release envelope. Applies
@@ -133,6 +148,25 @@ typedef struct
     bool     ir_harm_on;
 } AeLiveParams;
 
+/* Per-callback mix decisions handed from the atomic mirror to the audio
+   callback in one struct (grew too many out-params). */
+typedef struct
+{
+    bool  bypass;
+    bool  lead_on;
+    float lead_gain;
+    float master_gain;
+    int   send_content; /* AE_SEND_* */
+    float send_gain;
+    bool  send_on;
+} AeMixParams;
+
+/* Record-send content selectors. */
+#define AE_SEND_FULL 0 /* the live mix, exactly what the PA channel carries */
+#define AE_SEND_WET  1 /* everything the engine produced, dry blend removed */
+#define AE_SEND_LEAD 2 /* the corrected wet lead alone (pre lead-IR) */
+#define AE_SEND_HARM 3 /* the harmony bus alone, mono-folded */
+
 /* Parameters that require an engine restart to change. */
 typedef struct
 {
@@ -142,6 +176,12 @@ typedef struct
     int          input_channel;          /* 1-based capture channel of the input
                                             device; 0 = backend default (mac:
                                             first channel, win: mix of all) */
+    int          send_channel;           /* record send: 1-based output device
+                                            channel; 0 = no send. Restart-
+                                            scoped (device channel map). Must
+                                            not collide with the live output
+                                            channels; the config layer refuses
+                                            such writes */
     int          output_channel;         /* 1-based playback channel: ALL output
                                             (voice + harmony, mono-folded) lands
                                             on that one device channel; 0 =

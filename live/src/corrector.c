@@ -581,6 +581,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->in_block  = calloc ((size_t) p->max_block, sizeof (float));
     p->wet_buf   = calloc ((size_t) p->max_block, sizeof (float));
     p->voice_buf = calloc ((size_t) p->max_block, sizeof (float));
+    free (p->lead_wet);
+    p->lead_wet  = calloc ((size_t) p->max_block, sizeof (float));
     free (p->lpc_res);
     p->lpc_res   = calloc ((size_t) p->max_block, sizeof (float));
 
@@ -797,6 +799,8 @@ void ae_corrector_free (AeCorrector *p)
     free (p->in_block);
     free (p->wet_buf);
     free (p->voice_buf);
+    free (p->lead_wet);
+    p->lead_wet = NULL;
     p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
     free (p->lpc_res);
     p->lpc_res = NULL;
@@ -1660,16 +1664,19 @@ harmony_done: ;
 /* `base_hz` is the detected fundamental, which the library's formant
    analysis wants in order to separate formants from the harmonic series. */
 static void set_shift (AeShifter *s, double semitones, double base_hz,
-                       bool formant_hold)
+                       bool formant_hold, double formant_st)
 {
     ae_shifter_set_semitones (s, semitones,
                               fabs (semitones) >= AE_TONALITY_MIN_ST
                                 ? AE_TONALITY_HZ : 0.0);
-    if (formant_hold)
+    if (formant_hold || formant_st != 0.0)
     {
         /* Hold the formants still while the pitch moves, so a transposed
-           voice still sounds like the same singer instead of chipmunking. */
-        ae_shifter_set_formant_semitones (s, 0.0, true);
+           voice still sounds like the same singer instead of chipmunking --
+           and/or shift the tract deliberately: formant_st is a CHARACTER
+           control, +up toward a smaller instrument, -down toward a larger
+           one, independent of the pitch. */
+        ae_shifter_set_formant_semitones (s, formant_st, formant_hold);
         ae_shifter_set_formant_base (s, base_hz);
     }
     else
@@ -2012,7 +2019,7 @@ static void apply_harm_master (AeCorrector *p, float *harm_l, float *harm_r,
 }
 
 static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
-                           float *harm_r, int num_samples)
+                           float *harm_r, float *wet_out, int num_samples)
 {
     /* 1. Take in the block: keep a contiguous copy (mono is written in place
        below) and push it into the ring, which feeds detection and the dry
@@ -2102,7 +2109,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     }
     else
     {
-        set_shift (p->shifter, p->shift_semitones, base_hz, p->formant_hold);
+        set_shift (p->shifter, p->shift_semitones, base_hz,
+                   p->formant_hold, p->formant_st);
         ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
     }
 
@@ -2122,7 +2130,10 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const long long t_out = block_start + i - p->latency;
         const float dry = (lead_synth || t_out < 0)
                               ? 0.0f : p->in_buf[t_out & p->buf_mask];
-        mono[i] = (float) (v_gain * p->wet_buf[i] + (1.0 - v_gain) * dry);
+        const double wet_only = v_gain * p->wet_buf[i];
+        if (wet_out != NULL)
+            wet_out[i] = (float) wet_only;
+        mono[i] = (float) (wet_only + (1.0 - v_gain) * dry);
     }
     p->v_gain = v_gain;
 
@@ -2235,7 +2246,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->h_mix[v] = 0.0; /* fade in from silence */
         }
 
-        set_shift (p->h_shifter[v], p->h_semitones[v], base_hz, p->formant_hold);
+        set_shift (p->h_shifter[v], p->h_semitones[v], base_hz,
+                   p->formant_hold, p->formant_st);
         ae_shifter_process (p->h_shifter[v], harm_in, p->voice_buf, num_samples);
 
         /* Same envelope the synth ghosts get. It used to be a fixed 5 ms
@@ -2292,7 +2304,9 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
         if (m > p->max_block) m = p->max_block;
         process_chunk (p, mono + done,
                        harm_l != NULL ? harm_l + done : NULL,
-                       harm_r != NULL ? harm_r + done : NULL, m);
+                       harm_r != NULL ? harm_r + done : NULL,
+                       p->lead_wet != NULL && done + m <= p->max_block
+                           ? p->lead_wet + done : NULL, m);
         done += m;
     }
 }

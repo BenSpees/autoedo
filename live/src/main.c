@@ -90,6 +90,7 @@ typedef struct
     } ir_cfg[2];
     bool            ir_dirty[2]; /* changed since last (re)load */
     char            ir_err[256];
+    char            send_err[128]; /* last refused send write ("" = none) */
 
     /* Status is serialized once per pump tick (or config change) and every
        consumer — each WebSocket push and each /api/status GET — is handed
@@ -211,6 +212,12 @@ static void config_defaults (App *app)
     c->params.midi_fold      = true;  /* retune to the held class in the
                                           PLAYED register; "held" = absolute */
     c->params.formant_hold   = true;  /* voice default; guitars want off */
+    c->params.formant_st     = 0.0;   /* neutral tract */
+    c->send_channel          = 0;     /* no record send */
+    c->params.send_content   = 1;     /* "wet": the stem, not a mix copy */
+    c->params.send_gain_db   = 0.0;
+    c->params.send_on        = false; /* the safety: off until asserted */
+    app->send_err[0]         = '\0';
     c->params.attack_sound   = 0;     /* off */
     c->params.attack_gain_db = -26.0; /* Xentar's shipped pick level */  /* jump, the classic harmonizer */
     c->params.harm_sustain = true;  /* the release means nothing without it */
@@ -343,7 +350,8 @@ static void config_json (const App *app, char *out, size_t cap)
               ",\"harmOn\":%s,\"harmLock\":\"%s\",\"harmGainDb\":%.4g,"
               "\"harmSustain\":%s,\"harmHold\":%s,\"harmGlideMs\":%.4g,"
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
-              "\"midiOctaves\":\"%s\",\"formantHold\":%s,"
+              "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
+              "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
               "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
@@ -358,6 +366,13 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.attack_gain_db,
               c->params.midi_fold ? "nearest" : "held",
               c->params.formant_hold ? "true" : "false",
+              c->params.formant_st,
+              c->send_channel,
+              (const char *[]){ "full", "wet", "lead", "harm" }
+                  [c->params.send_content >= 0 && c->params.send_content <= 3
+                       ? c->params.send_content : 0],
+              c->params.send_gain_db,
+              c->params.send_on ? "true" : "false",
               c->params.midi_mode ? "true" : "false");
     strncat (out, harm, cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->midi_source);
@@ -538,6 +553,38 @@ static bool config_apply_json (App *app, const char *json)
         c->params.midi_fold = strcmp (str, "held") != 0;
     if (ae_json_get_bool (json, "formantHold", &b))
         c->params.formant_hold = b;
+    if (ae_json_get_number (json, "formantSemitones", &num))
+        c->params.formant_st = num_clamp (num, -12.0, 12.0);
+
+    /* The record send. Content/gain/mute are live; the channel needs the
+       device channel map, so it is restart-scoped like outputChannel. A
+       collision with the live output is REFUSED, not summed: a silent sum
+       is a feedback loop with a friendly face. The refusal lands in
+       status.sendError. */
+    if (ae_json_get_number (json, "sendChannel", &num))
+    {
+        const int ch = (int) num_clamp (num, 0.0, 32.0);
+        const bool collide = ch > 0
+            && (ch == c->output_channel
+                || (c->output_channel == 0 && ch <= 2));
+        if (collide)
+            snprintf (app->send_err, sizeof (app->send_err),
+                      "send channel %d collides with the live output", ch);
+        else
+        {
+            if (ch != c->send_channel) restart = true;
+            c->send_channel = ch;
+            app->send_err[0] = '\0';
+        }
+    }
+    if (ae_json_get_string (json, "sendContent", str, sizeof (str)))
+        c->params.send_content = strcmp (str, "wet") == 0 ? 1
+                               : strcmp (str, "lead") == 0 ? 2
+                               : strcmp (str, "harm") == 0 ? 3 : 0;
+    if (ae_json_get_number (json, "sendGainDb", &num))
+        c->params.send_gain_db = num_clamp (num, -60.0, 12.0);
+    if (ae_json_get_bool (json, "sendOn", &b))
+        c->params.send_on = b;
     if (ae_json_get_string (json, "attackSound", str, sizeof (str)))
         c->params.attack_sound = strcmp (str, "noise") == 0 ? 1
                                : strcmp (str, "pick")  == 0 ? 2
@@ -729,7 +776,15 @@ static bool config_apply_json (App *app, const char *json)
     if (ae_json_get_number (json, "outputChannel", &num))
     {
         const int ch = (int) num_clamp (num, 0.0, 32.0);
-        if (ch != c->output_channel)
+        /* The same collision rule from the other side: moving the live
+           output ONTO the record send is refused too. */
+        if (c->send_channel > 0
+            && (ch == c->send_channel || (ch == 0 && c->send_channel <= 2)))
+        {
+            snprintf (app->send_err, sizeof (app->send_err),
+                      "output channel %d collides with the record send", ch);
+        }
+        else if (ch != c->output_channel)
         {
             c->output_channel = ch;
             restart = true; /* the playback binding is fixed at engine start */
@@ -843,7 +898,9 @@ static void status_refresh (App *app)
 
     char in_name[2 * AE_NAME_MAX] = "", out_name[2 * AE_NAME_MAX] = "", err[2 * 256] = "";
     char ir_err[2 * 256] = "";
+    char send_err_esc[2 * 128] = "";
     ae_json_escape_append (in_name,  sizeof (in_name),  st.input_name);
+    ae_json_escape_append (send_err_esc, sizeof (send_err_esc), app->send_err);
     ae_json_escape_append (out_name, sizeof (out_name), st.output_name);
     ae_json_escape_append (err,      sizeof (err),      app->engine_err);
     ae_json_escape_append (ir_err,   sizeof (ir_err),   app->ir_err);
@@ -902,18 +959,18 @@ static void status_refresh (App *app)
     snprintf (buf, sizeof (buf),
         "{\"running\":%s,\"engineBuild\":\"%s\",\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
-        "\"latencySamples\":%d,\"latencyMs\":%.1f,"
+        "\"latencySamples\":%d,\"latencyMs\":%.1f,\"processLatencyMs\":%.1f,"
         "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"shiftStMin\":%.2f,\"shiftStMax\":%.2f,"
         "\"leadMakeupDb\":%.2f,\"outPeakDb\":%.1f,\"voiced\":%s,"
         "\"traceSeq\":%u,\"trace\":%s,"
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
-        "\"synthPatches\":%s,\"irError\":\"%s\","
+        "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\","
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
-        st.latency_samples, lat_ms,
+        st.latency_samples, lat_ms, lat_ms,
         (double) st.detected_hz, (double) st.target_hz, (double) st.shift_st,
         (double) st.shift_st_min, (double) st.shift_st_max,
         st.lead_makeup > 1e-6f ? 20.0 * log10 ((double) st.lead_makeup) : -120.0,
@@ -923,7 +980,7 @@ static void status_refresh (App *app)
         hdeg, midi,
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
-        patches, ir_err,
+        patches, ir_err, send_err_esc,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),

@@ -319,6 +319,8 @@ struct AeAudioEngine
     float *proc;
     float *dry;
     _Atomic float out_peak;
+    int   send_sel;    /* 0-based device channel of the record send; -1 none */
+    float send_g_cur;
     float *harm_l;
     float *harm_r;
 
@@ -513,14 +515,15 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
 
     memcpy (e->dry, e->proc, n * sizeof (float));
 
-    bool  bypass = false;
-    float lead_g = 1.0f;
-    bool  lead   = true;
-    float gain   = 1.0f;
+    AeMixParams mix;
     ae_atomic_params_apply (&e->params, &e->corrector,
                             atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed),
                             atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed),
-                            &bypass, &lead, &lead_g, &gain);
+                            &mix);
+    const bool  bypass = mix.bypass;
+    const bool  lead   = mix.lead_on;
+    const float lead_g = mix.lead_gain;
+    const float gain   = mix.master_gain;
     ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
     /* Lead mute is harmony-only output; bypass still wins (a dry passthrough
@@ -529,6 +532,18 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
     const float  lg  = bypass ? 1.0f : (lead ? lead_g : 0.0f);
     const int    ch  = e->out_fmt.channels;
     const int    sel = e->out_channel_sel; /* -1 = stereo on channels 1-2 */
+    const int    ssel = e->send_sel;       /* record send channel, -1 = none */
+    const float *wet  = ae_corrector_lead_wet (&e->corrector);
+    const float  send_target = mix.send_on ? mix.send_gain : 0.0f;
+    float        sg = e->send_g_cur;
+
+#define AE_SEND_VALUE(i) \
+    (mix.send_content == AE_SEND_WET  ? (wet ? wet[i] : 0.0f) \
+                                        + 0.5f * (e->harm_l[i] + e->harm_r[i]) \
+   : mix.send_content == AE_SEND_LEAD ? (wet ? wet[i] : 0.0f) \
+   : mix.send_content == AE_SEND_HARM ? 0.5f * (e->harm_l[i] + e->harm_r[i]) \
+   : (bypass ? e->dry[i] \
+             : lg * src[i] + 0.5f * (e->harm_l[i] + e->harm_r[i])) * gain)
 
     if (e->out_fmt.is_float)
     {
@@ -542,8 +557,10 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
             if (ppk > pk) pk = ppk;
             const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
             const float mc = ae_soft_clip (0.5f * (l + r));
+            sg += (send_target - sg) * 0.0005f;
             for (int c = 0; c < ch; ++c)
-                d[i * ch + c] = sel >= 0 ? (c == sel ? mc : 0.0f)
+                d[i * ch + c] = c == ssel ? ae_soft_clip (AE_SEND_VALUE (i) * sg)
+                              : sel >= 0 ? (c == sel ? mc : 0.0f)
                               : ch >= 2 ? (c == 0 ? lc : (c == 1 ? rc : mc))
                                         : mc;
         }
@@ -561,9 +578,11 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
             if (ppk > pk) pk = ppk;
             const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
             const float mc = ae_soft_clip (0.5f * (l + r));
+            sg += (send_target - sg) * 0.0005f;
             for (int c = 0; c < ch; ++c)
             {
-                const float v = sel >= 0 ? (c == sel ? mc : 0.0f)
+                const float v = c == ssel ? ae_soft_clip (AE_SEND_VALUE (i) * sg)
+                              : sel >= 0 ? (c == sel ? mc : 0.0f)
                               : ch >= 2 ? (c == 0 ? lc : (c == 1 ? rc : mc))
                                         : mc;
                 d[i * ch + c] = (short) lrintf (v * 32767.0f);
@@ -571,6 +590,8 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
         }
         atomic_store_explicit (&e->out_peak, pk, memory_order_relaxed);
     }
+#undef AE_SEND_VALUE
+    e->send_g_cur = sg;
 }
 
 static void *render_thread (void *arg)
@@ -839,6 +860,19 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
             return NULL;
         }
         e->out_channel_sel = cfg->output_channel - 1;
+    }
+    e->send_sel = -1;
+    e->send_g_cur = 0.0f;
+    if (cfg->send_channel > 0)
+    {
+        if (cfg->send_channel > e->out_fmt.channels)
+        {
+            snprintf (err, err_len, "device \"%s\" has no output channel %d for the record send (%d available)",
+                      e->out_name, cfg->send_channel, e->out_fmt.channels);
+            engine_teardown (e);
+            return NULL;
+        }
+        e->send_sel = cfg->send_channel - 1;
     }
 
     if (FAILED (IAudioClient_GetService (e->in_ac, &k_IID_IAudioCaptureClient,

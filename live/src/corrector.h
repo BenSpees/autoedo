@@ -147,6 +147,10 @@ typedef struct
     bool   formant_hold;      /* hold formants still under the shift; off =
                                  no formant processing at all (a guitar has
                                  no vocal tract to preserve) */
+    double formant_st;        /* deliberate formant offset, semitones */
+    float *lead_wet;          /* last block's wet-only lead (v_gain * shifted
+                                 voice, no dry blend, pre lead-IR): the
+                                 record send's "wet"/"lead" tap */
     bool   voiced;
     bool   primed;            /* becomes true once first pitch is found */
 
@@ -551,6 +555,19 @@ static inline void ae_corrector_set_midi_fold (AeCorrector *p, bool fold)
 static inline void ae_corrector_set_formant_hold (AeCorrector *p, bool hold)
 {
     p->formant_hold = hold;
+}
+
+static inline void ae_corrector_set_formant_st (AeCorrector *p, double st)
+{
+    p->formant_st = st < -12.0 ? -12.0 : (st > 12.0 ? 12.0 : st);
+}
+
+/* The wet-only lead from the LAST process call (valid for its length, up to
+   the prepared max block): the corrected voice with the dry blend removed,
+   pre lead-IR. What a record send calls "lead". */
+static inline const float *ae_corrector_lead_wet (const AeCorrector *p)
+{
+    return p->lead_wet;
 }
 
 static inline float ae_corrector_shift_st (const AeCorrector *p)
