@@ -70,6 +70,11 @@ bool ae_shifter_has_formant_support (void);
    input sample i - latency. Constant after create(). */
 int ae_shifter_latency (const AeShifter *s);
 
+/* The level-match's current makeup gain, LINEAR (1 = doing nothing). A
+   diagnostic read-out: persistent values far from 1 mean the level match
+   is working hard, which on a lead is worth knowing before blaming tone. */
+float ae_shifter_makeup (const AeShifter *s);
+
 /* Process n samples. `in` and `out` must not alias. Allocation-free. */
 void ae_shifter_process (AeShifter *s, const float *in, float *out, int n);
 

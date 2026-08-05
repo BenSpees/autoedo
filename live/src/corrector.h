@@ -561,6 +561,10 @@ static inline float ae_corrector_shift_st_min (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->shift_st_min, memory_order_relaxed);
 }
+static inline float ae_corrector_lead_makeup (const AeCorrector *p)
+{
+    return ae_shifter_makeup (p->shifter);
+}
 static inline float ae_corrector_shift_st_max (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->shift_st_max, memory_order_relaxed);

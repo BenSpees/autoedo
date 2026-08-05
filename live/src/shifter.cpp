@@ -2,8 +2,10 @@
 
 #include <signalsmith-stretch/signalsmith-stretch.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <new>       /* std::nothrow */
 #include <type_traits>
 #include <utility>
@@ -71,10 +73,20 @@ struct AeShifter
     double  sample_rate;
     int     latency;
     /* Level matching: slow mean-square trackers either side of the shift,
-       and the makeup gain they imply (ramped, never stepped). */
+       and the makeup gain they imply (ramped, never stepped). The input
+       tracker is DELAY-ALIGNED to the output through a small ring of
+       per-call energies: the output of process() is the input from
+       ~latency samples ago, and comparing input-now against output-now
+       pumps on anything percussive -- the attack reaches the input
+       tracker a whole latency before it reaches the output one. */
+    struct { int n; double msq; } ring[256];
+    int     ring_head;
+    long long fed; /* samples since create/reset: the ratio is meaningless
+                      until at least a latency's worth has flowed through */
     double  ms_in;
     double  ms_out;
     double  makeup;
+    std::atomic<float> makeup_mirror; /* for the status read-out */
 };
 
 int ae_shifter_block_samples (double sample_rate, int quality)
@@ -115,8 +127,12 @@ AeShifter *ae_shifter_create (double sample_rate, int block_samples)
     do_configure (s->stretch, block_samples, block_samples / 4,
                   std::integral_constant<bool, HasFormants<Stretch>::value>());
     s->latency = s->stretch.inputLatency() + s->stretch.outputLatency();
+    std::memset (s->ring, 0, sizeof (s->ring));
+    s->ring_head = 0;
+    s->fed = 0;
     s->ms_in = s->ms_out = 0.0;
     s->makeup = 1.0;
+    s->makeup_mirror.store (1.0f, std::memory_order_relaxed);
     return s;
 }
 
@@ -130,8 +146,19 @@ void ae_shifter_reset (AeShifter *s)
     if (s == NULL)
         return;
     s->stretch.reset();
+    std::memset (s->ring, 0, sizeof (s->ring));
+    s->ring_head = 0;
+    s->fed = 0;
     s->ms_in = s->ms_out = 0.0;
     s->makeup = 1.0;
+    s->makeup_mirror.store (1.0f, std::memory_order_relaxed);
+}
+
+float ae_shifter_makeup (const AeShifter *s)
+{
+    return s != NULL
+        ? const_cast<AeShifter *> (s)->makeup_mirror.load (std::memory_order_relaxed)
+        : 1.0f;
 }
 
 void ae_shifter_set_semitones (AeShifter *s, double semitones,
@@ -211,18 +238,48 @@ void ae_shifter_process (AeShifter *s, const float *in, float *out, int n)
     for (int i = 0; i < n; ++i)
         sq_out += (double) out[i] * out[i];
 
-    const double a = 1.0 - exp (-(double) n / (0.100 * s->sample_rate));
-    s->ms_in  += (sq_in / n - s->ms_in) * a;
-    s->ms_out += (sq_out / n - s->ms_out) * a;
-
-    double target = s->makeup;
-    /* Only re-measure on real signal (~ -80 dBFS RMS); silence holds the
-       last gain rather than dividing noise by noise. */
-    if (s->ms_in > 1e-8 && s->ms_out > 1e-8)
+    /* Push this call's input energy and read back the entry ~latency
+       samples old: THAT is the input this call's output was made from. */
+    s->ring_head = (s->ring_head + 1) & 255;
+    s->ring[s->ring_head].n   = n;
+    s->ring[s->ring_head].msq = sq_in / n;
+    double aligned_in = s->ring[s->ring_head].msq;
     {
+        long long acc = 0;
+        for (int k = 0; k < 256; ++k)
+        {
+            const int idx = (s->ring_head - k) & 255;
+            if (s->ring[idx].n <= 0)
+                break;
+            aligned_in = s->ring[idx].msq;
+            acc += s->ring[idx].n;
+            if (acc >= (long long) s->latency)
+                break;
+        }
+    }
+
+    const double a = 1.0 - exp (-(double) n / (0.100 * s->sample_rate));
+    s->ms_in  += (aligned_in  - s->ms_in)  * a;
+    s->ms_out += (sq_out / n  - s->ms_out) * a;
+
+    s->fed += n;
+    double target;
+    if (s->fed < (long long) s->latency + (long long) (0.15 * s->sample_rate))
+        target = 1.0; /* output hasn't caught up with input yet: any ratio
+                         measured across the gap is fiction */
+    else if (s->ms_in <= 1e-8)
+        target = s->makeup; /* silence: hold, don't divide noise by noise */
+    else if (s->ms_out <= 0.0625 * s->ms_in)
+        target = 1.0;       /* output missing (post-reset gap, dropout):
+                               NEVER boost into a hole -- relax to unity */
+    else
+    {
+        /* The formant stage costs at most ~6 dB at extreme shifts and
+           well under 1 dB at correction ratios; +-6 dB of authority
+           covers the real loss with no room for a runaway. */
         target = sqrt (s->ms_in / s->ms_out);
-        if (target < 0.25) target = 0.25;
-        if (target > 4.0)  target = 4.0;
+        if (target < 0.5) target = 0.5;
+        if (target > 2.0) target = 2.0;
     }
 
     if (target != s->makeup || s->makeup != 1.0)
@@ -236,6 +293,7 @@ void ae_shifter_process (AeShifter *s, const float *in, float *out, int n)
         }
         s->makeup = target;
     }
+    s->makeup_mirror.store ((float) s->makeup, std::memory_order_relaxed);
 }
 
 const char *ae_shifter_version (void)

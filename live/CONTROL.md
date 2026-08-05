@@ -371,6 +371,19 @@ flipping ONE difference:
    `{"bypass": true}` (hardware sanity). One of these four flips is the
    answer.
 
+5. **Restart vs block size.** `quality` is restart-scoped, so flipping it
+   changes TWO things: the shifter block AND every piece of accumulated
+   state. If step 4's quality flip was the one that helped, run
+   `POST /api/restart` at the ORIGINAL quality next time the problem
+   appears: clean after a bare restart → accumulated state (see
+   `leadMakeupDb`); still wrong → genuinely the block size.
+
+Two live meters for the loudness-path suspects: `leadMakeupDb` (the lead
+shifter's level-match gain — pinned away from 0 dB means the level match
+is working hard or stuck) and `outPeakDb` (pre-clip peak of the summed
+output — above ≈ −2 dB the soft clip is shaping the sound, and sustained
+saturation reads as thick/dark/"bassy", not as distortion).
+
 Attach `engineBuild` to every report.
 
 | Key | Type | Applies | Meaning |

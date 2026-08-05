@@ -318,6 +318,7 @@ struct AeAudioEngine
     int    out_channel_sel; /* 0-based playback channel for the mono fold; -1 = stereo 1-2 */
     float *proc;
     float *dry;
+    _Atomic float out_peak;
     float *harm_l;
     float *harm_r;
 
@@ -532,10 +533,13 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
     if (e->out_fmt.is_float)
     {
         float *d = (float *) out;
+        float pk = atomic_load_explicit (&e->out_peak, memory_order_relaxed) * 0.98f;
         for (UINT32 i = 0; i < n; ++i)
         {
             const float l  = (lg * src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
             const float r  = (lg * src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float ppk = fabsf (l) > fabsf (r) ? fabsf (l) : fabsf (r);
+            if (ppk > pk) pk = ppk;
             const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
             const float mc = ae_soft_clip (0.5f * (l + r));
             for (int c = 0; c < ch; ++c)
@@ -543,14 +547,18 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
                               : ch >= 2 ? (c == 0 ? lc : (c == 1 ? rc : mc))
                                         : mc;
         }
+        atomic_store_explicit (&e->out_peak, pk, memory_order_relaxed);
     }
     else /* 16-bit PCM */
     {
         short *d = (short *) out;
+        float pk = atomic_load_explicit (&e->out_peak, memory_order_relaxed) * 0.98f;
         for (UINT32 i = 0; i < n; ++i)
         {
             const float l  = (lg * src[i] + (bypass ? 0.0f : e->harm_l[i])) * gain;
             const float r  = (lg * src[i] + (bypass ? 0.0f : e->harm_r[i])) * gain;
+            const float ppk = fabsf (l) > fabsf (r) ? fabsf (l) : fabsf (r);
+            if (ppk > pk) pk = ppk;
             const float lc = ae_soft_clip (l), rc = ae_soft_clip (r);
             const float mc = ae_soft_clip (0.5f * (l + r));
             for (int c = 0; c < ch; ++c)
@@ -561,6 +569,7 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
                 d[i * ch + c] = (short) lrintf (v * 32767.0f);
             }
         }
+        atomic_store_explicit (&e->out_peak, pk, memory_order_relaxed);
     }
 }
 
@@ -676,6 +685,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->shift_st        = ae_corrector_shift_st (&e->corrector);
     out->shift_st_min    = ae_corrector_shift_st_min (&e->corrector);
     out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
+    out->lead_makeup     = ae_corrector_lead_makeup (&e->corrector);
+    out->out_peak        = atomic_load_explicit (&e->out_peak, memory_order_relaxed);
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);

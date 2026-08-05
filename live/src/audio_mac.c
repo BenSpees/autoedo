@@ -210,6 +210,7 @@ struct AeAudioEngine
     float *in_scratch; /* input callback capture buffer */
     float *proc;       /* mono processing block */
     float *dry;        /* latency-free dry copy for bypass */
+    _Atomic float out_peak; /* decaying pre-clip peak of the summed output */
     float *harm_l;     /* harmony-voice mix, left / right */
     float *harm_r;
 
@@ -411,6 +412,8 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     const float *src = bypass ? e->dry : e->proc;
     const bool   stereo = io->mNumberBuffers >= 2;
 
+    float pk = atomic_load_explicit (&e->out_peak, memory_order_relaxed) * 0.98f;
+
     for (UInt32 b = 0; b < io->mNumberBuffers; ++b)
     {
         float *dst = io->mBuffers[b].mData;
@@ -425,9 +428,12 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
             if (! bypass)
                 s += harm != NULL ? harm[i]
                                   : 0.5f * (e->harm_l[i] + e->harm_r[i]); /* mono out */
+            const float pre = fabsf (s * gain);
+            if (pre > pk) pk = pre;
             dst[i] = ae_soft_clip (s * gain);
         }
     }
+    atomic_store_explicit (&e->out_peak, pk, memory_order_relaxed);
     return noErr;
 }
 
@@ -535,6 +541,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->shift_st        = ae_corrector_shift_st (&e->corrector);
     out->shift_st_min    = ae_corrector_shift_st_min (&e->corrector);
     out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
+    out->lead_makeup     = ae_corrector_lead_makeup (&e->corrector);
+    out->out_peak        = atomic_load_explicit (&e->out_peak, memory_order_relaxed);
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);

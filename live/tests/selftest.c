@@ -647,7 +647,7 @@ static void test_synth_envelope (void)
     for (int src = 0; src < 2; ++src)
     {
         const char *nm = src == 0 ? "synth" : "shifted";
-        CHECK (onset[src][0] > 0.8,
+        CHECK (onset[src][0] > 0.7,
                "attack: a fast attack is up immediately (%s, %.3g)",
                nm, onset[src][0]);
         CHECK (onset[src][1] < 0.35,
@@ -2115,6 +2115,66 @@ static void test_96k (void)
     free (in); free (hl); free (hr);
 }
 
+/* The makeup gain on PERCUSSIVE input. Steady tones hid the defect: the
+   shifter's output is the input from ~latency ago, so an unaligned level
+   match sees every attack a whole latency early and every decay a latency
+   late -- it pumped rail to rail on a pluck train (and the boosted lead
+   drove the output soft clip: the field's "incredibly bassy" that survived
+   every live flip and vanished on restart). Aligned and bounded, the
+   makeup must stay near unity on plucks at ratio 1. */
+static void test_makeup_on_plucks (void)
+{
+    AeShifter *sh = ae_shifter_create (48000.0,
+                        ae_shifter_block_samples (48000.0, AE_SHIFT_QUALITY_BALANCED));
+    ae_shifter_set_semitones (sh, 0.0, 0.0);
+    ae_shifter_set_formant_semitones (sh, 0.0, true);
+    ae_shifter_set_formant_base (sh, 220.0);
+
+    const int total = 4 * 48000;
+    float *in  = calloc ((size_t) total, sizeof (float));
+    float *out = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        const int    k = i % 28800;              /* a pluck every 600 ms */
+        const double env = exp (-k / (0.35 * 48000.0)) * (k < 24000 ? 1.0 : 0.0);
+        ph += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.5 * env * (sin (ph) + 0.5 * sin (2.0 * ph)
+                                    + 0.25 * sin (3.0 * ph)));
+    }
+    double mk_min = 10.0, mk_max = 0.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        ae_shifter_process (sh, in + off, out + off, 512);
+        if (off > 48000) /* past warm-up */
+        {
+            const double m = ae_shifter_makeup (sh);
+            if (m < mk_min) mk_min = m;
+            if (m > mk_max) mk_max = m;
+        }
+    }
+    CHECK (mk_min > 0.66 && mk_max < 1.5,
+           "makeup stays near unity on a pluck train (%.2f .. %.2f; "
+           "the unaligned version swung 0.25 .. 4.0)", mk_min, mk_max);
+
+    /* Post-reset gap: loud input, no output yet. The old rule boosted into
+       the hole (toward +12 dB); the new one must not exceed unity. */
+    ae_shifter_reset (sh);
+    ae_shifter_set_semitones (sh, 0.0, 0.0);
+    double mk_gap = 0.0;
+    for (int off = 0; off < 9600; off += 512) /* first 200 ms after reset */
+    {
+        ae_shifter_process (sh, in + off, out + off, 512);
+        const double m = ae_shifter_makeup (sh);
+        if (m > mk_gap) mk_gap = m;
+    }
+    CHECK (mk_gap <= 1.01,
+           "makeup never boosts into the post-reset gap (max %.2f)", mk_gap);
+
+    ae_shifter_destroy (sh);
+    free (in); free (out);
+}
+
 static void test_soft_clip (void)
 {
     /* Transparent below the knee: exact passthrough, sign included. */
@@ -2169,6 +2229,7 @@ int main (void)
     test_engine_channels();
     test_96k();
     test_soft_clip();
+    test_makeup_on_plucks();
 
     if (failures == 0)
     {

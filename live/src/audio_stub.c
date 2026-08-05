@@ -145,6 +145,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->shift_st        = ae_corrector_shift_st (&e->corrector);
     out->shift_st_min    = ae_corrector_shift_st_min (&e->corrector);
     out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
+    out->lead_makeup     = ae_corrector_lead_makeup (&e->corrector);
+    out->out_peak        = 0.0f; /* the stub discards its output */
     out->voiced          = ae_corrector_voiced (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);

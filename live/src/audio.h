@@ -172,6 +172,10 @@ typedef struct
     float  shift_st_min;    /* decaying (~1 s) extremes, so spikes between
                                10 Hz status ticks are still visible */
     float  shift_st_max;
+    float  lead_makeup;     /* the lead shifter's level-match gain, linear */
+    float  out_peak;        /* decaying peak of the summed output BEFORE the
+                               soft clip, linear: > ~0.79 means the clip is
+                               shaping the sound */
     bool   voiced;
     /* Pitch trace, oldest first: detected (0 = unvoiced) and target per
        detection hop, ending at absolute detection count trace_seq. */

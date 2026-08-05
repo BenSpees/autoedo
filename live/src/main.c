@@ -903,7 +903,8 @@ static void status_refresh (App *app)
         "{\"running\":%s,\"engineBuild\":\"%s\",\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,"
-        "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"shiftStMin\":%.2f,\"shiftStMax\":%.2f,\"voiced\":%s,"
+        "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"shiftStMin\":%.2f,\"shiftStMax\":%.2f,"
+        "\"leadMakeupDb\":%.2f,\"outPeakDb\":%.1f,\"voiced\":%s,"
         "\"traceSeq\":%u,\"trace\":%s,"
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
@@ -915,6 +916,8 @@ static void status_refresh (App *app)
         st.latency_samples, lat_ms,
         (double) st.detected_hz, (double) st.target_hz, (double) st.shift_st,
         (double) st.shift_st_min, (double) st.shift_st_max,
+        st.lead_makeup > 1e-6f ? 20.0 * log10 ((double) st.lead_makeup) : -120.0,
+        st.out_peak    > 1e-6f ? 20.0 * log10 ((double) st.out_peak)    : -120.0,
         st.voiced ? "true" : "false",
         st.trace_seq, trace,
         hdeg, midi,
