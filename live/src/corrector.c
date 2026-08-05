@@ -685,6 +685,8 @@ void ae_corrector_reset (AeCorrector *p)
         p->h_mix[v]       = 0.0;
         p->h_cents_t[v]   = 0.0;
         p->h_cents_cur[v] = 0.0;
+        p->h_glide_rate[v] = 0.0;
+        p->h_glide_tgt[v] = 0.0;
         p->h_glide_valid[v] = false;
         p->s_cents[v]     = 0.0;
         p->s_env[v]       = 0.0;
@@ -1218,16 +1220,41 @@ static void run_detection (AeCorrector *p)
                         /* Portamento. A voice already sounding slides; one
                            arriving from silence starts on pitch, because
                            sliding in from the last note it happened to sing
-                           is a swoop nobody asked for. */
+                           is a swoop nobody asked for.
+
+                           The slide is LINEAR in cents at a rate fixed when
+                           the leg starts, so it arrives in harmGlideMs and
+                           then locks on -- not a one-pole toward the target,
+                           which is 63% of the way when the time is up and
+                           asymptotic ever after. A "leg" is a real
+                           retarget: the target moving more than 20 cents in
+                           one 5 ms hop, which vibrato and anchor wobble
+                           cannot do but a note change always does. Between
+                           legs a landed voice tracks its target exactly, so
+                           ghosts still ride the lead's vibrato. */
                         if (! p->h_glide_valid[v])
-                            p->h_cents_cur[v] = voice_cents;
+                        {
+                            p->h_cents_cur[v]  = voice_cents;
+                            p->h_glide_rate[v] = 0.0;
+                        }
                         else
                         {
-                            const double g  = p->harm_glide_ms / 1000.0;
-                            const double ag = g <= 0.0 ? 1.0
-                                                       : 1.0 - exp (-elapsed / g);
-                            p->h_cents_cur[v] += (voice_cents - p->h_cents_cur[v]) * ag;
+                            const double g_s = p->harm_glide_ms / 1000.0;
+                            const double dist = voice_cents - p->h_cents_cur[v];
+                            if (g_s <= 0.0)
+                                p->h_cents_cur[v] = voice_cents;
+                            else
+                            {
+                                if (fabs (voice_cents - p->h_glide_tgt[v]) > 20.0)
+                                    p->h_glide_rate[v] = fabs (dist) / g_s;
+                                const double step = p->h_glide_rate[v] * elapsed;
+                                if (fabs (dist) <= step || p->h_glide_rate[v] <= 0.0)
+                                    p->h_cents_cur[v] = voice_cents; /* landed */
+                                else
+                                    p->h_cents_cur[v] += dist > 0.0 ? step : -step;
+                            }
                         }
+                        p->h_glide_tgt[v] = voice_cents;
                         p->h_semitones[v] =
                             dclamp ((p->h_cents_cur[v] - detected_cents) / 100.0,
                                     -36.0, 36.0);

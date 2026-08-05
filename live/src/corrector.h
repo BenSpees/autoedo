@@ -225,6 +225,8 @@ typedef struct
        mid-slide. 0 = arrive immediately, which is the classic harmonizer. */
     double harm_glide_ms;
     double h_cents_cur[AE_HARM_VOICES]; /* the glide's current position */
+    double h_glide_rate[AE_HARM_VOICES]; /* cents/sec for the current leg */
+    double h_glide_tgt[AE_HARM_VOICES];  /* last hop's target (leg detector) */
     bool   h_glide_valid[AE_HARM_VOICES]; /* the voice is still SOUNDING, so
                                              h_cents_cur is a real position to
                                              slide from. Deliberately not the

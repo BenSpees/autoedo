@@ -810,6 +810,48 @@ static void test_harmony_glide (void)
     CHECK (got[1] < got[0] * 0.985 && got[1] > g0 * 0.99,
            "glide 1500 ms: the shifted ghost is still travelling "
            "(%.1f Hz, between %.1f and %.1f)", got[1], g0, g1);
+
+    /* Arrival: the slide is constant-time, not a one-pole. A 400 ms glide
+       must be ON target well before 700 ms -- the exponential this replaced
+       would still be ~50 cents short there and never truly land. */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        ae_corrector_set_harm_glide_ms (p, 400.0);
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+            voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_synth (p, AE_HARM_SRC_VOICE, 0, 5.0, 200.0);
+
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double phase = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            phase += 2.0 * M_PI * (i < hold ? f0 : f1) / 48000.0;
+            in[i] = (float) (0.4 * sin (phase) + 0.15 * sin (2.0 * phase));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, in + off, hl + off, hr + off, 512);
+
+        /* 700 ms - 1000 ms after the change: landed, and staying there. */
+        const double landed = peak_span (hl + hold + 33600, 14400,
+                                         g0 * 0.97, g1 * 1.03, 48000.0);
+        CHECK (fabs (1200.0 * log2 (landed / g1)) < 12.0,
+               "glide 400 ms lands on the target (%.1f Hz, target %.1f)",
+               landed, g1);
+
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
 }
 
 /* leadShiftSteps: applied after the snap (the detector still classifies the
