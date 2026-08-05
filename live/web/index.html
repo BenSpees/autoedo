@@ -345,8 +345,10 @@
     <input type="number" id="root-cents" class="num" step="0.1" min="-50" max="50" value="0" title="root fine offset, cents">
     <span class="dimtxt">¢</span>
     <span class="dotsep">·</span>
-    <span class="dimtxt">A4</span>
-    <input type="number" id="a4" class="num" step="0.1" min="400" max="480" value="440.0">
+    <span class="dimtxt" title="the pitch standard, stated as a note and its frequency in octave 4. The EDO grid is built off degree 0 (the Root), so with Root C the C is the same frequency in EVERY EDO and the degree you would call A lands wherever that EDO puts it — in 22-EDO, 433.12 or 446.99 Hz, never 440. Do not adjust this because A is not 440 in your tuning; that moves C.">Ref</span>
+    <select id="ref-note" style="width:auto"></select>
+    <input type="number" id="a4" class="num" step="0.01" min="8" max="8000" value="261.63">
+    <span class="dimtxt">Hz</span>
     <span id="readout" class="tab unvoiced"><span class="in">—</span> <span class="dimtxt">&rarr;</span> <span class="tgt">—</span></span>
   </div>
 
@@ -413,6 +415,8 @@
       <select id="synth-patch" title="synth sound" style="width:auto" hidden></select>
       <input type="number" id="synth-atk" class="num" min="0" max="5000" step="10" title="synth attack, ms" hidden>
       <input type="number" id="synth-rel" class="num" min="0" max="10000" step="10" title="synth release, ms" hidden>
+      <button id="harm-hold" title="HOLD (momentary): freeze the ghosts where they are and let them ring on while you keep singing over them. Hold the button, or map a MIDI CC in the controller.">HOLD</button>
+      <input type="number" id="harm-glide" class="num" min="0" max="5000" step="10" title="harmony portamento, ms — how long a ghost takes to slide to a new target when the lead moves. 0 = jump." style="width:64px">
       <span id="harm-master-wrap" style="display:inline-flex;align-items:center;gap:6px" title="harmony bus master — one gain over every ghost (shifted and synth alike), on top of the per-voice trims. Never touches the lead.">
         <input type="range" id="harm-master" min="-24" max="12" step="0.5" value="0" style="width:88px">
         <span class="tab" id="harm-master-val" style="min-width:52px;text-align:right">0.0 dB</span>
@@ -1011,7 +1015,8 @@ function harmCfg() { // defaults until the first status lands
   return cfg || { edo: 12, harmOn: false, harmLock: 'mask', hm: [0,0,0,0,0], hx: [0,0,0,0,0],
                   hg: [0,0,0,0,0], hp: [0,0,0,0,0], hMute: [0,0,0,0,0], hSolo: [0,0,0,0,0],
                   harmSource: 'voice', synthPatch: 'pad', synthAttackMs: 80, synthReleaseMs: 500,
-                  harmGainDb: 0,
+                  harmGainDb: 0, harmGlideMs: 0, harmSustain: true, harmHold: false,
+                  hd: [0,0,0,0,0],
                   leadOn: true };
 }
 
@@ -1142,6 +1147,13 @@ function buildHarmPods() {
       onset: x => { const hp = harmCfg().hp.slice(); hp[v] = Math.round(x * 20) / 20; schedulePost({ hp }); updVal(); },
     });
     pan.title = 'pan (drag)';
+    const det = miniKnob(row, VOICE_COLORS[v], {
+      min: -25, max: 25,
+      get: () => (harmCfg().hd || [0,0,0,0,0])[v],
+      onset: x => { const hd = (harmCfg().hd || [0,0,0,0,0]).slice();
+                    hd[v] = Math.round(x * 2) / 2; schedulePost({ hd }); updVal(); },
+    });
+    det.title = 'detune, cents (drag) — with interval 0 this is a unison ghost';
     const mkbtn = (txt, key) => {
       const b = document.createElement('button');
       b.className = 'msbtn';
@@ -1168,8 +1180,10 @@ function buildHarmPods() {
       const iv = cc.hm[v];
       const eff = iv ? iv + Math.sign(iv) * cc.hx[v] * cc.edo : 0;
       const cents = iv ? ` · ${eff > 0 ? '+' : '−'}${Math.abs(eff * stepCents()).toFixed(1)}¢` : '';
+      const d = (cc.hd || [0,0,0,0,0])[v] || 0;
+      const det = d ? ` · ${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}¢ detune` : '';
       val.textContent = `${cc.hg[v].toFixed(1)} dB · pan ${cc.hp[v] === 0 ? 'C'
-        : (cc.hp[v] < 0 ? 'L' : 'R') + Math.abs(Math.round(cc.hp[v] * 100))}${cents}`;
+        : (cc.hp[v] < 0 ? 'L' : 'R') + Math.abs(Math.round(cc.hp[v] * 100))}${cents}${det}`;
     };
     updVal();
     host.appendChild(pod);
@@ -1191,6 +1205,8 @@ function syncHarm() {
   if (document.activeElement !== $('synth-patch')) $('synth-patch').value = c.synthPatch;
   if (document.activeElement !== $('synth-atk')) $('synth-atk').value = c.synthAttackMs;
   if (document.activeElement !== $('synth-rel')) $('synth-rel').value = c.synthReleaseMs;
+  if (document.activeElement !== $('harm-glide'))
+    $('harm-glide').value = c.harmGlideMs === undefined ? 0 : c.harmGlideMs;
   const hgm = c.harmGainDb === undefined ? 0 : c.harmGainDb;
   if (document.activeElement !== $('harm-master')) $('harm-master').value = hgm;
   $('harm-master-val').textContent = `${hgm.toFixed(1)} dB`;
@@ -1203,7 +1219,7 @@ function syncHarm() {
     chips.dataset.key = key;
     chips.innerHTML = '';
     for (let v = 0; v < 5; v++) {
-      if (!c.hm[v]) continue;
+      if (!c.hm[v] && !((c.hd || [])[v])) continue;
       const ch = document.createElement('span');
       ch.className = 'hchip';
       ch.style.color = VOICE_COLORS[v];
@@ -1223,6 +1239,19 @@ function syncHarm() {
 }
 
 $('harm-power').onclick = () => { schedulePost({ harmOn: !harmCfg().harmOn }); syncHarm(); };
+// Momentary: down engages, up (or leaving the button) releases.
+for (const ev of ['pointerdown']) $('harm-hold').addEventListener(ev, () => {
+  $('harm-hold').classList.add('on'); schedulePost({ harmHold: true });
+});
+for (const ev of ['pointerup', 'pointerleave', 'pointercancel'])
+  $('harm-hold').addEventListener(ev, () => {
+    if (!$('harm-hold').classList.contains('on')) return;
+    $('harm-hold').classList.remove('on'); schedulePost({ harmHold: false });
+  });
+$('harm-glide').onchange = e => {
+  const v = Math.max(0, Math.min(5000, +e.target.value || 0));
+  e.target.value = v; schedulePost({ harmGlideMs: v });
+};
 $('harm-master').oninput = e => {
   const v = parseFloat(e.target.value);
   $('harm-master-val').textContent = `${v.toFixed(1)} dB`;
@@ -1421,10 +1450,18 @@ $('root-cents').onchange = e => {
   schedulePost({ rootCents: v });
   buildRuler();
 };
+for (let i = 0; i < 12; i++) {
+  const o = document.createElement('option');
+  o.value = i; o.textContent = NOTE_NAMES[i] + '4';
+  $('ref-note').appendChild(o);
+}
+$('ref-note').onchange = e => schedulePost({ refNote: parseInt(e.target.value, 10) });
 $('a4').onchange = e => {
-  const v = Math.max(400, Math.min(480, +e.target.value || 440));
-  e.target.value = v;
-  schedulePost({ refA4: v });
+  // The field is the reference NOTE's frequency; the engine clamps the
+  // anchor it derives and echoes back what it kept.
+  const v = +e.target.value;
+  if (!(v > 0)) return;
+  schedulePost({ refNoteHz: v });
 };
 $('stretch').oninput = e => {
   const v = +e.target.value;
@@ -1750,7 +1787,10 @@ function setControls(c) {
   $('edo-btn').innerHTML = `${c.edo}-EDO &#9662;`;
   $('root').value = c.rootNote;
   if (document.activeElement !== $('root-cents')) $('root-cents').value = c.rootCents;
-  if (document.activeElement !== $('a4')) $('a4').value = c.refA4;
+  if (document.activeElement !== $('a4'))
+    $('a4').value = (c.refNoteHz === undefined ? c.refA4 : c.refNoteHz).toFixed(2);
+  if (document.activeElement !== $('ref-note'))
+    $('ref-note').value = c.refNote === undefined ? 9 : c.refNote;
   $('stretch').value = c.stretchCents;
   $('stretch-val').textContent = `${c.stretchCents >= 0 ? '+' : ''}${c.stretchCents.toFixed(1)} ¢/oct`;
   // echo-back guard: never overwrite a knob whose inline editor is open

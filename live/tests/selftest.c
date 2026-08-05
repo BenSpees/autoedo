@@ -587,11 +587,14 @@ static void test_synth_envelope (void)
            "synthReleaseMs shapes the tail (50 ms %.3g vs 1500 ms %.3g)",
            tail[0], tail[1]);
 
-    /* Attack: a slow attack must not be at full level a few milliseconds in.
-       Measured on the synth LEAD, whose envelope is the input crossfade, so
-       this is specifically the ghost's own attack being tested. */
+    /* Attack, on BOTH sources. It means the same thing either side -- how
+       long the ghost takes to arrive under the lead -- so a slow attack
+       must not be at full level a few milliseconds in whether the ghost is
+       an oscillator or a pitch-shifted copy of the input. */
     const double atk_ms[2] = { 1.0, 1000.0 };
-    double onset[2];
+    const int    srcs[2]   = { AE_HARM_SRC_SYNTH, AE_HARM_SRC_VOICE };
+    double onset[2][2];
+    for (int src = 0; src < 2; ++src)
     for (int c = 0; c < 2; ++c)
     {
         AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -606,7 +609,7 @@ static void test_synth_envelope (void)
             voices[v].gain = 1.0;
         voices[0].interval = 7;
         ae_corrector_set_harmony (p, true, 0, voices);
-        ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+        ae_corrector_set_synth (p, srcs[src],
                                 ae_synth_patch_find ("sine"), atk_ms[c], 200.0);
 
         float *in = calloc ((size_t) sung, sizeof (float));
@@ -636,21 +639,37 @@ static void test_synth_envelope (void)
         double settled = 0.0;
         for (int i = sung - 4800; i < sung; ++i)
             if (fabs (hl[i]) > settled) settled = fabs (hl[i]);
-        onset[c] = settled > 0.0 ? pk / settled : 0.0;
+        onset[src][c] = settled > 0.0 ? pk / settled : 0.0;
 
         ae_corrector_free (p);
         free (p); free (in); free (hl); free (hr);
     }
-    CHECK (onset[0] > 0.8,
-           "synthAttackMs: a 1 ms attack is up immediately (%.3g)", onset[0]);
-    CHECK (onset[1] < 0.35,
-           "synthAttackMs: a 1 s attack is still climbing (%.3g vs fast %.3g)",
-           onset[1], onset[0]);
+    for (int src = 0; src < 2; ++src)
+    {
+        const char *nm = src == 0 ? "synth" : "shifted";
+        CHECK (onset[src][0] > 0.8,
+               "attack: a fast attack is up immediately (%s, %.3g)",
+               nm, onset[src][0]);
+        CHECK (onset[src][1] < 0.35,
+               "attack: a 1 s attack is still climbing (%s, %.3g vs fast %.3g)",
+               nm, onset[src][1], onset[src][0]);
+    }
 }
 
 /* Peak-search the strongest partial near `guess` (Goertzel over a fine grid).
    YIN would average the inharmonic upper partials; this reads the one
    frequency being asked about. */
+static double peak_span (const float *buf, int n, double lo, double hi, double fs)
+{
+    double best_f = lo, best_p = -1.0;
+    for (double f = lo; f <= hi; f += lo * 0.0005)
+    {
+        const double p = goertzel (buf, n, f, fs);
+        if (p > best_p) { best_p = p; best_f = f; }
+    }
+    return best_f;
+}
+
 static double peak_near (const float *buf, int n, double guess, double fs)
 {
     double best_f = guess, best_p = -1.0;
@@ -733,6 +752,64 @@ static void test_harmony_anchor (void)
 
     ae_corrector_free (p);
     free (p); free (in); free (hl); free (hr);
+}
+
+/* Portamento reaches the SHIFTED ghosts, not just the synth ones: the glide
+   is applied once, upstream of both, and the shifter's transposition is
+   derived from the glided position. Lead jumps A3 -> C4; the ghost a fifth
+   above must still be on its way when the glide is long. */
+static void test_harmony_glide (void)
+{
+    const int hold = 49152, total = hold * 2;   /* ~1 s each, block-aligned */
+    const double f0 = 220.0, f1 = 261.6256;     /* A3 then C4 */
+    const double fifth = pow (2.0, 7.0 / 12.0);
+    const double g0 = f0 * fifth, g1 = f1 * fifth;  /* 329.63 -> 392.00 */
+    const double glide_ms[2] = { 0.0, 1500.0 };
+    double got[2];
+
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        ae_corrector_set_harm_glide_ms (p, glide_ms[c]);
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+            voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        /* The SHIFTED source -- the one that used to jump. */
+        ae_corrector_set_synth (p, AE_HARM_SRC_VOICE, 0, 5.0, 200.0);
+
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double phase = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            phase += 2.0 * M_PI * (i < hold ? f0 : f1) / 48000.0;
+            in[i] = (float) (0.4 * sin (phase) + 0.15 * sin (2.0 * phase));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, in + off, hl + off, hr + off, 512);
+
+        /* 150-450 ms after the lead moved, past the shifter's own latency. */
+        got[c] = peak_span (hl + hold + 7200, 14400, g0 * 0.97, g1 * 1.03, 48000.0);
+
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+
+    CHECK (fabs (1200.0 * log2 (got[0] / g1)) < 25.0,
+           "glide 0: the shifted ghost is already there (%.1f Hz, target %.1f)",
+           got[0], g1);
+    CHECK (got[1] < got[0] * 0.985 && got[1] > g0 * 0.99,
+           "glide 1500 ms: the shifted ghost is still travelling "
+           "(%.1f Hz, between %.1f and %.1f)", got[1], g0, g1);
 }
 
 static void test_midi_harmony (void)
@@ -1758,6 +1835,7 @@ int main (void)
     test_correction();
     test_harm_master();
     test_harmony_anchor();
+    test_harmony_glide();
     test_synth_envelope();
     test_walk();
     test_harmony();

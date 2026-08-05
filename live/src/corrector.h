@@ -71,13 +71,26 @@
 
 typedef struct
 {
-    int    interval; /* signed EDO steps, 0 = voice off */
+    int    interval; /* signed EDO steps; 0 = unison (see detune_cents) */
     int    ext_oct;  /* 0..2 extra octaves, stacking in the voice's direction */
+    double detune_cents; /* fine offset applied AFTER the lock quantize, so it
+                            survives snapping -- a deliberate few cents is the
+                            point, not an error to be corrected away */
     double gain;     /* linear */
     double pan;      /* -1 (L) .. +1 (R) */
     bool   mute;
     bool   solo;
 } AeHarmVoice;
+
+/* A voice sounds when it has somewhere to be: any interval, or -- at
+   interval 0 -- a detune, which is what makes a UNISON ghost expressible.
+   Interval 0 with no detune stays "off", both because it is the historical
+   meaning of 0 and because a ghost at an exact unison is a phase-coherent
+   double of the lead, which is a comb filter rather than a voice. */
+static inline bool ae_harm_voice_on (const AeHarmVoice *hv)
+{
+    return hv->interval != 0 || hv->detune_cents != 0.0;
+}
 
 typedef struct
 {
@@ -180,6 +193,46 @@ typedef struct
     double in_level;                  /* smoothed voiced input RMS; frozen
                                          while unvoiced so release tails hold
                                          their level like they hold pitch */
+
+    /* Harmony sustain: a shifted ghost is made OF the input, so when the
+       lead stops there is nothing left for its release to shape. This is
+       the material that keeps it going -- a whole number of pitch periods
+       lifted from the end of the note and crossfaded into a seamless loop,
+       fed to the harmony shifters (never the lead) while the release rings
+       out. The ghost sustains in the performer's own timbre instead of
+       fading a silence. */
+    bool   harm_sustain;     /* feature on/off */
+    float *sus_buf;          /* the loop itself */
+    int    sus_cap;          /* allocated samples (~250 ms) */
+    int    sus_len;          /* loop length in use, 0 = nothing captured */
+    int    sus_read;         /* circular read cursor */
+    double sus_mix;          /* smoothed live(0) / loop(1) source blend */
+    float *sus_block;        /* per-block harmony input when the loop is up */
+    double last_voiced_hz;   /* f0 at the moment voicing dropped */
+
+    /* HOLD: freeze the ghosts where they are and let them ring on their own
+       while the lead carries on. Momentary by design -- a controller maps it
+       to a footswitch or a MIDI CC. `latched` is the edge-taken state, so
+       engaging HOLD captures the sustain loop and the level once rather than
+       chasing them. */
+    bool   harm_hold;
+    bool   hold_latched;
+    double hold_level;       /* input RMS frozen at the moment of the hold */
+    /* Portamento: how long a ghost takes to travel to a new target. One
+       number for BOTH sources, applied once here, so a shifted voice and a
+       synth voice on the same interval never disagree about where they are
+       mid-slide. 0 = arrive immediately, which is the classic harmonizer. */
+    double harm_glide_ms;
+    double h_cents_cur[AE_HARM_VOICES]; /* the glide's current position */
+    bool   h_glide_valid[AE_HARM_VOICES]; /* the voice is still SOUNDING, so
+                                             h_cents_cur is a real position to
+                                             slide from. Deliberately not the
+                                             per-frame gate: voicing drops for
+                                             a frame on every consonant and at
+                                             every note change, and treating
+                                             that as "arrived from silence"
+                                             snaps the glide shut exactly when
+                                             it was supposed to be working. */
     double h_cents_t[AE_HARM_VOICES]; /* ghost target, absolute cents re ref;
                                          holds its last value while unvoiced
                                          so the release tail keeps its pitch */
@@ -314,6 +367,28 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
 /* Configure the harmony voices (audio thread, between blocks). */
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES]);
+
+/* Harmony portamento in milliseconds (audio thread, between blocks): the
+   time constant a ghost takes to slide to a new target when the lead moves.
+   0 = jump. A voice arriving from silence always starts ON pitch rather
+   than sliding in from wherever it last was. */
+void ae_corrector_set_harm_glide_ms (AeCorrector *p, double ms);
+
+/* HOLD (audio thread, between blocks): freeze every ghost at its current
+   pitch and keep it sounding, indefinitely, while the lead goes on
+   normally. Sing a chord in, hold it, and keep singing over your own
+   choir. Shifted ghosts ride the sustain loop; synth ghosts simply hold
+   their note and their level. Releasing HOLD hands the ghosts back to the
+   live pitch, releasing naturally if nothing is being sung. */
+void ae_corrector_set_harm_hold (AeCorrector *p, bool on);
+
+/* Harmony sustain (audio thread, between blocks). When on, a shifted ghost
+   keeps sounding through its release instead of cutting off with the lead:
+   the engine loops a period-aligned, crossfaded slice of the end of the
+   note and feeds that to the harmony shifters. Bounded entirely by
+   synthReleaseMs -- a short release sustains nothing. Never reaches the
+   lead, which must stay the performer and nothing else. */
+void ae_corrector_set_harm_sustain (AeCorrector *p, bool on);
 
 /* Harmony-bus master gain, LINEAR (audio thread, between blocks). One knob
    over the whole ghost bus: it multiplies every harmony voice -- shifted,

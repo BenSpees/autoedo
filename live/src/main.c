@@ -51,7 +51,12 @@ typedef struct
        the detection range are derived from these in config_sync(). */
     int             root_note;     /* 0..11, 0 = C (degree 0 of the grid) */
     double          root_cents;    /* fine offset, -50..+50 */
-    double          ref_a4;        /* reference A4, default 440.0 */
+    double          ref_a4;        /* the absolute pitch anchor, carried as
+                                      the A4 of a 12-EDO grid on the same
+                                      root -- NOT a claim about where A sits
+                                      in the tuning actually in use */
+    int             ref_note;      /* which note refNoteHz names, 0..11,
+                                      0 = C (the default anchor) */
     double          stretch_cents; /* octave stretch, cents per octave */
     char            range_name[16];/* detection range preset */
     double          det_min_hz;    /* explicit range override, 0 = use the */
@@ -174,6 +179,7 @@ static void config_defaults (App *app)
     app->root_note     = 0;      /* C */
     app->root_cents    = 0.0;
     app->ref_a4        = 440.0;
+    app->ref_note      = 0;      /* state the standard as C, not as A */
     app->stretch_cents = 0.0;
     snprintf (app->range_name, sizeof (app->range_name), "instrument");
     app->det_min_hz = app->det_max_hz = 0.0; /* 0 = use the named preset */
@@ -189,9 +195,13 @@ static void config_defaults (App *app)
         c->params.harm_ext[v]      = 0;
         c->params.harm_gain_db[v]  = 0.0;
         c->params.harm_pan[v]      = 0.0;
+        c->params.harm_detune_cents[v] = 0.0;
     }
     c->params.harm_mute = 0;
     c->params.harm_solo = 0;
+    c->params.harm_glide_ms = 0.0;  /* jump, the classic harmonizer */
+    c->params.harm_sustain = true;  /* the release means nothing without it */
+    c->params.harm_hold    = false; /* momentary; never a saved state */
     c->params.harm_source      = 0;     /* pitch-shifted live audio */
     c->params.lead_source      = 0;     /* the shifter's corrected voice */
     for (int v = 0; v < 5; ++v)
@@ -251,6 +261,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"amount\":%.6g,\"toleranceCents\":%.6g,\"stickiness\":%.6g,"
               "\"humanize\":%.6g,"
               "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
+              "\"refNote\":%d,\"refNoteHz\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
               "\"bypass\":%s,\"leadOn\":%s,\"outputGainDb\":%.6g,"
@@ -259,6 +270,8 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
               c->params.humanize,
               app->root_note, app->root_cents, app->ref_a4,
+              app->ref_note,
+              app->ref_a4 * pow (2.0, ((double) app->ref_note - 9.0) / 12.0),
               app->stretch_cents, app->range_name, app->quality_name,
               app->det_min_hz, app->det_max_hz,
               c->params.bypass ? "true" : "false",
@@ -312,17 +325,21 @@ static void config_json (const App *app, char *out, size_t cap)
     strncat (out, "]", cap - strlen (out) - 1);
     snprintf (harm, sizeof (harm),
               ",\"harmOn\":%s,\"harmLock\":\"%s\",\"harmGainDb\":%.4g,"
+              "\"harmSustain\":%s,\"harmHold\":%s,\"harmGlideMs\":%.4g,"
               "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
                            ? c->params.harm_lock : 0],
               c->params.harm_master_db,
+              c->params.harm_sustain ? "true" : "false",
+              c->params.harm_hold ? "true" : "false",
+              c->params.harm_glide_ms,
               c->params.midi_mode ? "true" : "false");
     strncat (out, harm, cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->midi_source);
     strncat (out, "\"", cap - strlen (out) - 1);
-    const char *keys[4] = { "hm", "hx", "hg", "hp" };
-    for (int k = 0; k < 4; ++k)
+    const char *keys[5] = { "hm", "hx", "hg", "hp", "hd" };
+    for (int k = 0; k < 5; ++k)
     {
         size_t n = 0;
         n += (size_t) snprintf (harm + n, sizeof (harm) - n, ",\"%s\":[", keys[k]);
@@ -331,7 +348,8 @@ static void config_json (const App *app, char *out, size_t cap)
             if (k == 0)      n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%d",  v ? "," : "", c->params.harm_interval[v]);
             else if (k == 1) n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%d",  v ? "," : "", c->params.harm_ext[v]);
             else if (k == 2) n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%.4g", v ? "," : "", c->params.harm_gain_db[v]);
-            else             n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%.4g", v ? "," : "", c->params.harm_pan[v]);
+            else if (k == 3) n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%.4g", v ? "," : "", c->params.harm_pan[v]);
+            else             n += (size_t) snprintf (harm + n, sizeof (harm) - n, "%s%.4g", v ? "," : "", c->params.harm_detune_cents[v]);
         }
         snprintf (harm + n, sizeof (harm) - n, "]");
         strncat (out, harm, cap - strlen (out) - 1);
@@ -425,6 +443,26 @@ static bool config_apply_json (App *app, const char *json)
         app->root_cents = num_clamp (num, -50.0, 50.0);
     if (ae_json_get_number (json, "refA4", &num))
         app->ref_a4 = num_clamp (num, 400.0, 480.0);
+    /* State the pitch standard in whatever terms the rig actually uses.
+       `refNote` names the note, `refNoteHz` gives its frequency in octave 4;
+       between them they set the same single anchor `refA4` carries, and the
+       echo always shows all three.
+
+       This matters for anything that is not 12-EDO. The EDO grid is built
+       off DEGREE 0, which `rootNote` places -- so with rootNote = C, C is
+       the anchor and is the SAME frequency in every EDO, while the degree
+       you would call A falls wherever that EDO puts it (in 22-EDO, 433.12
+       or 446.99 Hz, never 440). `refA4` is only the arithmetic that gets
+       there: it is the A of a 12-EDO grid on the same root, not a claim
+       about where A sits in the tuning in use. Nudging it because "our A
+       isn't 440" moves C, and moves the whole rig off the band. Set
+       refNote/refNoteHz instead and the trap does not exist. Parsed after
+       refA4, so a POST carrying both lands on the more specific one. */
+    if (ae_json_get_number (json, "refNote", &num))
+        app->ref_note = (int) num_clamp (num, 0.0, 11.0);
+    if (ae_json_get_number (json, "refNoteHz", &num) && num > 0.0)
+        app->ref_a4 = num_clamp (num * pow (2.0, (9.0 - (double) app->ref_note) / 12.0),
+                                 400.0, 480.0);
     if (ae_json_get_number (json, "stretchCents", &num))
         app->stretch_cents = num_clamp (num, -30.0, 30.0);
     if (ae_json_get_string (json, "range", str, sizeof (str)))
@@ -468,6 +506,12 @@ static bool config_apply_json (App *app, const char *json)
         c->params.harm_on = b;
     if (ae_json_get_number (json, "harmGainDb", &num))
         c->params.harm_master_db = num_clamp (num, -24.0, 12.0);
+    if (ae_json_get_number (json, "harmGlideMs", &num))
+        c->params.harm_glide_ms = num_clamp (num, 0.0, 5000.0);
+    if (ae_json_get_bool (json, "harmSustain", &b))
+        c->params.harm_sustain = b;
+    if (ae_json_get_bool (json, "harmHold", &b))
+        c->params.harm_hold = b;
     if (ae_json_get_string (json, "harmSource", str, sizeof (str)))
         c->params.harm_source = strcmp (str, "synth") == 0 ? 1 : 0;
     if (ae_json_get_string (json, "leadSource", str, sizeof (str)))
@@ -574,6 +618,9 @@ static bool config_apply_json (App *app, const char *json)
     if ((n5 = ae_json_get_num_array (json, "hp", arr, 5)) >= 0)
         for (int v = 0; v < n5; ++v)
             c->params.harm_pan[v] = num_clamp (arr[v], -1.0, 1.0);
+    if ((n5 = ae_json_get_num_array (json, "hd", arr, 5)) >= 0)
+        for (int v = 0; v < n5; ++v)
+            c->params.harm_detune_cents[v] = num_clamp (arr[v], -100.0, 100.0);
     if ((n5 = ae_json_get_num_array (json, "hMute", arr, 5)) >= 0)
     {
         uint32_t m = c->params.harm_mute;
@@ -687,6 +734,7 @@ static void config_load (App *app)
        is exactly the surprise a controller then has to race to undo. */
     app->engine_cfg.params.harm_on  = false;
     app->engine_cfg.params.drone_on = false;
+    app->engine_cfg.params.harm_hold = false; /* momentary: never a start state */
 }
 
 /* ------------------------------------------------------------------ engine */
@@ -813,22 +861,6 @@ static void status_refresh (App *app)
                                  i ? "," : "", ae_synth_patch_name (i));
     snprintf (patches + pn, sizeof (patches) - pn, "]");
 
-    /* Is the synth envelope anywhere in the signal path right now?
-       synthAttackMs/synthReleaseMs are live and always honoured, but only a
-       SYNTH-sourced voice has an envelope at all -- a pitch-shifted ghost
-       just rides the click-free mix ramp. A rig whose voices are all on the
-       shifted source will move those two controls and hear nothing, which
-       reads as a dead control rather than an inapplicable one. This says
-       which it is, so a controller can grey them for the right reason. */
-    bool synth_env_active = app->engine_cfg.params.drone_on;
-    for (int v = 0; v < 5; ++v)
-    {
-        const int s = app->engine_cfg.params.harm_voice_source[v];
-        const int eff = (s == 0 || s == 1) ? s : app->engine_cfg.params.harm_source;
-        if (eff == 1 && app->engine_cfg.params.harm_interval[v] != 0)
-            synth_env_active = true;
-    }
-
     snprintf (buf, sizeof (buf),
         "{\"running\":%s,\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
@@ -838,7 +870,7 @@ static void status_refresh (App *app)
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
-        "\"synthPatches\":%s,\"synthEnvActive\":%s,\"irError\":\"%s\","
+        "\"synthPatches\":%s,\"irError\":\"%s\","
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", err,
         st.input_rate, st.output_rate,
@@ -848,7 +880,7 @@ static void status_refresh (App *app)
         hdeg, midi,
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
-        patches, synth_env_active ? "true" : "false", ir_err,
+        patches, ir_err,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),

@@ -62,9 +62,20 @@ typedef struct
                                         bus, on top of the per-voice trims;
                                         never touches the lead */
     double   harm_gain_db[5];        /* -60..+12, 0 = at the lead's level */
+    double   harm_detune_cents[5];   /* -100..+100 fine offset; also what makes
+                                        interval 0 a UNISON ghost, not "off" */
     double   harm_pan[5];            /* -1..1 */
     uint32_t harm_mute;              /* bit v */
     uint32_t harm_solo;              /* bit v */
+
+    /* Harmony sustain: keep a shifted ghost sounding through its release by
+       looping a slice of the end of the note (a shifted ghost has no source
+       of its own once the input stops). HOLD freezes every ghost where it
+       is and rings it indefinitely while the lead carries on -- momentary,
+       meant for a footswitch or a MIDI CC. */
+    bool     harm_sustain;
+    bool     harm_hold;
+    double   harm_glide_ms;          /* 0..5000 ghost portamento */
 
     /* Harmony source: pitch-shifted live audio (0) or the built-in synth
        voice (1), which adds a patch and an attack/release envelope. Applies

@@ -132,6 +132,12 @@ strips the window to the ruler + a stage-readable readout.
   follows the low limit; an external controller can also give an explicit
   window with `detectMinHz`/`detectMaxHz`), output gain, lane toggles,
   restart, and any engine error.
+- **Reference** — stated as a note and its frequency (`Ref C4 261.63 Hz`),
+  not as A4. The EDO grid hangs off degree 0, which the Root places, so
+  with Root C the C is the same frequency in *every* EDO and the degree you
+  would call A lands wherever that EDO puts it — 433.12 or 446.99 Hz in
+  22-EDO, never 440. That is correct; do not "fix" it, because the only way
+  to move A is to move C and take the whole rig with it.
 - **Header** — Bypass, A/B config slots with Copy A→B, Preset menu,
   Perform toggle.
 - **Harmony strip** (Xentar smart-harmonizer emulation) — a third surface,
@@ -152,8 +158,16 @@ strips the window to the ruler + a stage-readable readout.
   being heard as the lead, so it stays consonant even when the lead is only
   partly corrected. Voices dedupe when they land on one pitch, and render as
   colored ghost ticks on the ruler (gold when a voice lands on the root).
-  **Learn-from-ruler**: select a pod, then shift-click a lug to set its
-  interval. Harmony state persists as `hm`/`hx`/`hg`/`hp` fields.
+  Each pod also has a **detune** knob in cents: at interval 0 that is a
+  **unison ghost** (a few cents off the lead is a thickener; an exact
+  unison would just be a comb filter, so 0/0 stays "off"). The line carries
+  a **portamento** field — how long a ghost takes to slide when the lead
+  moves, for both sources — and a momentary **HOLD**, which freezes the
+  ghosts and rings them on indefinitely while the lead carries on. Shifted
+  ghosts sustain by looping a period-aligned, crossfaded slice of the end
+  of the note, so they have something to keep sounding with once the input
+  stops. **Learn-from-ruler**: select a pod, then shift-click a lug to set
+  its interval. Harmony state persists as `hm`/`hx`/`hg`/`hp`/`hd` fields.
 - **MIDI Harmony mode** — the `MIDI` toggle on the harmony line (input
   device picked in the ⚙ popover; CoreMIDI on macOS, "All inputs" by
   default). Middle C (note 60) is the pivot, mapping to the root in

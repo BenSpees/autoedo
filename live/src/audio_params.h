@@ -56,6 +56,10 @@ typedef struct
     _Atomic int      harm_ext[AE_HARM_VOICES];
     _Atomic double   harm_master_lin;
     _Atomic double   harm_gain_lin[AE_HARM_VOICES];
+    _Atomic double   harm_detune_cents[AE_HARM_VOICES];
+    _Atomic double   harm_glide_ms;
+    _Atomic bool     harm_sustain;
+    _Atomic bool     harm_hold;
     _Atomic double   harm_pan[AE_HARM_VOICES];
     _Atomic uint32_t harm_mute;
     _Atomic uint32_t harm_solo;
@@ -114,7 +118,12 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
         atomic_store_explicit (&a->harm_gain_lin[v], pow (10.0, p->harm_gain_db[v] / 20.0),
                                memory_order_relaxed);
         atomic_store_explicit (&a->harm_pan[v],      p->harm_pan[v],      memory_order_relaxed);
+        atomic_store_explicit (&a->harm_detune_cents[v], p->harm_detune_cents[v],
+                               memory_order_relaxed);
     }
+    atomic_store_explicit (&a->harm_glide_ms, p->harm_glide_ms, memory_order_relaxed);
+    atomic_store_explicit (&a->harm_sustain, p->harm_sustain, memory_order_relaxed);
+    atomic_store_explicit (&a->harm_hold,    p->harm_hold,    memory_order_relaxed);
     atomic_store_explicit (&a->harm_mute, p->harm_mute, memory_order_relaxed);
     atomic_store_explicit (&a->harm_solo, p->harm_solo, memory_order_relaxed);
 
@@ -178,6 +187,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
         voices[v].ext_oct  = atomic_load_explicit (&a->harm_ext[v], memory_order_relaxed);
         voices[v].gain     = atomic_load_explicit (&a->harm_gain_lin[v], memory_order_relaxed);
         voices[v].pan      = atomic_load_explicit (&a->harm_pan[v], memory_order_relaxed);
+        voices[v].detune_cents =
+            atomic_load_explicit (&a->harm_detune_cents[v], memory_order_relaxed);
         voices[v].mute     = ((mute >> v) & 1u) != 0;
         voices[v].solo     = ((solo >> v) & 1u) != 0;
     }
@@ -185,6 +196,12 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->harm_on, memory_order_relaxed),
                           atomic_load_explicit (&a->harm_lock, memory_order_relaxed),
                           voices);
+    ae_corrector_set_harm_glide_ms (ps,
+                          atomic_load_explicit (&a->harm_glide_ms, memory_order_relaxed));
+    ae_corrector_set_harm_sustain (ps,
+                          atomic_load_explicit (&a->harm_sustain, memory_order_relaxed));
+    ae_corrector_set_harm_hold (ps,
+                          atomic_load_explicit (&a->harm_hold, memory_order_relaxed));
     ae_corrector_set_harm_master (ps,
                           atomic_load_explicit (&a->harm_master_lin, memory_order_relaxed));
     ae_corrector_set_lead_on (ps,

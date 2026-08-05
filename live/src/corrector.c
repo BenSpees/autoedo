@@ -583,6 +583,15 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     free (p->lpc_res);
     p->lpc_res   = calloc ((size_t) p->max_block, sizeof (float));
 
+    /* Harmony sustain: 250 ms is room for a ~90 ms loop plus its crossfade
+       even for a very low note (a 40 Hz fundamental is a 25 ms period, so
+       two periods plus one of crossfade is 75 ms). */
+    free (p->sus_buf);
+    free (p->sus_block);
+    p->sus_cap   = (int) (0.25 * p->fs) + 8;
+    p->sus_buf   = calloc ((size_t) p->sus_cap, sizeof (float));
+    p->sus_block = calloc ((size_t) p->max_block, sizeof (float));
+
     /* Ensemble delay lines: ~40 ms covers the deepest tap plus its sweep. */
     free (p->ens_buf_l);
     free (p->ens_buf_r);
@@ -656,6 +665,12 @@ void ae_corrector_reset (AeCorrector *p)
         p->harm_master = 1.0;
     p->harm_master_cur = p->harm_master;
     p->lead_on         = true;
+    p->sus_len         = 0;
+    p->sus_read        = 0;
+    p->sus_mix         = 0.0;
+    p->last_voiced_hz  = 0.0;
+    p->hold_latched    = false;
+    p->hold_level      = 0.0;
 
     for (int i = 0; i < AE_MAX_EDO; ++i)
         p->enabled_deg[i] = true; /* default: every degree usable */
@@ -669,6 +684,8 @@ void ae_corrector_reset (AeCorrector *p)
         p->h_fed[v]       = false;
         p->h_mix[v]       = 0.0;
         p->h_cents_t[v]   = 0.0;
+        p->h_cents_cur[v] = 0.0;
+        p->h_glide_valid[v] = false;
         p->s_cents[v]     = 0.0;
         p->s_env[v]       = 0.0;
         p->s_lp[v]        = 0.0;
@@ -759,6 +776,10 @@ void ae_corrector_free (AeCorrector *p)
     p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
     free (p->lpc_res);
     p->lpc_res = NULL;
+    free (p->sus_buf);
+    free (p->sus_block);
+    p->sus_buf = p->sus_block = NULL;
+    p->sus_cap = p->sus_len = 0;
     free (p->ens_buf_l);
     free (p->ens_buf_r);
     p->ens_buf_l = p->ens_buf_r = NULL;
@@ -817,6 +838,8 @@ void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
         if (hv.pan < -1.0) hv.pan = -1.0;
         if (hv.pan >  1.0) hv.pan =  1.0;
         if (hv.gain < 0.0) hv.gain = 0.0;
+        if (hv.detune_cents < -100.0) hv.detune_cents = -100.0;
+        if (hv.detune_cents >  100.0) hv.detune_cents =  100.0;
         p->harm[v] = hv;
         /* Constant-power pan, normalised so DEAD CENTRE IS UNITY IN BOTH
            CHANNELS. The lead is mono and reaches L and R at full level, so
@@ -831,6 +854,64 @@ void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
         p->h_gl[v] = hv.gain * cos (a) * AE_SQRT2;
         p->h_gr[v] = hv.gain * sin (a) * AE_SQRT2;
     }
+}
+
+/* Lift a loopable slice out of the end of the note. A whole number of pitch
+   periods, so the wrap is already near-continuous before anything is
+   crossfaded; then the tail is crossfaded against the material that
+   PRECEDES the slice, which is what makes buf[len-1] run into buf[0]
+   instead of stepping. Allocation-free; runs on the audio thread at a note
+   boundary, which is a few thousand copies once. */
+static void capture_sustain (AeCorrector *p, long long end)
+{
+    p->sus_len = 0;
+    if (p->sus_buf == NULL || p->last_voiced_hz <= 0.0)
+        return;
+
+    const int period = (int) (p->fs / p->last_voiced_hz + 0.5);
+    if (period < 8)
+        return;
+
+    /* ~90 ms of loop: long enough to carry the timbre and any vibrato
+       period, short enough that it is still the same note throughout. */
+    int k = (int) ((0.090 * p->fs) / period + 0.5);
+    if (k < 2) k = 2;
+    int len = k * period;
+    const int xf = period; /* one period of crossfade */
+    while (k > 2 && len + xf > p->sus_cap)
+        len = --k * period;
+    if (len + xf > p->sus_cap || end - (long long) (len + xf) < 0)
+        return;
+
+    const long long s0 = end - len;
+    for (int i = 0; i < len; ++i)
+        p->sus_buf[i] = p->in_buf[(s0 + i) & p->buf_mask];
+    for (int j = 0; j < xf; ++j)
+    {
+        const double w = (double) j / (double) xf;
+        const int    i = len - xf + j;
+        p->sus_buf[i] = (float) (p->sus_buf[i] * (1.0 - w)
+                               + p->in_buf[(s0 - xf + j) & p->buf_mask] * w);
+    }
+    p->sus_len  = len;
+    p->sus_read = 0;
+}
+
+void ae_corrector_set_harm_glide_ms (AeCorrector *p, double ms)
+{
+    p->harm_glide_ms = ms < 0.0 ? 0.0 : (ms > 5000.0 ? 5000.0 : ms);
+}
+
+void ae_corrector_set_harm_hold (AeCorrector *p, bool on)
+{
+    p->harm_hold = on;
+}
+
+void ae_corrector_set_harm_sustain (AeCorrector *p, bool on)
+{
+    p->harm_sustain = on;
+    if (! on)
+        p->sus_len = 0; /* drop the captured loop; nothing to ring out of */
 }
 
 void ae_corrector_set_harm_master (AeCorrector *p, double gain_lin)
@@ -1027,6 +1108,12 @@ static void run_detection (AeCorrector *p)
         p->primed = true;
 
         /* ---- harmony voices (Xentar emulation) --------------------------- */
+        /* HOLD: the ghosts are frozen where they were, so none of the
+           retargeting below runs. The LEAD above still tracked normally --
+           that is the whole point, you go on singing over the held choir. */
+        if (p->harm_hold && p->hold_latched)
+            goto harmony_done;
+
         /* Source = the corrected target degree; voices ride the same glide. */
         bool any_solo = false;
         for (int v = 0; v < AE_HARM_VOICES; ++v)
@@ -1056,7 +1143,7 @@ static void run_detection (AeCorrector *p)
             p->h_active[v] = false;
             int deg_out = AE_HARM_DEG_OFF;
 
-            if (p->harm_on && hv->interval != 0)
+            if (p->harm_on && ae_harm_voice_on (hv))
             {
                 /* eff = interval + sign(interval) * extOct * equaveSteps */
                 const int eff = hv->interval
@@ -1071,8 +1158,19 @@ static void run_detection (AeCorrector *p)
                     ghost_cents = ji_snap_cents (ghost_cents, period);
 
                 /* Muted / solo-suppressed voices still report their degree so
-                   the UI can dim their ruler tick instead of hiding it. */
+                   the UI can dim their ruler tick instead of hiding it. The
+                   degree is read off the UNDETUNED pitch: a few cents is a
+                   thickening, not a different note, and the ruler should not
+                   wobble because of it. */
                 deg_out = (int) lround (ghost_cents * (double) p->edo / period);
+
+                /* The detune goes on AFTER the lock, or the lock would snap
+                   it straight back out -- and it goes on before the dedupe,
+                   so two voices at the same interval detuned apart both
+                   sound instead of collapsing into one. This is what makes a
+                   unison ghost at, say, -4 cents a usable thickener rather
+                   than a phase-coherent double of the lead. */
+                ghost_cents += hv->detune_cents;
 
                 if (! hv->mute && ! (any_solo && ! hv->solo))
                 {
@@ -1093,28 +1191,53 @@ static void run_detection (AeCorrector *p)
                            the same interval land on the same pitch. */
                         const double voice_cents =
                             anchor_cents + (ghost_cents - target_cents);
-                        p->h_semitones[v] = dclamp ((voice_cents - detected_cents) / 100.0,
-                                                    -36.0, 36.0);
-                        p->h_cents_t[v] = voice_cents; /* synth target pitch */
+                        p->h_cents_t[v] = voice_cents;
+
+                        /* Portamento. A voice already sounding slides; one
+                           arriving from silence starts on pitch, because
+                           sliding in from the last note it happened to sing
+                           is a swoop nobody asked for. */
+                        if (! p->h_glide_valid[v])
+                            p->h_cents_cur[v] = voice_cents;
+                        else
+                        {
+                            const double g  = p->harm_glide_ms / 1000.0;
+                            const double ag = g <= 0.0 ? 1.0
+                                                       : 1.0 - exp (-elapsed / g);
+                            p->h_cents_cur[v] += (voice_cents - p->h_cents_cur[v]) * ag;
+                        }
+                        p->h_semitones[v] =
+                            dclamp ((p->h_cents_cur[v] - detected_cents) / 100.0,
+                                    -36.0, 36.0);
                         p->h_active[v] = true;
+                        p->h_glide_valid[v] = true;
                     }
                 }
             }
             atomic_store_explicit (&p->h_deg_out[v], deg_out, memory_order_relaxed);
         }
+harmony_done: ;
     }
     else
     {
         p->shift_semitones = 0.0; /* identity; the crossfade handles the rest */
         p->target_valid    = false;
         p->sustain_s       = 0.0;
-        for (int v = 0; v < AE_HARM_VOICES; ++v)
-        {
-            p->h_active[v] = false;
-            atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
-        }
+        /* Held ghosts keep their gate through the silence -- that is what
+           "hold" means. Without the guard the very next unvoiced frame
+           would release the choir the performer just parked. */
+        if (! (p->harm_hold && p->hold_latched))
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+            {
+                p->h_active[v] = false;
+                atomic_store_explicit (&p->h_deg_out[v], AE_HARM_DEG_OFF, memory_order_relaxed);
+            }
     }
 
+    if (now_voiced)
+        p->last_voiced_hz = res.frequency_hz;
+    else if (p->voiced)
+        capture_sustain (p, p->in_write); /* the note just ended: keep its end */
     p->voiced = now_voiced;
     atomic_store_explicit (&p->voiced_out, now_voiced, memory_order_relaxed);
 
@@ -1319,6 +1442,26 @@ static void synth_render_voice (AeCorrector *p, const AeSynthPatch *pat,
     }
 }
 
+/* The ghost envelope, shared by BOTH harmony sources. Floored at the 5 ms
+   click-free ramp, so "0 ms" still means "as fast as is safe" rather than a
+   step edge.
+
+   The attack means exactly the same thing either side: how long the ghost
+   takes to arrive under the lead. The release does not, and cannot -- a
+   synth ghost is an oscillator and keeps sounding after the input stops, so
+   its release is a real tail at its last pitch; a shifted ghost is made OF
+   the input, so once the input goes quiet there is nothing left to sustain.
+   What the release buys on the shifted side is the shape of the leaving:
+   the ghost stops chopping off on every consonant and on the moment a
+   decaying note drops under the voicing gate. */
+static void harm_env_coeffs (const AeCorrector *p, double *atk, double *rel)
+{
+    const double atk_ms = p->synth_attack_ms  > 5.0 ? p->synth_attack_ms  : 5.0;
+    const double rel_ms = p->synth_release_ms > 5.0 ? p->synth_release_ms : 5.0;
+    *atk = 1.0 - exp (-1.0 / (atk_ms * 0.001 * p->fs));
+    *rel = 1.0 - exp (-1.0 / (rel_ms * 0.001 * p->fs));
+}
+
 /* 4b. Synth harmony: oscillator ghosts at the same target degrees the
    shifter voices would sing, each through the shared attack/release
    envelope. Unlike the shifter path there is no voiced crossfade -- a
@@ -1331,11 +1474,11 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
     const AeSynthPatch *pat = &k_synth_patches[p->synth_patch];
     /* Volume-match to the singer: drive the patch to the sung RMS (capped
        against a pathological match on near-silent gated input). */
-    const double match = dclamp (p->in_level / synth_patch_rms (pat), 0.0, 4.0);
-    const double atk_a = p->synth_attack_ms <= 0.0 ? 1.0
-        : 1.0 - exp (-1.0 / (p->synth_attack_ms * 0.001 * p->fs));
-    const double rel_a = p->synth_release_ms <= 0.0 ? 1.0
-        : 1.0 - exp (-1.0 / (p->synth_release_ms * 0.001 * p->fs));
+    const double level = (p->harm_hold && p->hold_latched) ? p->hold_level
+                                                           : p->in_level;
+    const double match = dclamp (level / synth_patch_rms (pat), 0.0, 4.0);
+    double atk_a, rel_a;
+    harm_env_coeffs (p, &atk_a, &rel_a);
     /* Note-to-note glide, stepped once per block (~25 ms time constant). */
     const double glide_a = 1.0 - exp (-num_samples / (0.025 * p->fs));
 
@@ -1350,14 +1493,15 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         if (! gate && env < 1e-4)
         {
             p->s_env[v] = 0.0;
+            p->h_glide_valid[v] = false; /* truly silent: next note starts on pitch */
             continue;
         }
 
         /* A fresh attack starts on pitch; a sounding voice glides. */
         if (gate && env < 1e-3)
-            p->s_cents[v] = p->h_cents_t[v];
+            p->s_cents[v] = p->h_cents_cur[v];
         else
-            p->s_cents[v] += (p->h_cents_t[v] - p->s_cents[v]) * glide_a;
+            p->s_cents[v] += (p->h_cents_cur[v] - p->s_cents[v]) * glide_a;
         const double hz = p->ref_hz * pow (2.0, p->s_cents[v] / 1200.0);
 
         float *buf = p->voice_buf;
@@ -1467,6 +1611,23 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     /* 1. Take in the block: keep a contiguous copy (mono is written in place
        below) and push it into the ring, which feeds detection and the dry
        path. */
+    /* HOLD edges. Engaging takes ONE snapshot -- the sustain loop and the
+       level the choir will hold at -- rather than chasing the input, so a
+       held chord stays the chord that was sung and does not follow whatever
+       is sung over it. If the loop was captured at the end of an earlier
+       note, that one is kept; a hold pressed mid-note captures now. */
+    if (p->harm_hold && ! p->hold_latched)
+    {
+        if (p->voiced)
+            capture_sustain (p, p->in_write);
+        p->hold_level   = p->in_level;
+        p->hold_latched = true;
+    }
+    else if (! p->harm_hold && p->hold_latched)
+    {
+        p->hold_latched = false;
+    }
+
     memcpy (p->in_block, mono, (size_t) num_samples * sizeof (float));
     for (int i = 0; i < num_samples; ++i)
     {
@@ -1606,15 +1767,54 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
        gain so mute/solo and voice changes can't click. A configured voice is
        fed even while muted, so unmuting is instant rather than costing a
        shifter's worth of latency to refill. */
+    double h_atk, h_rel;
+    harm_env_coeffs (p, &h_atk, &h_rel);
+
+    /* What the harmony shifters read. Normally the live input, same as the
+       lead. While a ghost is ringing on past its source -- a HOLD, or a
+       release with sustain enabled -- they read the captured loop instead,
+       so there is something to transpose. The LEAD never reads it: the lead
+       is the performer, and a lead that sustained itself would be a
+       different instrument. */
+    const float *harm_in = p->in_block;
+    {
+        const bool held = p->harm_hold && p->hold_latched;
+        const bool want_loop = p->sus_len > 0
+                             && (held || (p->harm_sustain && ! p->voiced));
+        const double want = want_loop ? 1.0 : 0.0;
+        if (want > 0.0 || p->sus_mix > 1e-4)
+        {
+            const double a = 1.0 - exp (-1.0 / (0.005 * p->fs));
+            double m = p->sus_mix;
+            for (int i = 0; i < num_samples; ++i)
+            {
+                m += (want - m) * a;
+                float loop = 0.0f;
+                if (p->sus_len > 0)
+                {
+                    loop = p->sus_buf[p->sus_read];
+                    if (++p->sus_read >= p->sus_len)
+                        p->sus_read = 0;
+                }
+                p->sus_block[i] = (float) ((1.0 - m) * p->in_block[i] + m * loop);
+            }
+            p->sus_mix = m;
+            harm_in = p->sus_block;
+        }
+        else
+            p->sus_mix = 0.0;
+    }
+
     for (int v = 0; v < AE_HARM_VOICES; ++v)
     {
-        const bool configured = p->harm_on && p->harm[v].interval != 0
+        const bool configured = p->harm_on && ae_harm_voice_on (&p->harm[v])
                               && p->h_shifter[v] != NULL
                               && ae_corrector_voice_source (p, v) == AE_HARM_SRC_VOICE;
         if (! configured)
         {
             p->h_fed[v] = false; /* history is stale; reset before reuse */
             p->h_mix[v] = 0.0;
+            p->h_glide_valid[v] = false;
             continue;
         }
 
@@ -1626,20 +1826,30 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         }
 
         set_shift (p->h_shifter[v], p->h_semitones[v], base_hz);
-        ae_shifter_process (p->h_shifter[v], p->in_block, p->voice_buf, num_samples);
+        ae_shifter_process (p->h_shifter[v], harm_in, p->voice_buf, num_samples);
 
-        const double want = p->h_active[v] ? 1.0 : 0.0;
+        /* Same envelope the synth ghosts get. It used to be a fixed 5 ms
+           ramp multiplied by the LEAD's voiced crossfade (v_gain) -- and
+           that second factor was the real reason a release could not be
+           heard here, because it cut the ghost within 5 ms of the lead
+           going unvoiced whatever the envelope was doing. It was also
+           redundant: h_active[v] already falls with voicing, so the gate
+           is not lost by dropping it. */
+        const bool   gate = p->h_active[v];
+        const double want = gate ? 1.0 : 0.0;
+        const double a    = gate ? h_atk : h_rel;
         const double gl = p->h_gl[v], gr = p->h_gr[v];
         double mix = p->h_mix[v];
-        double vg = p->v_gain;
         for (int i = 0; i < num_samples; ++i)
         {
-            mix += (want - mix) * gain_alpha;
-            const double s = p->voice_buf[i] * mix * vg;
+            mix += (want - mix) * a;
+            const double s = p->voice_buf[i] * mix;
             harm_l[i] += (float) (gl * s);
             harm_r[i] += (float) (gr * s);
         }
         p->h_mix[v] = mix;
+        if (! gate && mix < 1e-4)
+            p->h_glide_valid[v] = false; /* the release finished */
     }
 
     /* Harmony IR before the tilt, same order as the synth-only path. */

@@ -187,6 +187,26 @@ freq(j)   = refHz · 2^(j · period / (1200 · edo))  (degree j, signed, re root
 degree(f) = round(edo · 1200 · log2(f / refHz) / period)
 ```
 
+**Read this before touching `refA4`.** The EDO grid is built off **degree
+0**, which `rootNote` places. With `rootNote` = C, **C is the anchor and is
+the same frequency in every EDO** — 12, 22, 31, all of them — and the degree
+you would *call* A falls wherever that EDO puts it. In 22-EDO that is 433.12
+or 446.99 Hz. Never 440.
+
+That is correct behaviour, not drift. `refA4` is only the arithmetic that
+gets there: it is the A of a *12-EDO* grid on the same root, an expression
+of the one anchor, not an independent knob and not a claim about where A
+sits in the tuning in use. Nudging it because "our A isn't 440" moves **C**,
+and moves the whole rig off the band by the amount you nudged it. In 22-EDO
+a 54.5-cent step means a reference error over ~27 cents also starts flipping
+which degree a note snaps to, so the damage is a wrong note, not just a
+detune.
+
+Set `refNote` + `refNoteHz` instead and the trap does not exist. A
+C-anchored rig at concert pitch is `{"rootNote": 0, "refNote": 0,
+"refNoteHz": 261.6256}` — which is what a default install already computes,
+so if that is your standard there is nothing to change.
+
 ### Scale mask
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
@@ -210,6 +230,8 @@ UI behavior you may want to replicate).
 | `leadOn` | bool | live | the corrected lead voice in the output mix. `false` = **harmony only**: ghosts (shifted or synth) still follow the sung pitch while the singer stays out of the engine's output — for rigs that take the dry voice from another bus. `bypass` still wins (a dry passthrough with the lead muted would be silence) |
 | `outputGainDb` | float −60…12 | live | master output gain. The output stage soft-clips: transparent below ≈ −2 dBFS, then a smooth saturation that never reaches full scale — so a many-voice harmony stack (worst on a mono-folded `outputChannel` bus) saturates gently instead of crackling as hard digital clipping. If a big stack sounds *compressed*, that is the clip working: pull `hg` per voice (≈ −6 dB for five voices) or `outputGainDb` down until it cleans up |
 | `quality` | `"low"` \| `"balanced"` \| `"high"` | **restart** | pitch-shifter analysis block: 25 / 45 / 120 ms **at 48 kHz**, giving 31 / 56 / 150 ms of shifter latency. The block is a fixed *sample count* (48k-referenced), so a faster device shortens it in time — at 96 kHz the same presets are 12.5 / 22.5 / 60 ms blocks and the latency halves with them. The analysis window shortens too: frequency resolution at the bottom of the range drops, so if a bass or low guitar warbles at 96 k, step up a preset. Correction is accurate at all three; harmony intervals only stay in tune on low voices at `high` |
+| `refNote` | int 0–11 | live | which note `refNoteHz` names (0 = C). Default **0**, so the standard reads as C |
+| `refNoteHz` | float | live | the frequency of `refNote` in octave 4 — **state the pitch standard in the terms the rig actually uses**. Concert C is 261.6256. Parsed after `refA4`, so a POST carrying both lands on this one |
 | `range` | string | **restart** | detection window preset: `bass` (55–400 Hz), `baritone` (65–450), `tenor` (80–600), `alto` (100–800), `soprano` (130–1200), `guitar` (78–1400), `instrument` (65–1600, default), `wide` (40–2000). Unknown names behave as `instrument`. Latency follows the low limit |
 | `detectMinHz`, `detectMaxHz` | float, 0 or 20–500 / 100–4000 | **restart** | explicit detection window, overriding whatever `range` names. `0` (default) = use the preset. **Set these for any instrument whose real range you know.** A period longer than the lowest note the source can play is, by definition, not that source's pitch, and a window that admits one invites a subharmonic lock — the classic "the guitar suddenly went an octave down". The engine also runs an octave guard inside the detector (it prefers the shortest lag whose periodicity is within 90% of the best), but the cheapest fix is to not offer it the wrong answer. `detectMaxHz` is raised to `2 × detectMinHz` if it would otherwise be below it |
 
@@ -230,6 +252,9 @@ UI behavior you may want to replicate).
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
 | `harmOn` | bool | live | master harmony switch. **Deliberately not restored from the config file**: it is performance state, not a setting, so a fresh engine always comes up with the ghosts silent no matter what was on when the last instance exited. (`droneOn` is the same.) The key is still written to the file and still echoed — only the *launch value* is forced false |
+| `harmGlideMs` | float 0–5000 | live | **portamento**: the time constant a ghost takes to slide to a new target when the lead moves. `0` (default) = jump, the classic harmonizer. One number for BOTH sources — applied once, upstream — so a shifted voice and a synth voice on the same interval never disagree about where they are mid-slide. A voice arriving from silence always starts *on* pitch instead of swooping in from its last note. Momentary voicing dropouts (every consonant, and the frame at a note change) do **not** restart the glide: what counts as "from silence" is whether the voice's own envelope has actually decayed, not whether this frame was voiced |
+| `harmSustain` | bool | live | **sustain the shifted ghosts through their release.** A shifted ghost is made *of* the input, so when the lead stops there is normally nothing left for its release to shape. With this on the engine lifts a slice from the end of the note — a whole number of pitch periods, crossfaded at the tail against the material preceding it so the wrap is seamless — and loops that into the harmony shifters while the release rings out. Default **on**; `synthReleaseMs` still bounds it, so a short release sustains nothing. Never reaches the lead |
+| `harmHold` | bool | **live, momentary** | **HOLD.** Freeze every ghost at its current pitch and level and keep it sounding indefinitely, while the lead goes on tracking normally — sing a chord in, hold it, keep singing over your own choir. See §HOLD below for the full contract |
 | `harmGainDb` | float −24…+12 | live | **harmony bus master**: one gain over every ghost — shifted, synth and drone alike — applied last on the bus, after the harmony IR and tilt, so pulling it down takes the reverb tail with it. It never touches the lead. Per-voice `hg` trims ride **on top of** it, not instead of it: `hg[v] = −6` under `harmGainDb = −12` is −18 dB on that voice. Smoothed over ~5 ms, so it is safe to sweep live |
 | `harmSource` | `"voice"` \| `"synth"` | live | what the ghosts are made of: pitch-shifted copies of the live input (classic harmonizer) or the built-in synth at the same target degrees. Applies to all five voices (phase 1). Synth ghosts are volume-matched to the sung level — `hg` trims from parity — and, unlike shifted ghosts, ring past the end of the sung note by the release time, holding their last pitch and level |
 | `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list. Simple ranks: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). String-machine voices, with per-partial vibrato and the shared **ensemble** (three delay taps swept in opposite senses per side — the Solina/Eminent trick that turns a rank of saws into a wide, breathing section): `strings` (saw ranks at 8'/4'/2'), `solina bright` (the same ranks with the tone control open, for sitting on top of a band), `choir` (vox-humana square/saw blend, rounded down), `brass` (bright detuned saw pair, no ensemble — a section pad that cuts), `bass` (sub-octave rank, filtered down, no ensemble — a wandering bass is a tuning problem, not an effect). Unknown names are ignored |
@@ -261,6 +286,7 @@ A stereo WAV into the mono lead folds to mid; into the harm point its channels c
 | `harmLock` | `"off"` \| `"mask"` \| `"ji"` | live | ghost quantize: raw parallel / snap to lit degrees (walk outward, up first per distance) / snap to the JI landmark set (1/1, 9/8, 7/6, 6/5, 5/4, 4/3, 11/8, 3/2, 8/5, 5/3, 7/4, 9/5, 15/8) |
 | `hm` | int[5], each −72…72 | live | voice intervals in EDO steps; 0 = voice off. Keep within ±`edo` (the pool is ±equave); intervals are *steps*, so re-clamp when you lower the EDO |
 | `hx` | int[5], 0–2 | live | per-voice octave extension, stacking in the voice's direction: `eff = hm + sign(hm)·hx·edo` |
+| `hd` | float[5], −100…+100 | live | **per-voice detune, cents.** Applied *after* the `harmLock` quantize, so the lock cannot snap it back out, and *before* the dedupe, so two voices on the same interval detuned apart both sound instead of collapsing into one. Its other job: `hm[v] = 0` normally means "voice off", but **`hm[v] = 0` with a nonzero `hd[v]` is a UNISON ghost** — the thickener you want at, say, −4 cents. Exact unison with no detune stays "off", because a phase-coherent double of the lead is a comb filter, not a voice |
 | `hg` | float[5], −60…+12 | live | per-voice gain, dB, **relative to the lead**: `0` puts that ghost at the lead's own level. Two things make that literally true rather than approximately. The pan law is normalised so dead centre is unity into *both* sides of the bus, matching the mono lead, instead of the textbook 0.707 that would sit every centred ghost a fixed 3 dB down. And the shifter is level-matched across the formant stage — formant compensation costs real energy on upward shifts (≈ −4 dB at a fifth, ≈ −6 dB at an octave), which is a tonal choice with an unwanted level side effect, so a slow (~100 ms) makeup restores it. The ceiling is +12 because the whole range is now headroom above the lead rather than half of it spent climbing back to parity |
 | `hp` | float[5], −1…1 | live | per-voice pan (constant-power) |
 | `hMute`, `hSolo` | 0/1[5] | live | mute / solo (solo among harmony voices only) |
@@ -286,6 +312,45 @@ tuned: the whole grid hangs off those two.
 Voices landing on one pitch dedupe (no gain doubling) but still report their
 degree in `harmDeg`. Down-shift depth is bounded by the detection range's
 longest period.
+
+### HOLD (momentary)
+
+`{"harmHold": true}` engages, `{"harmHold": false}` releases. It is a
+**momentary** control: hold the CC down, not a toggle. It is written to the
+settings file like every other key but is **forced false at launch** — a rig
+must never come up with a frozen choir nobody pressed for.
+
+What the rising edge does, once:
+
+- captures the sustain loop from whatever is being sung at that instant (or
+  keeps the loop from the end of the last note, if nothing is);
+- latches the input level the ghosts will hold at.
+
+While engaged:
+
+- ghost pitches, degrees and gates are frozen — the harmony targeting does
+  not run at all, so nothing sung afterwards retargets the choir;
+- shifted ghosts ride the sustain loop, so they keep sounding in the
+  performer's own timbre rather than transposing whatever is being sung over
+  them;
+- synth ghosts hold their note and their latched level;
+- **the lead is untouched.** It detects, corrects and outputs exactly as
+  normal. That is the point of the feature.
+
+On release the ghosts are handed back to the live pitch and glide to it if
+`harmGlideMs` is set, or release naturally if nothing is being sung.
+
+Everything else stays live while held: `harmGainDb`, `hg`, `hp`, `hMute`,
+`hSolo`, `harmTiltDb` and the IR all still respond, so the choir can be
+faded, panned and shaped after it is parked. Changing `hm`/`hx`/`hd` while
+held does nothing until release — the pitches are frozen by definition.
+
+**Suggested MIDI CC mapping.** Treat it as a gate: CC value ≥ 64 →
+`{"harmHold": true}`, < 64 → `{"harmHold": false}`. Send only on the
+transition, not on every CC frame; the engine is idempotent either way but
+the POST is a lock acquisition. A sustain-pedal CC (64) behaves exactly
+right. For a latching footswitch, hold the state in Treebrain and send the
+edges.
 
 ### MIDI Harmony
 | Key | Type | Applies | Meaning |
