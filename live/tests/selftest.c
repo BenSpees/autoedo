@@ -961,6 +961,66 @@ static void test_lead_shift (void)
     free (p); free (in); free (hl); free (hr); free (lead);
 }
 
+/* Attack Sound: an onset fires a transient into the harmony bus BEFORE the
+   synth ghost's envelope has risen -- the cover for a long synthAttackMs --
+   at its own gain, outside every envelope. */
+static void test_attack_sound (void)
+{
+    const int quiet = 9600, sung = 48000, total = quiet + sung;
+    double early[3]; /* off, pick, noise: harm-bus RMS in the first 60 ms */
+
+    for (int c = 0; c < 3; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v)
+            voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        /* 800 ms attack: the ghost itself is near-silent in the first 60 ms. */
+        ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
+                                ae_synth_patch_find ("sine"), 800.0, 200.0);
+        ae_corrector_set_attack (p, c == 0 ? AE_ATK_OFF
+                                  : c == 1 ? AE_ATK_PICK : AE_ATK_NOISE, 1.0);
+
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double phase = 0.0;
+        for (int i = quiet; i < total; ++i)
+        {
+            phase += 2.0 * M_PI * 220.0 / 48000.0;
+            in[i] = (float) (0.4 * sin (phase) + 0.2 * sin (2.0 * phase));
+        }
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+        }
+
+        double sq = 0.0;
+        for (int i = quiet; i < quiet + 2880; ++i)
+            sq += (double) hl[i] * hl[i];
+        early[c] = sqrt (sq / 2880.0);
+
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+
+    CHECK (early[1] > 8.0 * early[0] + 1e-6,
+           "attack pick covers the synth attack (pick %.4g vs off %.4g)",
+           early[1], early[0]);
+    CHECK (early[2] > 8.0 * early[0] + 1e-6,
+           "attack noise covers the synth attack (noise %.4g vs off %.4g)",
+           early[2], early[0]);
+}
+
 static void test_midi_harmony (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -1987,6 +2047,7 @@ int main (void)
     test_harmony_glide();
     test_lead_shift();
     test_octave_revote_rebase();
+    test_attack_sound();
     test_synth_envelope();
     test_walk();
     test_harmony();

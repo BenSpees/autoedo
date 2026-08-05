@@ -80,6 +80,12 @@ typedef struct
     bool     harm_hold;
     double   harm_glide_ms;          /* 0..5000 ghost portamento */
 
+    /* Attack Sound: onset transient covering the synth voices' attack
+       latency -- fires on energy, before the pitch is known; outside every
+       envelope, with its own gain. 0 off, 1 noise, 2 pick, 3 click. */
+    int      attack_sound;
+    double   attack_gain_db;         /* -60..+12, default -26 */
+
     /* Harmony source: pitch-shifted live audio (0) or the built-in synth
        voice (1), which adds a patch and an attack/release envelope. Applies
        to all five voices. */

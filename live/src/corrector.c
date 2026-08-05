@@ -1,4 +1,5 @@
 #include "corrector.h"
+#include "attack_picks.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -667,6 +668,16 @@ void ae_corrector_reset (AeCorrector *p)
         p->harm_master = 1.0;
     p->harm_master_cur = p->harm_master;
     p->lead_on         = true;
+    p->atk_fast   = p->atk_slow = 0.0;
+    p->atk_refract = 0;
+    p->atk_active = 0;
+    p->atk_smp    = NULL;
+    p->atk_amp    = 0.0;
+    p->atk_rng    = 0x9e3779b9u;
+    p->atk_last_range = -1;
+    p->atk_last_dir   = 0;
+    if (p->atk_gain <= 0.0)
+        p->atk_gain = pow (10.0, -26.0 / 20.0); /* Xentar's shipped 5% */
     p->sus_len         = 0;
     p->sus_read        = 0;
     p->sus_mix         = 0.0;
@@ -899,6 +910,182 @@ static void capture_sustain (AeCorrector *p, long long end)
     }
     p->sus_len  = len;
     p->sus_read = 0;
+}
+
+void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin)
+{
+    p->atk_mode = mode < 0 ? 0 : (mode > 3 ? 3 : mode);
+    p->atk_gain = gain_lin < 0.0 ? 0.0 : (gain_lin > 16.0 ? 16.0 : gain_lin);
+}
+
+/* Is there a voice in the path for the attack sound to sit under? BOTH
+   sources, like the envelope: a shifted ghost's onset is as synthetic as a
+   synth ghost's -- the shifter's latency and the mix ramp swallow the real
+   pick -- so it gets the cover too. Only a rig with nothing on the bus at
+   all (harmony off, shifted lead) gets no hits. */
+static bool attack_relevant (const AeCorrector *p)
+{
+    if (p->lead_source == AE_HARM_SRC_SYNTH)
+        return true;
+    if (! p->harm_on)
+        return false;
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+        if (ae_harm_voice_on (&p->harm[v]))
+            return true;
+    return false;
+}
+
+static inline double atk_rand01 (AeCorrector *p) /* LCG: RT-safe, seedable */
+{
+    p->atk_rng = p->atk_rng * 1664525u + 1013904223u;
+    return (double) (p->atk_rng >> 8) / 16777216.0;
+}
+
+/* Onset -> one hit. The trigger is ENERGY appearing -- a fast follower
+   overtaking a slow one -- which fires several hops before YIN has settled
+   on a pitch; that head start is the entire point. The pick variant is the
+   Xentar model: range from the last known pitch, direction from the
+   economy-picking state machine (same range alternates; crossing to a
+   higher range continues DOWN, to a lower one UP -- the pick keeps
+   travelling), +-8% rate and +-26% level jitter per hit so a run of notes
+   reads as a hand, not a sampler. */
+static void attack_trigger (AeCorrector *p)
+{
+    p->atk_active = p->atk_mode;
+    p->atk_amp    = p->atk_fast;
+    p->atk_jit    = 1.0 + (atk_rand01 (p) - 0.5) * 2.0 * 0.26;
+    p->atk_smp    = NULL;
+
+    if (p->atk_mode == AE_ATK_PICK)
+    {
+        const int range = p->last_voiced_hz <= 0.0 ? 1
+                        : p->last_voiced_hz < 130.0 ? 0
+                        : p->last_voiced_hz < 220.0 ? 1 : 2;
+        int dir;
+        if (range == p->atk_last_range)
+            dir = ! p->atk_last_dir;              /* same string: alternate */
+        else if (p->atk_last_range < 0)
+            dir = 0;                              /* very first note: down */
+        else
+            dir = range > p->atk_last_range ? 0 : 1; /* economy picking */
+        p->atk_last_range = range;
+        p->atk_last_dir   = dir;
+
+        p->atk_smp     = ae_attack_picks[range][dir].pcm;
+        p->atk_smp_len = ae_attack_picks[range][dir].len;
+        p->atk_smp_rms = ae_attack_picks[range][dir].rms;
+        p->atk_pos     = 0.0;
+        p->atk_rate    = (1.0 + (atk_rand01 (p) - 0.5) * 2.0 * 0.08)
+                       * AE_ATTACK_PICK_RATE / p->fs;
+    }
+    else if (p->atk_mode == AE_ATK_NOISE)
+    {
+        p->atk_env   = 1.0;
+        p->atk_env_a = exp (-1.0 / (0.020 * p->fs)); /* ~60 ms audible */
+        p->atk_hp_x  = p->atk_hp_y = 0.0;
+    }
+    else /* AE_ATK_CLICK */
+    {
+        p->atk_env    = 1.0;
+        p->atk_env_a  = exp (-1.0 / (0.008 * p->fs));
+        p->atk_ph     = 0.0;
+        p->atk_ph_inc = 2.0 * AE_PI * (1800.0 + atk_rand01 (p) * 800.0) / p->fs;
+    }
+}
+
+/* Detect this block's onset (always, so the followers stay warm) and, if a
+   hit is playing, add it to the harmony bus -- BEFORE the bus IR, tilt and
+   master, so it sits in the same space as the ghosts it covers, but through
+   no envelope and no vocoder: its own gain is the whole of its level law. */
+static void attack_process (AeCorrector *p, float *harm_l, float *harm_r,
+                            int num_samples)
+{
+    double sum = 0.0;
+    for (int i = 0; i < num_samples; ++i)
+        sum += (double) p->in_block[i] * p->in_block[i];
+    const double rms = sqrt (sum / num_samples);
+
+    const double a_fast = 1.0 - exp (-(double) num_samples / (0.003 * p->fs));
+    const double a_slow = 1.0 - exp (-(double) num_samples / (0.150 * p->fs));
+    const double slow_prev = p->atk_slow;
+    p->atk_fast += (rms - p->atk_fast) * a_fast;
+    p->atk_slow += (rms - p->atk_slow) * a_slow;
+    if (p->atk_refract > 0)
+        p->atk_refract -= num_samples;
+
+    if (p->atk_mode != AE_ATK_OFF && harm_l != NULL
+        && p->atk_refract <= 0
+        && p->atk_fast > 2.0 * AE_GATE_RMS
+        && p->atk_fast > 2.5 * slow_prev
+        && attack_relevant (p))
+    {
+        attack_trigger (p);
+        p->atk_refract = (int) (0.080 * p->fs);
+    }
+
+    if (p->atk_active == 0 || harm_l == NULL)
+        return;
+
+    /* The level match ratchets toward the fast follower while the hit
+       plays: at trigger time the note is a millisecond old and its RMS
+       still climbing, and a pick that tracked only that first reading
+       would whisper under every hard note. */
+    if (p->atk_fast > p->atk_amp)
+        p->atk_amp += (p->atk_fast - p->atk_amp) * 0.5;
+
+    const double g = p->atk_amp * p->atk_jit * p->atk_gain;
+
+    if (p->atk_smp != NULL) /* pick sample, linear-interp at the hit's rate */
+    {
+        const double scale = g / (p->atk_smp_rms > 1e-6 ? p->atk_smp_rms : 1.0);
+        for (int i = 0; i < num_samples; ++i)
+        {
+            const int    k = (int) p->atk_pos;
+            if (k >= p->atk_smp_len - 1)
+            {
+                p->atk_active = 0;
+                p->atk_smp    = NULL;
+                break;
+            }
+            const double f = p->atk_pos - k;
+            const double v = ((1.0 - f) * p->atk_smp[k] + f * p->atk_smp[k + 1])
+                           / 32768.0 * scale;
+            harm_l[i] += (float) v;
+            harm_r[i] += (float) v;
+            p->atk_pos += p->atk_rate;
+        }
+    }
+    else if (p->atk_active == AE_ATK_NOISE)
+    {
+        const double r = exp (-2.0 * AE_PI * 1500.0 / p->fs);
+        const double scale = g / 0.577; /* uniform noise RMS */
+        for (int i = 0; i < num_samples; ++i)
+        {
+            const double x = (atk_rand01 (p) * 2.0 - 1.0);
+            p->atk_hp_y = x - p->atk_hp_x + r * p->atk_hp_y; /* chiff, not thump */
+            p->atk_hp_x = x;
+            const double v = p->atk_hp_y * p->atk_env * scale;
+            harm_l[i] += (float) v;
+            harm_r[i] += (float) v;
+            p->atk_env *= p->atk_env_a;
+        }
+        if (p->atk_env < 1e-3)
+            p->atk_active = 0;
+    }
+    else /* AE_ATK_CLICK */
+    {
+        const double scale = g / 0.707;
+        for (int i = 0; i < num_samples; ++i)
+        {
+            p->atk_ph += p->atk_ph_inc;
+            const double v = sin (p->atk_ph) * p->atk_env * scale;
+            harm_l[i] += (float) v;
+            harm_r[i] += (float) v;
+            p->atk_env *= p->atk_env_a;
+        }
+        if (p->atk_env < 1e-3)
+            p->atk_active = 0;
+    }
 }
 
 void ae_corrector_set_harm_glide_ms (AeCorrector *p, double ms)
@@ -1811,7 +1998,10 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         irc_point_process (p->ir_lead, mono, mono, num_samples);
 
     if (harm_l == NULL)
+    {
+        attack_process (p, NULL, NULL, num_samples); /* keep the followers warm */
         return;
+    }
 
     for (int i = 0; i < num_samples; ++i)
     {
@@ -1833,6 +2023,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         render_synth_harmony (p, harm_l, harm_r, num_samples);
     if (! any_shift)
     {
+        attack_process (p, harm_l, harm_r, num_samples);
         /* The harmony IR point (post-ensemble), then the tilt: the tilt
            stays the performer's final tone trim over whatever space the IR
            imposes. */
@@ -1935,6 +2126,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         if (! gate && mix < 1e-4)
             p->h_glide_valid[v] = false; /* the release finished */
     }
+
+    attack_process (p, harm_l, harm_r, num_samples);
 
     /* Harmony IR before the tilt, same order as the synth-only path. */
     if (p->ir_harm[0] != NULL)

@@ -46,6 +46,16 @@
 
 #define AE_SYNTH_PARTIALS 6
 
+/* Attack Sound: a transient fired at note ONSET -- energy appearing, before
+   the detector has settled on a pitch -- to cover the synth voices' attack
+   latency. Deliberately OUTSIDE every envelope: a long synthAttackMs hides
+   the machinery of the note arriving, and the attack sound covers the
+   moment of the pick itself, at its own gain. */
+#define AE_ATK_OFF   0
+#define AE_ATK_NOISE 1 /* randomized white-noise chiff */
+#define AE_ATK_PICK  2 /* the Xentar pick set: 3 ranges x 2 directions */
+#define AE_ATK_CLICK 3 /* damped high tick */
+
 /* Formant (vowel) transfer: a channel vocoder that lifts the live voice's
    spectral envelope onto the synth, so a sung "ah" -> "oo" moves the synth
    with it. Band count is the resolution/cost trade: 16 log-spaced bands
@@ -198,6 +208,25 @@ typedef struct
     double tilt_a;      /* one-pole coefficient for the ~700 Hz pivot */
     double tilt_g_lo, tilt_g_hi;
     double tilt_db_cur; /* what the gains were built for */
+
+    /* Attack Sound ---------------------------------------------------------- */
+    int    atk_mode;             /* AE_ATK_* */
+    double atk_gain;             /* linear; its own volume, no envelope */
+    double atk_fast, atk_slow;   /* onset follower (block RMS) */
+    int    atk_refract;          /* samples until the next hit may fire */
+    const short *atk_smp;        /* playing pick sample, NULL = synthesized */
+    int    atk_smp_len;
+    double atk_smp_rms;
+    double atk_pos, atk_rate;    /* sample cursor + per-hit rate jitter */
+    double atk_amp;              /* level match: ratchets toward the onset */
+    double atk_jit;              /* per-hit volume jitter */
+    double atk_env, atk_env_a;   /* synthesized burst envelope */
+    double atk_hp_x, atk_hp_y;   /* one-pole highpass state (noise chiff) */
+    double atk_ph, atk_ph_inc;   /* click body oscillator */
+    int    atk_active;           /* 0 idle, else the AE_ATK_* mode playing */
+    uint32_t atk_rng;            /* per-hit randomization (LCG) */
+    int    atk_last_range;       /* economy-picking state machine: last */
+    int    atk_last_dir;         /*   range played and last direction */
 
     double in_level;                  /* smoothed voiced input RMS; frozen
                                          while unvoiced so release tails hold
@@ -378,6 +407,12 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
 /* Configure the harmony voices (audio thread, between blocks). */
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES]);
+
+/* Attack Sound (audio thread, between blocks): mode AE_ATK_*, gain LINEAR.
+   Fires on energy onsets whenever a synth voice is in the signal path (a
+   synth ghost, a synth lead, not a purely-shifted rig, whose real signal
+   covers its own onsets). */
+void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin);
 
 /* Harmony portamento in milliseconds (audio thread, between blocks): the
    time constant a ghost takes to slide to a new target when the lead moves.

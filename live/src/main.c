@@ -200,7 +200,9 @@ static void config_defaults (App *app)
     }
     c->params.harm_mute = 0;
     c->params.harm_solo = 0;
-    c->params.harm_glide_ms = 0.0;  /* jump, the classic harmonizer */
+    c->params.harm_glide_ms = 0.0;
+    c->params.attack_sound   = 0;     /* off */
+    c->params.attack_gain_db = -26.0; /* Xentar's shipped pick level */  /* jump, the classic harmonizer */
     c->params.harm_sustain = true;  /* the release means nothing without it */
     c->params.harm_hold    = false; /* momentary; never a saved state */
     c->params.harm_source      = 0;     /* pitch-shifted live audio */
@@ -329,6 +331,7 @@ static void config_json (const App *app, char *out, size_t cap)
     snprintf (harm, sizeof (harm),
               ",\"harmOn\":%s,\"harmLock\":\"%s\",\"harmGainDb\":%.4g,"
               "\"harmSustain\":%s,\"harmHold\":%s,\"harmGlideMs\":%.4g,"
+              "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
               lock_names[c->params.harm_lock >= 0 && c->params.harm_lock <= 2
@@ -337,6 +340,10 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.harm_sustain ? "true" : "false",
               c->params.harm_hold ? "true" : "false",
               c->params.harm_glide_ms,
+              (const char *[]){ "off", "noise", "pick", "click" }
+                  [c->params.attack_sound >= 0 && c->params.attack_sound <= 3
+                       ? c->params.attack_sound : 0],
+              c->params.attack_gain_db,
               c->params.midi_mode ? "true" : "false");
     strncat (out, harm, cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->midi_source);
@@ -511,6 +518,12 @@ static bool config_apply_json (App *app, const char *json)
         c->params.harm_on = b;
     if (ae_json_get_number (json, "harmGainDb", &num))
         c->params.harm_master_db = num_clamp (num, -24.0, 12.0);
+    if (ae_json_get_string (json, "attackSound", str, sizeof (str)))
+        c->params.attack_sound = strcmp (str, "noise") == 0 ? 1
+                               : strcmp (str, "pick")  == 0 ? 2
+                               : strcmp (str, "click") == 0 ? 3 : 0;
+    if (ae_json_get_number (json, "attackGainDb", &num))
+        c->params.attack_gain_db = num_clamp (num, -60.0, 12.0);
     if (ae_json_get_number (json, "harmGlideMs", &num))
         c->params.harm_glide_ms = num_clamp (num, 0.0, 5000.0);
     if (ae_json_get_bool (json, "harmSustain", &b))

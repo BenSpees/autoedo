@@ -315,6 +315,15 @@ Voices landing on one pitch dedupe (no gain doubling) but still report their
 degree in `harmDeg`. Down-shift depth is bounded by the detection range's
 longest period.
 
+### Attack Sound
+
+| Key | Type | Applies | Meaning |
+|---|---|---|---|
+| `attackSound` | `"off"` \| `"noise"` \| `"pick"` \| `"click"` | live | a transient fired at note ONSET — triggered by energy appearing (a fast follower overtaking a slow one), several detection hops **before the pitch is known**. Its purpose: cover the synth voices' attack latency. Pair it with a long `synthAttackMs`: the slow envelope hides the machinery of the note arriving, and the attack sound covers the moment of the pick itself. Fires whenever a ghost (either source) or a synth lead is in the path — shifted ghosts get the cover too, same scope as the envelope: their onset is as synthetic as a synth ghost's, the shifter's latency swallowing the real pick. Only a rig with nothing on the bus (harmony off, shifted lead) gets no hits. ~80 ms refractory, so one hit per pick. Rendered into the harmony bus before its IR/tilt/master (it sits in the ghosts' space) but through **no envelope and no vocoder** |
+| `attackGainDb` | float −60…+12 | live | the attack sound's own gain, dB **relative to the note's own onset level** (each hit is volume-matched to the input's attack, so soft notes get soft picks). Default −26 — Xentar's shipped 5%, "felt more than heard". Turn it up toward 0 when it is doing the covering-the-attack job |
+
+`"pick"` is the Xentar pick-noise set (Build 2753), embedded: 3 string ranges × 2 pick directions, range chosen from the last known pitch (low < 130 Hz ≤ mid < 220 Hz ≤ hi), direction from the economy-picking state machine — a repeated range alternates down/up; crossing to a higher range continues DOWN, to a lower one UP, the pick travelling with the hand. Each hit gets ±8% playback-rate and ±26% level jitter, so a run reads as a player, not a sampler. `"noise"` is a randomized high-passed white chiff (~60 ms); `"click"` a damped high tick. All three follow the same trigger, matching and gain law.
+
 ### HOLD (momentary)
 
 `{"harmHold": true}` engages, `{"harmHold": false}` releases. It is a
