@@ -123,6 +123,7 @@ void ae_yin_prepare (AeYin *y, double sample_rate, int frame_size,
 
     y->window = y->frame_size - y->tau_max;
     y->window = imax (y->window, y->tau_max); /* keep a healthy amount of overlap data */
+    y->last_best_tau = 0;
 
     y->fft_size = 1;
     while (y->fft_size < y->window + y->tau_max)
@@ -236,7 +237,17 @@ AeYinResult ae_yin_process (AeYin *y, const float *frame, int num_samples)
             if (y->cumulative[c] > y->cumulative[c - 1]
                 || y->cumulative[c] > y->cumulative[c + 1])
                 continue;
-            if (1.0 - y->cumulative[c] >= 0.90 * q_best)
+            /* Octave continuity: moving to a lag that matches the octave
+               we reported LAST frame needs only comparable quality (0.90);
+               CHANGING octave against the running note must be clearly
+               better (0.95). This is what keeps the guard from flip-
+               flopping mid-note on marginal dips -- each flip used to cost
+               the corrector an equave-sized re-vote. */
+            const bool matches_last = y->last_best_tau > 0
+                && abs (c - y->last_best_tau) <= y->last_best_tau / 8;
+            const double need = (y->last_best_tau <= 0 || matches_last)
+                                    ? 0.90 : 0.95;
+            if (1.0 - y->cumulative[c] >= need * q_best)
             {
                 best_tau = c;
                 break;
@@ -266,5 +277,6 @@ AeYinResult ae_yin_process (AeYin *y, const float *frame, int num_samples)
     result.frequency_hz = y->sample_rate / better_tau;
     result.periodicity  = p;
     result.voiced       = d_voiced < y->threshold;
+    y->last_best_tau = result.voiced ? best_tau : 0;
     return result;
 }

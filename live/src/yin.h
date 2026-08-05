@@ -30,6 +30,9 @@ typedef struct
     int    fft_size;  /* >= window + tau_max, power of two */
     double threshold; /* CMND acceptance threshold (~0.1-0.15) */
 
+    int     last_best_tau; /* previous voiced frame's lag; 0 = none. Lets
+                              the octave guard demand a clearly better dip
+                              before CHANGING octave between frames. */
     double *diff;       /* difference function d(tau) */
     double *cumulative; /* cumulative mean normalised difference d'(tau) */
 

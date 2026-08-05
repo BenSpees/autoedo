@@ -133,6 +133,14 @@ typedef struct
     double out_cents; /* current (smoothed) output pitch, cents re ref */
     double v_gain;    /* smoothed dry(0)/wet(1) crossfade gain */
 
+    /* Octave re-vote rebase: the previous hop's (detected, target) pair,
+       so a same-hop equave jump in BOTH -- the detector re-labeling the
+       octave of a sustained note, not the player moving -- can re-base the
+       glide instead of swinging the lead's ratio through an octave. */
+    double prev_det_cents;
+    double prev_tgt_cents;
+    bool   prev_pair_valid;
+
     long long target_j;      /* current target degree (signed, re root) */
     bool      target_valid;  /* false until a voiced target exists */
     bool      in_transition; /* gliding between two different degrees */

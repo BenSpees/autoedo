@@ -656,6 +656,8 @@ void ae_corrector_reset (AeCorrector *p)
     p->in_level       = 0.0;
     p->target_j       = 0;
     p->target_valid   = false;
+    p->prev_pair_valid = false;
+    p->prev_det_cents = p->prev_tgt_cents = 0.0;
     p->in_transition  = false;
     p->sustain_s      = 0.0;
 
@@ -1062,6 +1064,35 @@ static void run_detection (AeCorrector *p)
                                (float) (target_hz * pow (2.0, lead_shift_c / 1200.0)),
                                memory_order_relaxed);
 
+        /* Octave re-vote rebase. A guitar with a dominant second harmonic
+           makes YIN vote octave-high at the pluck and re-vote the true
+           octave mid-note as the uppers decay. When detected and target
+           both jump by the same near-equave interval within one 5 ms hop,
+           that is a re-LABELING of the same audio, not the player moving:
+           re-base the glide by the same jump so shift_semitones stays
+           continuous, instead of gliding 1200 cents and swinging the
+           lead's ratio through an octave -- which was the field's
+           "super-bassy corrected lead" (the ratio transposing the real
+           note toward its sub-octave for ~transition_ms after every
+           re-vote). Measured: max |shift| 10.8 -> 0.6 st on the repro
+           signal, sub-octave energy back to the clean input's level. Cost:
+           a genuine instantaneous exact-equave hammer-on lands instantly
+           instead of gliding -- inaudible next to what it fixes. */
+        if (p->voiced && p->primed && p->prev_pair_valid)
+        {
+            const double dd  = detected_cents - p->prev_det_cents;
+            const double dt  = target_cents   - p->prev_tgt_cents;
+            const double add = fabs (dd);
+            const bool near_equave = fabs (add - 1200.0) < 60.0
+                                  || fabs (add - 1902.0) < 60.0
+                                  || fabs (add - 2400.0) < 60.0;
+            if (near_equave && fabs (dd - dt) < 60.0)
+            {
+                p->out_cents    += dt;
+                p->in_transition = false;
+            }
+        }
+
         /* On a fresh onset, start from the pitch actually sung so the
            correction glides from there (retune speed) instead of jumping
            from a stale value. */
@@ -1121,6 +1152,9 @@ static void run_detection (AeCorrector *p)
                                      -36.0, 36.0);
 
         p->primed = true;
+        p->prev_det_cents  = detected_cents;
+        p->prev_tgt_cents  = target_cents;
+        p->prev_pair_valid = true;
 
         /* ---- harmony voices (Xentar emulation) --------------------------- */
         /* HOLD: the ghosts are frozen where they were, so none of the
@@ -1270,6 +1304,7 @@ harmony_done: ;
     else
     {
         p->shift_semitones = 0.0; /* identity; the crossfade handles the rest */
+        p->prev_pair_valid = false;
         p->target_valid    = false;
         p->sustain_s       = 0.0;
         /* Held ghosts keep their gate through the silence -- that is what

@@ -858,6 +858,55 @@ static void test_harmony_glide (void)
    real note), moves the lead by an exact interval, and locked ghosts stack
    their intervals on the SHIFTED lead so the harmony stays a scale interval
    from the note the audience hears. */
+/* The "super-bassy corrected lead" from the field. A guitar picked with a
+   dominant 2nd harmonic makes YIN vote octave-high at the pluck and
+   re-vote the true octave mid-note as the uppers decay; detected and
+   target both step an equave in one hop, and the correction used to glide
+   1200 cents -- swinging the lead's ratio through an octave for
+   ~transition_ms after every re-vote. The rebase relabels instead, so the
+   shift stays continuous. */
+static void test_octave_revote_rebase (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    /* Default-ish speeds: the bug lives in the transition glide. */
+    ae_corrector_set_retune_ms (p, 20.0);
+    ae_corrector_set_transition_ms (p, 50.0);
+
+    /* 2 s of A2 (110 Hz): first second 2nd-harmonic dominant (YIN reads
+       220), second second fundamental dominant (YIN reads 110). One
+       physical note, one octave re-vote. */
+    const int total = 96000;
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        const double w = i < 45600 ? 0.0
+                       : i > 50400 ? 1.0 : (i - 45600) / 4800.0;
+        const double h1 = 0.10 + 0.40 * w;   /* fundamental fades in */
+        const double h2 = 0.50 - 0.42 * w;   /* second harmonic fades out */
+        ph += 2.0 * M_PI * 110.0 / 48000.0;
+        in[i] = (float) (h1 * sin (ph) + h2 * sin (2.0 * ph)
+                       + 0.06 * sin (3.0 * ph));
+    }
+
+    double max_shift = 0.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        if (fabs (p->shift_semitones) > max_shift)
+            max_shift = fabs (p->shift_semitones);
+    }
+    CHECK (max_shift < 3.0,
+           "octave re-vote does not swing the lead (max |shift| %.2f st; "
+           "the unrebased glide measured ~10)", max_shift);
+
+    ae_corrector_free (p);
+    free (p); free (in);
+}
+
 static void test_lead_shift (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -1937,6 +1986,7 @@ int main (void)
     test_harmony_anchor();
     test_harmony_glide();
     test_lead_shift();
+    test_octave_revote_rebase();
     test_synth_envelope();
     test_walk();
     test_harmony();
