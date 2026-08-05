@@ -64,6 +64,14 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
 
 void ae_sampler_free (AeSampleBank *bank);
 
+/* Enumerate the instruments present under a cache root: every subdirectory
+   holding at least one file the zone parser recognises. Fills `names` and
+   returns how many were written (sorted). The engine never carries a
+   hard-coded instrument list -- adding one is dropping a folder in the
+   cache, which is the whole operation, forever. */
+#define AE_SMP_MAX_INSTRUMENTS 32
+int ae_sampler_list (const char *root, char names[][32], int max);
+
 /* The nearest zone by PITCH to `midi`, or -1 for an empty bank. */
 int ae_sampler_zone (const AeSampleBank *bank, int midi);
 

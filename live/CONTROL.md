@@ -285,12 +285,14 @@ the wrong speed.
 | `samplePath` | string | live (reloads) | absolute root of the per-rate cache. The engine reads `<samplePath>/<instrument>/*.wav` |
 | `sampleManifest` | string | live (reloads) | optional file list. **Any JSON shape works**: the engine harvests the `".wav"` strings out of it and derives instrument, zone, layer and variant from the FILENAME, which already carries all four. There is no schema to agree on and a manifest change cannot break the engine. Absent/unreadable → the instrument directory is scanned instead |
 | `sampleHash` | string | live (reloads) | the librarian's "the library changed" token. The bank is re-read only when this moves — 120 WAVs is not a per-POST operation |
-| `sampleInstrument` | string | live (reloads) | `piano` `electric` `acoustic` `bass` `vibraphone` `choir` `harpsichord` `oboe`. **Feature-detect on this key** |
+| `sampleInstrument` | string | live (reloads) | which instrument folder to load. **The engine carries no instrument list** — it is whatever `<samplePath>/` actually holds, so adding one (e.g. `pizzicato`) is dropping a folder in the cache and needs no engine or controller change. Status echoes `sampleInstruments` (what was found, sorted); build the picker from that, as with `synthPatches`. The shipped set is `piano` `electric` `acoustic` `bass` `vibraphone` `choir` `harpsichord` `oboe` `pizzicato`. **Feature-detect on this key** |
 | `sampleMix` | float 0–1 | live | layer blend against the shifted rendering of the same ghost. `0` = shifted alone, `1` = sample alone, **`0.5` = both at unity** — a plateau at centre with an equal-power taper either side (`g = sin(min(1, 2·d)·π/2)` per side, `d` the distance from the far end), not the textbook crossfade that would drop both to 0.707 in the middle. "sample" is a LAYER, not a swap: at any mix below 1 the voice's shifter keeps running |
 | `sampleVelocity` | float −1…1 | live | fixed strike level; **`-1` (default) = measure it** from the lead's own attack |
 | `harmSource`, `leadSource`, `hSrc[]` | += `"sample"` | live | the source selectors all take it |
 
-Status: `sampleVelLast` (the level the voices were last struck with — a
+Status: `sampleInstruments` (the instruments discovered under `samplePath`
+— a directory counts when it holds at least one file the zone parser
+recognises), `sampleVelLast` (the level the voices were last struck with — a
 strike level you cannot see is one you cannot tune), `sampleZones` /
 `sampleFiles` (what actually loaded), and `sampleError` (the last failed
 load; a failure leaves the **running bank playing** rather than going
@@ -311,7 +313,12 @@ cutting a sounding one (Xentar's node-swap discipline, ported).
 - **The soft layer is TIMBRE, not level.** `<Note>_soft` files are softer-
   *played* recordings peak-normalised to the main layer; loudness always
   comes from the velocity gain. Below velocity 0.6 the soft pool is
-  preferred **where one exists** — harpsichord deliberately has none.
+  preferred **where one exists** — harpsichord has none by design, and
+  individual zones can lack one too (pizzicato's D2 does); both fall back
+  to the main pool rather than being special-cased.
+- **Sharps are spelled both ways.** `F#1` and `Fs1` are the same zone; the
+  parser takes either, so a set using `#` (pizzicato) and one using `s`
+  (the older instruments) can sit side by side in one cache.
 - **Round robin is per (instrument, zone, layer) and never the previous
   pick.** A repeated note that reuses its recording machine-guns at once.
 - **Zone then RATE.** Nearest recording by pitch, then a fractional,

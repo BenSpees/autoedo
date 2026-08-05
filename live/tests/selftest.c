@@ -2430,6 +2430,37 @@ static void test_sampler_bank (void)
     CHECK (repeats == 0, "sampler: no immediate round-robin repeat (%d in 200)",
            repeats);
 
+    /* '#' is the other shipped spelling of a sharp (pizzicato uses it
+       where the older sets use 's'); both must land on the same zone. */
+    snprintf (pth, sizeof (pth), "%s/F#1.wav", dir); write_wav (pth, 46.25, 0.5, 0.4);
+    snprintf (pth, sizeof (pth), "%s/Gs1.wav", dir); write_wav (pth, 51.91, 0.5, 0.4);
+    AeSampleBank sh;
+    memset (&sh, 0, sizeof (sh));
+    CHECK (ae_sampler_load (&sh, root, "piano", NULL, 48000.0, err, sizeof (err)),
+           "sampler: sharps reload (%s)", err);
+    bool got30 = false, got32 = false;
+    for (int i = 0; i < sh.n_zones; ++i)
+    {
+        if (sh.zones[i] == 30) got30 = true;  /* F#1 */
+        if (sh.zones[i] == 32) got32 = true;  /* G#1 */
+    }
+    CHECK (got30 && got32,
+           "sampler: '#' and 's' sharps both parse (F#1=30 %d, Gs1=32 %d)",
+           (int) got30, (int) got32);
+    ae_sampler_free (&sh);
+
+    /* Instrument discovery: the engine carries no instrument list, so a
+       cache directory is the only source of truth. */
+    char names[AE_SMP_MAX_INSTRUMENTS][32];
+    const int ni = ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS);
+    CHECK (ni == 1 && strcmp (names[0], "piano") == 0,
+           "sampler: discovery finds the instrument folder (%d found)", ni);
+    snprintf (cmd, sizeof (cmd), "mkdir -p %s/emptyish && touch %s/emptyish/readme.txt",
+              root, root);
+    if (system (cmd) == 0)
+        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 1,
+               "sampler: a folder with no recordings is not an instrument");
+
     ae_sampler_free (&b);
     CHECK (b.n_recs == 0, "sampler: free clears the bank");
     snprintf (cmd, sizeof (cmd), "rm -rf %s", root);

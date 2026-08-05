@@ -322,6 +322,49 @@ void ae_sampler_free (AeSampleBank *bank)
     memset (bank, 0, sizeof (*bank));
 }
 
+int ae_sampler_list (const char *root, char names[][32], int max)
+{
+    if (root == NULL || root[0] == '\0' || max <= 0)
+        return 0;
+    DIR *d = opendir (root);
+    if (d == NULL)
+        return 0;
+
+    int n = 0;
+    const struct dirent *e;
+    while ((e = readdir (d)) != NULL && n < max)
+    {
+        if (e->d_name[0] == '.')
+            continue;
+        char sub[1100];
+        snprintf (sub, sizeof (sub), "%s/%s", root, e->d_name);
+        DIR *s2 = opendir (sub);
+        if (s2 == NULL)
+            continue; /* not a directory (or unreadable): not an instrument */
+        bool any = false;
+        const struct dirent *f;
+        while (! any && (f = readdir (s2)) != NULL)
+        {
+            bool soft;
+            any = parse_name (f->d_name, &soft) >= 0;
+        }
+        closedir (s2);
+        if (any)
+            snprintf (names[n++], 32, "%.31s", e->d_name);
+    }
+    closedir (d);
+
+    for (int i = 1; i < n; ++i)
+        for (int j = i; j > 0 && strcmp (names[j], names[j - 1]) < 0; --j)
+        {
+            char t[32];
+            memcpy (t, names[j], 32);
+            memcpy (names[j], names[j - 1], 32);
+            memcpy (names[j - 1], t, 32);
+        }
+    return n;
+}
+
 int ae_sampler_zone (const AeSampleBank *bank, int midi)
 {
     int best = -1, bestd = 1 << 20;

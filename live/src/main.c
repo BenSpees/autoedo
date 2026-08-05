@@ -16,6 +16,7 @@
 
 #include "audio.h"
 #include "corrector.h" /* synth patch table names */
+#include "sampler.h"   /* instrument discovery */
 #include "httpd.h"
 #include "json.h"
 #include "tuning.h"
@@ -92,6 +93,8 @@ typedef struct
     char            ir_err[256];
     char            send_err[128]; /* last refused send write ("" = none) */
     char            sample_err[256];
+    char            sample_insts[AE_SMP_MAX_INSTRUMENTS][32];
+    int             sample_inst_n;
     char            sample_hash[80];
     bool            sample_dirty;  /* the bank needs a (re)load */
 
@@ -900,6 +903,10 @@ static void samples_reload_locked (App *app)
         return;
     app->sample_dirty = false;
     AeEngineConfig *c = &app->engine_cfg;
+    /* Re-read what the cache actually holds, so a UI builds its picker from
+       the engine's own table rather than a list compiled into it. */
+    app->sample_inst_n = ae_sampler_list (c->sample_root, app->sample_insts,
+                                          AE_SMP_MAX_INSTRUMENTS);
     if (c->sample_root[0] == '\0')
     {
         app->sample_err[0] = '\0';
@@ -1033,6 +1040,16 @@ static void status_refresh (App *app)
     }
     snprintf (midi + mn, sizeof (midi) - mn, "]");
 
+    /* Instruments actually present in the cache -- same contract as the
+       synth patch table: the picker is built from what is there. */
+    char insts[AE_SMP_MAX_INSTRUMENTS * 34 + 4];
+    size_t in_ = 0;
+    in_ += (size_t) snprintf (insts + in_, sizeof (insts) - in_, "[");
+    for (int i = 0; i < app->sample_inst_n && in_ < sizeof (insts) - 40; ++i)
+        in_ += (size_t) snprintf (insts + in_, sizeof (insts) - in_, "%s\"%s\"",
+                                  i ? "," : "", app->sample_insts[i]);
+    snprintf (insts + in_, sizeof (insts) - in_, "]");
+
     /* Patch names, so UIs build their picker from the engine's own table. */
     char patches[256];
     size_t pn = 0;
@@ -1054,6 +1071,7 @@ static void status_refresh (App *app)
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
         "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
         "\"sampleVelLast\":%.3f,\"sampleZones\":%d,\"sampleFiles\":%d,"
+        "\"sampleInstruments\":%s,"
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
@@ -1068,7 +1086,7 @@ static void status_refresh (App *app)
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
         patches, ir_err, send_err_esc, sample_err_esc,
-        (double) st.sample_vel, st.sample_zones, st.sample_files,
+        (double) st.sample_vel, st.sample_zones, st.sample_files, insts,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),
