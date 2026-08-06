@@ -183,6 +183,7 @@ static void config_defaults (App *app)
     c->params.tolerance_cents = 0.0;
     c->params.stickiness      = 0.0;
     c->params.humanize        = 0.0;
+    c->params.expression      = 1.0;  /* the playing survives by default */
     c->params.degrees_lo      = ~0ull;   /* every degree enabled */
     c->params.degrees_hi      = 0xffull;
     c->params.bypass          = false;
@@ -297,7 +298,7 @@ static void config_json (const App *app, char *out, size_t cap)
     snprintf (out, cap,
               "{\"edo\":%d,\"retuneMs\":%.6g,\"transitionMs\":%.6g,"
               "\"amount\":%.6g,\"toleranceCents\":%.6g,\"stickiness\":%.6g,"
-              "\"humanize\":%.6g,"
+              "\"humanize\":%.6g,\"expression\":%.6g,"
               "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
               "\"refNote\":%d,\"refNoteHz\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
@@ -307,7 +308,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
-              c->params.humanize,
+              c->params.humanize, c->params.expression,
               app->root_note, app->root_cents, app->ref_a4,
               app->ref_note,
               app->ref_a4 * pow (2.0, ((double) app->ref_note - 9.0) / 12.0),
@@ -506,6 +507,8 @@ static bool config_apply_json (App *app, const char *json)
         c->params.tolerance_cents = num_clamp (num, 0.0, 50.0);
     if (ae_json_get_number (json, "stickiness", &num))
         c->params.stickiness = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_number (json, "expression", &num))
+        c->params.expression = num_clamp (num, 0.0, 1.0);
     if (ae_json_get_number (json, "humanize", &num))
         c->params.humanize = num_clamp (num, 0.0, 1.0);
     if (ae_json_get_number (json, "rootNote", &num))

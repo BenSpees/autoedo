@@ -893,6 +893,73 @@ static void test_harmony_glide (void)
    1200 cents -- swinging the lead's ratio through an octave for
    ~transition_ms after every re-vote. The rebase relabels instead, so the
    shift stays continuous. */
+/* The field report: "pitch shifting pedals track your bends and vibrato
+   and they audibly transfer to the output. That doesn't seem to be working
+   in ours." It was not: at amount 1 the law shift = target - detected
+   cancels a bend exactly as it happens, because target is a fixed degree.
+   Correction now applies to the note's CENTRE and the deviation is added
+   back, so the note lands on the degree and the playing survives. */
+static void test_expression_transfer (void)
+{
+    const double bend_c = 120.0;  /* a whole-tone bend, over 400 ms */
+    double out_end[2];            /* [0] expression off, [1] on */
+
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 20.0);
+        ae_corrector_set_transition_ms (p, 50.0);
+        ae_corrector_set_amount (p, 1.0);       /* full correction */
+        ae_corrector_set_expression (p, c);     /* 0 = pin, 1 = pass */
+
+        /* A3 held for 700 ms, then bent up 120 cents over 400 ms and held
+           there. The bend crosses a degree boundary, so a centre-based
+           snap will eventually re-target -- the assertion is taken while
+           it is still mid-bend. */
+        const int total = 98304;
+        float *in = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const double t = (double) i / 48000.0;
+            double c_off = 0.0;
+            if (t > 0.70) c_off = bend_c * ((t - 0.70) / 0.40 < 1.0
+                                              ? (t - 0.70) / 0.40 : 1.0);
+            ph += 2.0 * M_PI * (220.0 * pow (2.0, c_off / 1200.0)) / 48000.0;
+            in[i] = (float) (0.4 * sin (ph) + 0.15 * sin (2.0 * ph));
+        }
+        /* Sample the OUTPUT pitch 250 ms into the bend: detected + shift. */
+        double out_c = 0.0;
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, NULL, NULL, n);
+            const double t = (double) off / 48000.0;
+            if (t >= 0.94 && t < 0.96)
+            {
+                const double det = 1200.0 * log2 (ae_corrector_detected_hz (p) / 220.0);
+                out_c = det + p->shift_semitones * 100.0;
+            }
+        }
+        out_end[c] = out_c;
+        ae_corrector_free (p);
+        free (p); free (in);
+    }
+
+    /* Pinned: the output stays on the degree however hard you bend. */
+    CHECK (fabs (out_end[0]) < 25.0,
+           "expression 0 pins the output to the degree (%.0f cents off)",
+           out_end[0]);
+    /* Passed: the bend reaches the output. 250 ms in, the input is ~75
+       cents up; the note's centre has taken some of it, so the output must
+       be well clear of the degree and well short of a full re-snap. */
+    CHECK (out_end[1] > 30.0,
+           "expression 1 lets the bend through (%.0f cents vs pinned %.0f)",
+           out_end[1], out_end[0]);
+}
+
 static void test_octave_revote_rebase (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -2809,6 +2876,7 @@ int main (void)
     test_harm_toggle_clears_glide();
     test_lead_shift();
     test_octave_revote_rebase();
+    test_expression_transfer();
     test_attack_sound();
     test_release_pitch_stability();
     test_midi_octave_fold();

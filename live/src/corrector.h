@@ -162,7 +162,20 @@ typedef struct
     bool   voiced;
     bool   primed;            /* becomes true once first pitch is found */
 
-    double out_cents; /* current (smoothed) output pitch, cents re ref */
+    double out_cents; /* the corrected NOTE CENTRE, cents re ref */
+
+    /* Expression. A played pitch is a note plus what the player is doing to
+       it. `centre_cents` tracks the note (a ~180 ms follower, slower than
+       any bend or vibrato and faster than a phrase); the difference between
+       it and the instantaneous pitch IS the bend, the vibrato, the scoop.
+       Correction is applied to the CENTRE alone and the deviation is added
+       back, so the note lands on the degree and the playing survives.
+       Without this the law shift = target - detected cancels a bend exactly
+       as it happens -- the harder you bend, the harder the engine bends
+       back -- which is why expression never reached the output. */
+    double centre_cents;
+    double expression;   /* 0 = pin hard (the old behaviour), 1 = pass it all */
+    double expr_cents;   /* the live deviation, for the ghosts and the trace */
     double v_gain;    /* smoothed dry(0)/wet(1) crossfade gain */
 
     /* Octave re-vote rebase: the previous hop's (detected, target) pair,
@@ -630,6 +643,16 @@ static inline void ae_corrector_set_midi_fold (AeCorrector *p, bool fold)
 static inline void ae_corrector_set_formant_hold (AeCorrector *p, bool hold)
 {
     p->formant_hold = hold;
+}
+
+/* How much of the playing survives correction: 0 pins the output to the
+   degree (bends and vibrato removed), 1 passes the whole deviation through
+   while the note's centre is still corrected. Steady notes are unaffected
+   either way -- only motion faster than the ~180 ms centre follower is at
+   stake, which is exactly the expression. */
+static inline void ae_corrector_set_expression (AeCorrector *p, double amt)
+{
+    p->expression = amt < 0.0 ? 0.0 : (amt > 1.0 ? 1.0 : amt);
 }
 
 static inline void ae_corrector_set_formant_st (AeCorrector *p, double st)

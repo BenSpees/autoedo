@@ -37,6 +37,7 @@ typedef struct
     _Atomic double   tolerance_cents;
     _Atomic double   stickiness;
     _Atomic double   humanize;
+    _Atomic double   expression;
     _Atomic double   ref_hz;
     _Atomic double   period_cents;
     _Atomic uint64_t deg_lo;
@@ -108,6 +109,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->tolerance_cents, p->tolerance_cents, memory_order_relaxed);
     atomic_store_explicit (&a->stickiness,      p->stickiness,      memory_order_relaxed);
     atomic_store_explicit (&a->humanize,        p->humanize,        memory_order_relaxed);
+    atomic_store_explicit (&a->expression,      p->expression,      memory_order_relaxed);
     atomic_store_explicit (&a->ref_hz,          p->ref_hz,          memory_order_relaxed);
     atomic_store_explicit (&a->period_cents,    p->period_cents,    memory_order_relaxed);
     atomic_store_explicit (&a->deg_lo,          p->degrees_lo,      memory_order_relaxed);

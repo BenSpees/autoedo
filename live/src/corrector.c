@@ -657,6 +657,9 @@ void ae_corrector_reset (AeCorrector *p)
     p->voiced         = false;
     p->primed         = false;
     p->out_cents      = 0.0;
+    p->centre_cents   = 0.0;
+    p->expr_cents     = 0.0;
+    if (p->expression <= 0.0) p->expression = 1.0;
     p->v_gain         = 0.0;
     p->in_level       = 0.0;
     p->target_j       = 0;
@@ -1380,7 +1383,46 @@ static void run_detection (AeCorrector *p)
         const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
 
         const double detected_cents = 1200.0 * log2 (res.frequency_hz / ref);
-        const double steps          = ae_steps_from_ref (res.frequency_hz, p->edo, ref, period);
+
+        /* Split the played pitch into the NOTE and what is being done to
+           it. The centre follows at ~180 ms: slower than any bend or
+           vibrato, faster than a phrase, so drift is corrected and playing
+           is not. A fresh note starts its centre where it was struck
+           rather than sliding in from the last one. */
+        if (! p->voiced || ! p->primed)
+            p->centre_cents = detected_cents;
+        else
+            p->centre_cents += (detected_cents - p->centre_cents)
+                             * (1.0 - exp (-elapsed / 0.180));
+        /* Octave re-vote. A guitar with a dominant second harmonic makes
+           YIN vote octave-high at the pluck and re-vote the true octave
+           mid-note as the uppers decay -- a near-equave step in ONE 5 ms
+           hop. No player moves an octave in 5 ms, and even a real leap is
+           handled correctly by the same response: take the whole jump into
+           the note and leave the expression alone. Tested on the DETECTED
+           pitch alone; the target cannot corroborate it any more, because
+           the target now follows the centre and the centre is what is
+           being corrected here. */
+        if (p->voiced && p->primed && p->prev_pair_valid)
+        {
+            const double dd  = detected_cents - p->prev_det_cents;
+            const double add = fabs (dd);
+            if (fabs (add - 1200.0) < 60.0 || fabs (add - 1902.0) < 60.0
+                || fabs (add - 2400.0) < 60.0)
+            {
+                p->centre_cents += dd; /* the note moved; follow it at once */
+                p->out_cents    += dd; /* and keep the correction continuous */
+                p->in_transition = false;
+            }
+        }
+        p->expr_cents = detected_cents - p->centre_cents;
+
+        /* The DEGREE is chosen from the centre, not the instantaneous
+           pitch. A vibrato wider than half a step would otherwise flip the
+           target back and forth -- in 22-EDO a step is 54.5 cents, which a
+           guitarist crosses without trying. */
+        const double centre_hz = ref * pow (2.0, p->centre_cents / 1200.0);
+        const double steps     = ae_steps_from_ref (centre_hz, p->edo, ref, period);
 
         /* MIDI Harmony override: while notes are held they ARE the target
            set — middle C (60) pivots to degree 4*edo, one EDO step per
@@ -1436,7 +1478,7 @@ static void run_detection (AeCorrector *p)
         }
         else
         {
-            const AeTuningResult t = ae_quantize_to_edo_scale_ex (res.frequency_hz, p->edo,
+            const AeTuningResult t = ae_quantize_to_edo_scale_ex (centre_hz, p->edo,
                                                                   p->enabled_deg, ref, period);
             cand = t.degree;
         }
@@ -1484,35 +1526,6 @@ static void run_detection (AeCorrector *p)
                                (float) (target_hz * pow (2.0, lead_shift_c / 1200.0)),
                                memory_order_relaxed);
 
-        /* Octave re-vote rebase. A guitar with a dominant second harmonic
-           makes YIN vote octave-high at the pluck and re-vote the true
-           octave mid-note as the uppers decay. When detected and target
-           both jump by the same near-equave interval within one 5 ms hop,
-           that is a re-LABELING of the same audio, not the player moving:
-           re-base the glide by the same jump so shift_semitones stays
-           continuous, instead of gliding 1200 cents and swinging the
-           lead's ratio through an octave -- which was the field's
-           "super-bassy corrected lead" (the ratio transposing the real
-           note toward its sub-octave for ~transition_ms after every
-           re-vote). Measured: max |shift| 10.8 -> 0.6 st on the repro
-           signal, sub-octave energy back to the clean input's level. Cost:
-           a genuine instantaneous exact-equave hammer-on lands instantly
-           instead of gliding -- inaudible next to what it fixes. */
-        if (p->voiced && p->primed && p->prev_pair_valid)
-        {
-            const double dd  = detected_cents - p->prev_det_cents;
-            const double dt  = target_cents   - p->prev_tgt_cents;
-            const double add = fabs (dd);
-            const bool near_equave = fabs (add - 1200.0) < 60.0
-                                  || fabs (add - 1902.0) < 60.0
-                                  || fabs (add - 2400.0) < 60.0;
-            if (near_equave && fabs (dd - dt) < 60.0)
-            {
-                p->out_cents    += dt;
-                p->in_transition = false;
-            }
-        }
-
         /* On a fresh onset, start from the pitch actually sung so the
            correction glides from there (retune speed) instead of jumping
            from a stale value. */
@@ -1541,9 +1554,9 @@ static void run_detection (AeCorrector *p)
            alone (preserves vibrato instead of fighting it). Then Amount
            scales whatever correction remains. */
         double eff_cents = target_cents;
-        if (fabs (detected_cents - target_cents) <= p->tolerance_cents)
-            eff_cents = detected_cents;
-        eff_cents = detected_cents + (eff_cents - detected_cents) * p->amount;
+        if (fabs (p->centre_cents - target_cents) <= p->tolerance_cents)
+            eff_cents = p->centre_cents;
+        eff_cents = p->centre_cents + (eff_cents - p->centre_cents) * p->amount;
 
         /* Retune speed within a note, transition speed between degrees,
            and Humanize relaxes the retune on long-held notes. */
@@ -1568,7 +1581,9 @@ static void run_detection (AeCorrector *p)
         /* The shifter takes semitones. Correction alone stays near 1; the
            lead transpose can be octaves, so the clamp is the same +-36 the
            harmony voices get (a safety net, not a musical bound). */
-        p->shift_semitones = dclamp ((p->out_cents + lead_shift_c - detected_cents) / 100.0,
+        /* The corrected note centre, with the playing put back on top. */
+        const double out_expr = p->out_cents + p->expr_cents * p->expression;
+        p->shift_semitones = dclamp ((out_expr + lead_shift_c - detected_cents) / 100.0,
                                      -36.0, 36.0);
 
         p->primed = true;
@@ -1635,8 +1650,12 @@ static void run_detection (AeCorrector *p)
         /* The shift is part of the audible lead, so it is part of the
            anchor. With the lead muted the audience hears the raw
            instrument, which the shift does not touch. */
-        const double anchor_cents = p->lead_on ? p->out_cents + lead_shift_c
-                                               : detected_cents;
+        /* Ghosts anchor to the pitch actually heard as the lead -- which
+           now carries the bend, so the harmony bends with it, which is the
+           whole point of a harmoniser tracking the player. */
+        const double anchor_cents = p->lead_on
+            ? p->out_cents + p->expr_cents * p->expression + lead_shift_c
+            : detected_cents;
 
         for (int v = 0; v < AE_HARM_VOICES; ++v)
         {

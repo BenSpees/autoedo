@@ -228,6 +228,7 @@ UI behavior you may want to replicate).
 | `toleranceCents` | float 0–50 | live | dead zone around the target; preserves vibrato |
 | `stickiness` | float 0–1 | live | hysteresis past the midpoint before re-snapping. **Engine does not auto-raise it** — the built-in UI raises it to `min(0.7, (edo−24)/48)` when edo > 41; do the same if you care about high-EDO flicker |
 | `humanize` | float 0–1 | live | relaxes retune on sustained notes |
+| `expression` | float 0–1 | live | **how much of the playing survives correction.** A played pitch is a note plus what the player is doing to it; the engine tracks the note's centre with a ~180 ms follower and the difference is the bend, the vibrato, the scoop. Correction is applied to the **centre alone** and the deviation is added back on top. `1` (default): bends and vibrato reach the output — and the harmony, which anchors to the corrected lead — while the note still lands on its degree. `0`: the old behaviour, output pinned to the degree. **A steady note is identical either way**; only motion faster than the follower is at stake. Without this the law `shift = target − detected` cancels a bend exactly as it happens — the harder you bend, the harder the engine bends back — which is why expression never reached the output |
 | `bypass` | bool | live | dry input passthrough (also silences harmony) |
 | `leadOn` | bool | live | the corrected lead voice in the output mix. `false` = **harmony only**: ghosts (shifted or synth) still follow the sung pitch while the singer stays out of the engine's output — for rigs that take the dry voice from another bus. `bypass` still wins (a dry passthrough with the lead muted would be silence) |
 | `outputGainDb` | float −60…12 | live | master output gain. The output stage soft-clips: transparent below ≈ −2 dBFS, then a smooth saturation that never reaches full scale — so a many-voice harmony stack (worst on a mono-folded `outputChannel` bus) saturates gently instead of crackling as hard digital clipping. If a big stack sounds *compressed*, that is the clip working: pull `hg` per voice (≈ −6 dB for five voices) or `outputGainDb` down until it cleans up |
@@ -428,9 +429,15 @@ longest period.
 
 Three engine-side guards a controller should know exist, all always-on:
 
-- **Octave re-vote rebase**: a same-hop equave jump in both detected and
-  target pitch is treated as the detector re-labeling a sustained note, not
-  motion; the correction ratio stays continuous.
+- **Octave re-vote rebase**: a near-equave jump in the detected pitch
+  within one 5 ms hop is taken into the note's centre immediately rather
+  than passed through as expression. No player moves an octave in 5 ms, and
+  a real octave leap wants the same response, so the rule is safe either
+  way: the correction ratio stays continuous through a detector re-vote.
+- **The degree is chosen from the note's CENTRE**, not the instantaneous
+  pitch. A vibrato wider than half a step would otherwise flip the target
+  back and forth — in 22-EDO a step is 54.5 cents, which a guitarist
+  crosses without trying.
 - **Release rewind + slope-freeze**: a mute or lift drops level far faster
   than a string decays naturally, while often staying "voiced" through tens
   of ms of bent, dying pitch. While the level is collapsing (> ~4 dB down

@@ -285,6 +285,10 @@
             <option value="wide">Wide (40–2000 Hz)</option>
           </select>
         </div>
+        <div class="prow"><label>Expression</label>
+          <input type="range" id="expr" min="0" max="1" step="0.05" value="1" style="flex:1" title="how much of your playing survives correction. 1 = bends and vibrato pass through to the output (and to the harmony) while the note's centre is still corrected — what a pitch-shifting pedal does. 0 = the output is pinned to the degree and expression is removed. A steady note sounds the same either way.">
+          <span class="tab" id="expr-val" style="flex:0 0 40px;text-align:right">100%</span>
+        </div>
         <div class="prow"><label>Formant hold</label>
           <label class="switch" style="display:flex" title="hold formants still under the pitch shift (a voice keeps sounding like the same singer). Turn OFF for guitar and other non-vocal sources: they have no vocal tract to preserve, and off removes the formant stage from the signal path entirely."><input type="checkbox" id="formant-hold" checked></label>
           <span class="dimtxt">offset</span>
@@ -1281,6 +1285,11 @@ function syncHarm() {
   if (document.activeElement !== $('synth-rel')) $('synth-rel').value = c.synthReleaseMs;
   if (document.activeElement !== $('lead-gain'))
     $('lead-gain').value = c.leadGainDb === undefined ? 0 : c.leadGainDb;
+  if (document.activeElement !== $('expr')) {
+    const ex = c.expression === undefined ? 1 : c.expression;
+    $('expr').value = ex;
+    $('expr-val').textContent = Math.round(ex * 100) + '%';
+  }
   $('formant-hold').checked = c.formantHold !== false;
   if (document.activeElement !== $('formant-st'))
     $('formant-st').value = c.formantSemitones === undefined ? 0 : c.formantSemitones;
@@ -1348,6 +1357,11 @@ $('smp-inst').onchange = e => schedulePost({ sampleInstrument: e.target.value })
 $('smp-mix').onchange = e => {
   const v = Math.max(0, Math.min(1, +e.target.value || 0));
   e.target.value = v; schedulePost({ sampleMix: v });
+};
+$('expr').oninput = e => {
+  const v = +e.target.value;
+  $('expr-val').textContent = Math.round(v * 100) + '%';
+  schedulePost({ expression: v });
 };
 $('formant-hold').onchange = e => schedulePost({ formantHold: e.target.checked });
 $('formant-st').onchange = e => {

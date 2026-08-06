@@ -40,6 +40,10 @@ typedef struct
     double   tolerance_cents; /* 0..50 dead zone around lit degrees */
     double   stickiness;      /* 0..1 hysteresis before re-snapping */
     double   humanize;        /* 0..1 relaxes retune on sustained notes */
+    double   expression;      /* 0..1: how much of the bend/vibrato survives
+                                 correction. 0 pins the output to the degree,
+                                 1 passes the whole deviation while the
+                                 note's centre is still corrected */
     double   ref_hz;          /* frequency of degree 0 (root anchor) */
     double   period_cents;    /* octave size (1200 = true octave) */
     uint64_t degrees_lo;      /* bit d set => scale degree d enabled (d 0..63) */
