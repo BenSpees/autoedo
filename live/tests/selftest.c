@@ -2518,15 +2518,42 @@ static void test_sampler_bank (void)
         }
     }
 
+    /* Full-scale recordings are a DECODE FAULT, not a mix decision: a
+       properly mastered set peaks below 0 dBFS. The shipped pizzicato set
+       once had 32 files decoded 24-bit-as-16-bit, which loaded and played
+       happily as full-scale noise -- silent corruption deserves a number. */
+    {
+        char cdir[256], cp[512];
+        snprintf (cdir, sizeof (cdir), "%s/clipset", root);
+        snprintf (cmd, sizeof (cmd), "mkdir -p %s", cdir);
+        if (system (cmd) == 0)
+        {
+            snprintf (cp, sizeof (cp), "%s/C4.wav", cdir);
+            write_wav (cp, 261.6256, 0.5, 1.6);   /* drives past full scale */
+            snprintf (cp, sizeof (cp), "%s/E4.wav", cdir);
+            write_wav (cp, 329.6276, 0.5, 0.4);   /* well mastered */
+            AeSampleBank cb;
+            memset (&cb, 0, sizeof (cb));
+            if (ae_sampler_load (&cb, root, "clipset", NULL, 48000.0,
+                                 AE_SMP_OCTAVE_AUTO, err, sizeof (err)))
+            {
+                CHECK (cb.clipped == 1,
+                       "sampler: full-scale recordings are counted (%d of 2)",
+                       cb.clipped);
+                ae_sampler_free (&cb);
+            }
+        }
+    }
+
     /* Instrument discovery: the engine carries no instrument list, so a
        cache directory is the only source of truth. */
     char names[AE_SMP_MAX_INSTRUMENTS][32];
     const int ni = ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS);
-    CHECK (ni == 3, "sampler: discovery finds every instrument folder (%d)", ni);
+    CHECK (ni == 4, "sampler: discovery finds every instrument folder (%d)", ni);
     snprintf (cmd, sizeof (cmd), "mkdir -p %s/emptyish && touch %s/emptyish/readme.txt",
               root, root);
     if (system (cmd) == 0)
-        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 3,
+        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 4,
                "sampler: a folder with no recordings is not an instrument");
 
     ae_sampler_free (&b);

@@ -333,6 +333,15 @@ cutting a sounding one (Xentar's node-swap discipline, ported).
   to a common −22 dBFS reference. Switching instrument changes the timbre
   and not the level, and a set dropped into the cache at any mastering
   arrives usable. Status reports `sampleNormDb`, the correction applied.
+- **Full-scale recordings are reported, not tolerated.** A properly
+  mastered set peaks below 0 dBFS, so a file sitting exactly at it is the
+  signature of a decode gone wrong rather than a mix decision — the
+  shipped pizzicato set once carried 32 files decoded 24-bit-as-16-bit,
+  which loaded and played perfectly happily as full-scale noise. Status
+  reports `sampleClipped`; anything above 0 means re-transcode that set,
+  and the count says how much of it. It also skews the level measurement
+  above, though taking the median rather than the mean limits how far
+  (measured on that set: 1.4 dB with 23 files corrupt).
   The measurement deliberately excludes the soft layer, which is
   peak-matched to its main layer on purpose: normalising per file would
   destroy exactly the relationship that makes the swap a timbre change.

@@ -68,6 +68,13 @@ typedef struct
        deliberate peak-match to it (a timbre swap, never a level change). */
     double norm;
     double meas_rms;  /* what was measured, for the read-out */
+    int    clipped;   /* recordings that reach full scale. A properly
+                         mastered set peaks BELOW 0 dBFS, so a file sitting
+                         exactly at it is the signature of a decode gone
+                         wrong -- the shipped pizzicato set once had 32
+                         files decoded 24-bit-as-16-bit, which loaded and
+                         played happily as full-scale noise. Silent
+                         corruption deserves a number, not a shrug. */
     int    octave;    /* filename -> sounding offset actually applied */
 } AeSampleBank;
 

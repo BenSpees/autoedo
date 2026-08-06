@@ -205,6 +205,17 @@ static void add_file (AeSampleBank *b, const char *dir, const char *name,
         return;
     }
 
+    /* Full-scale peak = a decode that went wrong (see AeSampleBank.clipped). */
+    {
+        int at_fs = 0;
+        for (int i = 0; i < frames; ++i)
+            if (pcm[i] >= 0.9999f || pcm[i] <= -0.9999f)
+                if (++at_fs >= 8)
+                    break;
+        if (at_fs >= 8)
+            b->clipped++;
+    }
+
     const int idx = b->n_recs++;
     b->recs[idx].pcm  = pcm;
     b->recs[idx].len  = frames;

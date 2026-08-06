@@ -1092,7 +1092,7 @@ static void status_refresh (App *app)
         "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
         "\"sampleVelLast\":%.3f,\"sampleZones\":%d,\"sampleFiles\":%d,"
         "\"sampleInstruments\":%s,"
-        "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,"
+        "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,\"sampleClipped\":%d,"
         "\"stepCents\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
@@ -1108,7 +1108,7 @@ static void status_refresh (App *app)
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
         patches, ir_err, send_err_esc, sample_err_esc,
         (double) st.sample_vel, st.sample_zones, st.sample_files, insts,
-        (double) st.sample_norm_db, st.sample_octave,
+        (double) st.sample_norm_db, st.sample_octave, st.sample_clipped,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),

@@ -169,6 +169,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
         out->sample_norm_db = lv >= 0 && e->corrector.smp_bank[lv].norm > 0.0
             ? (float) (20.0 * log10 (e->corrector.smp_bank[lv].norm)) : 0.0f;
         out->sample_octave  = lv >= 0 ? e->corrector.smp_bank[lv].octave : 0;
+        out->sample_clipped = lv >= 0 ? e->corrector.smp_bank[lv].clipped : 0;
     }
     out->out_peak        = 0.0f; /* the stub discards its output */
     out->voiced          = ae_corrector_voiced (&e->corrector);

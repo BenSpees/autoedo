@@ -225,6 +225,8 @@ typedef struct
     float  sample_norm_db;  /* level normalisation the bank measured for
                                itself -- the shipped sets span ~20 dB */
     int    sample_octave;   /* filename->sounding offset actually applied */
+    int    sample_clipped;  /* recordings peaking at full scale: a decode
+                               fault, not a mix decision */
     float  lead_makeup;     /* the lead shifter's level-match gain, linear */
     float  out_peak;        /* decaying peak of the summed output BEFORE the
                                soft clip, linear: > ~0.79 means the clip is
