@@ -10,13 +10,17 @@ key and doesn't need one: **feature-detect by key presence in the
 in the order the batches landed:
 
 `harmGainDb` → `harmHold` → `leadShiftSteps` → `attackSound` →
-`sendChannel` → `sampleInstrument` → `expression` → **`sampleRing`**
+`sendChannel` → `sampleInstrument` → `expression` → `sampleRing` →
+**`sampleVelRefDb`**
 
 This is the one authoritative ordering — it is the order the batches
 actually landed in, and `sendChannel` sits where it does because the record
-send shipped before the sample work. A rig that sees `sampleRing` echoed
-has everything in this document. Probing any key later in the chain implies
-every key before it.
+send shipped before the sample work. A rig that sees `sampleVelRefDb` in
+the **config echo** has everything in this document. Probing any key later
+in the chain implies every key before it. (`sampleRing` and the three keys
+beside it landed one build earlier, so a rig that has `sampleRing` but not
+`sampleVelRefDb` has everything except §2.9's supplied reference.)
+
 `status.engineBuild` carries the git short hash of the running binary —
 put it in the diagnostics panel and in every future report, so "which
 build" is never a question anyone has to ask.
@@ -131,6 +135,7 @@ re-read only when the binding actually moves).
 | `sampleMix` | float 0–1 | live | layer blend against the shifted rendering of the same ghost. `0` = shifted alone, `1` = sample alone, **`0.5` = both at unity** — see §2.7 |
 | `sampleVelocity` | float **−1…1** | live | fixed strike level. **Any negative value = measure it**; `-1` is canonical and the default. `0…1` pins and bypasses the map (a pinned `0` is silence, not the floor). The range is −1…1, not 0…1 — that is the answer to "pick one": the sentinel has to live in the same key, and it is echoed as `-1` |
 | `sampleRing` | bool | live | **let-ring**, default `true` — see §2.8 |
+| `sampleVelRefDb` | `"auto"` \| float −60…0 | live | **supply the strike map's reference** instead of letting the engine observe one — see §2.9 |
 | `sampleOctave` | `"auto"` \| int −24…+24 | live (reloads) | filename→**sounding** pitch offset — see §2.4 |
 
 Status: `sampleInstruments`, `sampleNormDb`, `sampleOctaveApplied`,
@@ -376,10 +381,44 @@ same shape as your FX layer's. Three details worth matching:
 
 Reported as **`sampleVelRefDb`** in status. A relative map is unreadable
 from outside without it — `sampleVelLast: 0.55` says nothing until you know
-what it is 0.55 *of*. TENDRIL's "loudest onset of the capture" is the same
-quantity from a different source; if you ever want to drive the engine's
-reference from yours instead of letting it observe, say so and I will add
-the key.
+what it is 0.55 *of*.
+
+#### Supplying the reference: `sampleVelRefDb` (the key you asked for)
+
+`"auto"` (default) | float −60…0 dBFS, live.
+
+The reference is the caller's by definition — "how hard this player plays
+when playing hard" is a fact about the performance, not about this engine —
+so TENDRIL's *loudest onset of the capture* is the same quantity from a
+better-informed source. Write it and the engine stops guessing:
+
+```json
+{"sampleVelRefDb": -14.2}
+```
+
+- **Held exactly.** A supplied reference is neither decayed nor raised by a
+  louder note. The `max(refPeak, peak)` inside the map still keeps a
+  louder-than-reference note at unity rather than past it, but the
+  reference itself does not move — you asserted it, so the engine does not
+  quietly disagree.
+- **Round-trips symmetrically.** The config echo carries it in the units
+  you wrote (`"auto"` or dBFS); `status.sampleVelRefDb` is always the
+  number actually in force. Pinned, the two agree — which is the cheapest
+  possible confirmation that the write landed.
+- **`"auto"` hands it back from where it was**, not from a reset. Resetting
+  would drop the reference to the floor and make the next note read as the
+  loudest so far — the exact failure the observed reference already avoids
+  at cold start. Measured on release from −3 dBFS: −4.6, −6.2, −7.8 over
+  the next twelve seconds, which is the 20 s tau.
+- Live-scoped and cheap; re-assert it per phrase if that suits you. The
+  reference scales velocities, it is not in the audio path, so a write
+  cannot click.
+
+If you go this route, note the division of labour: **you own the
+reference, the engine still owns the measurement.** Peak over the first
+30 ms from the foot of the attack, the fast-follower strike, the ~15 ms
+refinement, the 0.6 soft/main threshold — all unchanged and all still on
+this side.
 
 **Measured**, playing at a realistic −16.5 dBFS peak: hard note strikes
 **1.00** (the absolute map scored the same playing 0.577), and 12 dB below
@@ -755,28 +794,31 @@ resolved the bassy-lead hunt in a single round of field testing:
    configured-but-missing instrument rather than dropping it. §2.2.
 10. Check the **24 dB / 0.2** velocity constants still match on your side —
     they are now a two-rig contract. §2.9.
+11. Optionally drive the strike reference from TENDRIL's loudest capture
+    onset with `sampleVelRefDb` instead of letting the engine observe its
+    own. §2.9.
 
 **Carried forward from the earlier batches:**
 
-11. Light SHIFT from the `leadShiftSteps` echo; soft-limit at
+12. Light SHIFT from the `leadShiftSteps` echo; soft-limit at
     `±floor(3600·edo/periodCents)` steps.
-12. Map HOLD to a momentary CC, **edges only**; drop any latching
+13. Map HOLD to a momentary CC, **edges only**; drop any latching
     assumption.
-13. Add the `harmSustain` toggle (default-on behaviour change).
-14. Recalibrate any portamento presets made against the exponential glide.
-15. Add per-voice detune (`hd`) and the unison-ghost affordance
+14. Add the `harmSustain` toggle (default-on behaviour change).
+15. Recalibrate any portamento presets made against the exponential glide.
+16. Add per-voice detune (`hd`) and the unison-ghost affordance
     (`hm:0` + `hd≠0`).
-16. Replace `refA4` handling with the `refNote`/`refNoteHz` link-up
+17. Replace `refA4` handling with the `refNote`/`refNoteHz` link-up
     assertion; lint `refA4 ≠ 440`.
-17. Add Attack Sound controls; consider the "Pad + pick" macro.
-18. Rescale `hg` controls to −60…+12 with 0 = lead parity.
-19. Add the record send controls. **`processLatencyMs` stays shown, not
+18. Add Attack Sound controls; consider the "Pad + pick" macro.
+19. Rescale `hg` controls to −60…+12 with 0 = lead parity.
+20. Add the record send controls. **`processLatencyMs` stays shown, not
     applied** — one trim per device would drag the dry rows on this rig, so
     it is a readout next to the by-ear trim, not an input to it.
-20. Retire the bassy-guitar mitigation and (optionally) the `harmOn`
+21. Retire the bassy-guitar mitigation and (optionally) the `harmOn`
     link-up assertion.
-21. Delete any reference to `synthEnvActive`.
-22. Put the §8 diagnostics and the 5-step bisection on the panel.
+22. Delete any reference to `synthEnvActive`.
+23. Put the §8 diagnostics and the 5-step bisection on the panel.
 
 ---
 
@@ -829,8 +871,4 @@ each is a real way to lose a sample path silently, but neither was this.
   floor, named in `live/src/corrector.h`. If either side ever moves them,
   the same playing strikes different velocities on each rig — so move them
   together or not at all.
-- **Driving the engine's velocity reference from yours.** The engine
-  currently observes its own (~20 s rolling peak of measured onsets). If
-  you would rather push TENDRIL's "loudest onset of the capture" in, that
-  is a key I have not added because you have not asked for it. Say the
-  word.
+- **Nothing.** `sampleVelRefDb` closed the last one.

@@ -134,6 +134,11 @@ typedef struct
     int      lead_source;            /* the corrected lead: 0/1/2 as above */
     double   sample_mix;             /* 0..1 layer blend, 0.5 = both at unity */
     double   sample_velocity;        /* >= 0 fixed strike level; < 0 = measure */
+    double   sample_vel_ref;         /* SUPPLIED strike-velocity reference as
+                                        a linear peak; < 0 = observe one.
+                                        The map's reference is the caller's
+                                        by definition, so a host that
+                                        already knows it can say so */
     bool     sample_ring;            /* let-ring: a struck voice finishes on
                                         its own decay THROUGH the next
                                         strike. false = damp on repitch */

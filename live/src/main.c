@@ -229,6 +229,7 @@ static void config_defaults (App *app)
     c->params.sample_mix      = 1.0;  /* the sample alone until layered */
     c->params.sample_velocity = -1.0; /* measure it from the lead's attack */
     c->params.sample_ring     = true; /* let-ring: struck notes finish */
+    c->params.sample_vel_ref  = -1.0; /* observe the reference, "auto" */
     c->sample_root[0] = c->sample_manifest[0] = '\0';
     snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
     c->sample_octave = AE_SMP_OCTAVE_AUTO;
@@ -299,6 +300,16 @@ static void config_json (const App *app, char *out, size_t cap)
         snprintf (sample_oct_str, sizeof (sample_oct_str), "\"auto\"");
     else
         snprintf (sample_oct_str, sizeof (sample_oct_str), "%d", c->sample_octave);
+    /* Echoed in the units it is written in: "auto" or dBFS. status carries
+       the reference actually IN FORCE, always a number -- so a pinned rig
+       sees the two agree, and an observing one sees what was found. */
+    char vel_ref_str[16];
+    if (c->params.sample_vel_ref < 0.0)
+        snprintf (vel_ref_str, sizeof (vel_ref_str), "\"auto\"");
+    else
+        snprintf (vel_ref_str, sizeof (vel_ref_str), "%.1f",
+                  c->params.sample_vel_ref > 1e-6
+                      ? 20.0 * log10 (c->params.sample_vel_ref) : -60.0);
     snprintf (out, cap,
               "{\"edo\":%d,\"retuneMs\":%.6g,\"transitionMs\":%.6g,"
               "\"amount\":%.6g,\"toleranceCents\":%.6g,\"stickiness\":%.6g,"
@@ -352,7 +363,11 @@ static void config_json (const App *app, char *out, size_t cap)
     strncat (out, "]", cap - strlen (out) - 1);
 
     /* Harmony (Xentar hm/hx field packing, plus gains/pans/mute/solo). */
-    char harm[512];
+    /* Sized for the LONGEST of the chunks written through it (the harmony
+       and sample block below), not the average: a truncation here is a
+       config echo that parses but is missing keys, which is worse than a
+       hard failure because it looks like a feature-detect miss. */
+    char harm[1024];
     static const char *lock_names[] = { "off", "mask", "ji" };
     snprintf (harm, sizeof (harm),
               ",\"harmSource\":\"%s\",\"leadSource\":\"%s\",\"synthPatch\":\"%s\","
@@ -387,6 +402,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
+              "\"sampleVelRefDb\":%s,"
               "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
               "\"midiMode\":%s,\"midiSource\":\"",
@@ -406,6 +422,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.formant_st,
               c->params.sample_mix, c->params.sample_velocity,
               c->params.sample_ring ? "true" : "false",
+              vel_ref_str,
               c->sample_instrument, sample_oct_str,
               c->send_channel,
               (const char *[]){ "full", "wet", "lead", "harm" }
@@ -645,6 +662,18 @@ static bool config_apply_json (App *app, const char *json)
         c->params.sample_velocity = num < 0.0 ? -1.0 : num_clamp (num, 0.0, 1.0);
     if (ae_json_get_bool (json, "sampleRing", &b))
         c->params.sample_ring = b;
+    /* The strike map's reference, in dBFS. "auto" (default) observes one;
+       a number asserts it, for a host that already knows how hard this
+       player plays -- TENDRIL's loudest onset of the capture, an FX
+       layer's own rolling peak. Stored linear because that is what the
+       map wants; -1 is the "observe" sentinel, which a dB value can never
+       collide with because every legal dB here is <= 0 and stored as a
+       POSITIVE amplitude. */
+    if (ae_json_get_string (json, "sampleVelRefDb", str, sizeof (str))
+        && strcmp (str, "auto") == 0)
+        c->params.sample_vel_ref = -1.0;
+    else if (ae_json_get_number (json, "sampleVelRefDb", &num))
+        c->params.sample_vel_ref = pow (10.0, num_clamp (num, -60.0, 0.0) / 20.0);
     if (ae_json_get_string (json, "samplePath", str2, sizeof (str2)))
     {
         snprintf (c->sample_root, sizeof (c->sample_root), "%s", str2);

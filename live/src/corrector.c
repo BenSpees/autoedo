@@ -709,6 +709,7 @@ void ae_corrector_reset (AeCorrector *p)
        set reads as the loudest so far, because it is -- and the first
        genuinely hard note corrects it for good. */
     p->vel_ref = AE_VEL_REF_MIN;
+    p->vel_ref_fixed = -1.0; /* observe until a host says otherwise */
     memset (p->smp_rr, -1, sizeof (p->smp_rr));
     memset (p->smp, 0, sizeof (p->smp));
     memset (p->smp_cur, 0, sizeof (p->smp_cur));
@@ -993,6 +994,23 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
                 if (k != p->smp_cur[v] && p->smp[v][k].rec != NULL)
                     p->smp[v][k].retiring = true;
     p->smp_ring = ring;
+}
+
+/* Supply the velocity reference instead of observing one. `ref_lin` is a
+   linear peak; negative means observe. Applied on the next block, so a
+   host may re-assert it per phrase without clicking anything: the
+   reference scales velocities, it is not in the audio path. */
+void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin)
+{
+    p->vel_ref_fixed = ref_lin < 0.0 ? -1.0 : (ref_lin > 1.0 ? 1.0 : ref_lin);
+    if (p->vel_ref_fixed >= 0.0)
+    {
+        /* Take effect now rather than at the next onset, so a status read
+           straight after the write agrees with what was asked for. */
+        p->vel_ref = p->vel_ref_fixed;
+        atomic_store_explicit (&p->smp_vel_ref, (float) p->vel_ref,
+                               memory_order_relaxed);
+    }
 }
 
 /* The LEAD's own envelope. Separate control from the harmony's because the
@@ -1301,11 +1319,26 @@ static void detect_onset (AeCorrector *p, int num_samples)
     }
     const double rms = sqrt (sum / num_samples);
 
-    /* Let the velocity reference forget a loud passage. Decay only -- it is
-       raised by measured onsets below, never by sustain, so a long held
-       note cannot talk itself into being a hard strike. */
-    p->vel_ref *= exp (-(double) num_samples / (AE_VEL_REF_TAU_S * p->fs));
-    if (p->vel_ref < AE_VEL_REF_MIN) p->vel_ref = AE_VEL_REF_MIN;
+    /* A supplied reference is held exactly, neither decayed nor raised:
+       the host is asserting what hard playing IS on this rig, and an
+       engine that drifted off it would be quietly disagreeing. Otherwise
+       let the observed reference forget a loud passage -- decay only, since
+       it is raised by measured onsets below and never by sustain, so a long
+       held note cannot talk itself into being a hard strike. */
+    if (p->vel_ref_fixed >= 0.0)
+        p->vel_ref = p->vel_ref_fixed;
+    else
+    {
+        p->vel_ref *= exp (-(double) num_samples / (AE_VEL_REF_TAU_S * p->fs));
+        if (p->vel_ref < AE_VEL_REF_MIN) p->vel_ref = AE_VEL_REF_MIN;
+    }
+    /* Publish every block, not only when an onset closes its window: the
+       reference decays continuously, so a readout that only refreshed on
+       strikes would sit frozen at the last note's value through every
+       silence -- exactly when someone is looking at it to work out why a
+       velocity came out the way it did. */
+    atomic_store_explicit (&p->smp_vel_ref, (float) p->vel_ref,
+                           memory_order_relaxed);
 
     const double a_fast = 1.0 - exp (-(double) num_samples / (0.003 * p->fs));
     const double a_slow = 1.0 - exp (-(double) num_samples / (0.150 * p->fs));
@@ -1340,12 +1373,14 @@ static void detect_onset (AeCorrector *p, int num_samples)
         if (p->vel_win <= 0)
         {
             const double vel = vel_from_peak (p, p->vel_peak);
-            /* A measured onset is the only thing that RAISES the reference,
-               and it does so after being mapped -- so the hardest note in
-               the last ~20 s reads 1.0 and sets the bar for the rest. */
-            if (p->vel_peak > p->vel_ref) p->vel_ref = p->vel_peak;
-            atomic_store_explicit (&p->smp_vel_ref, (float) p->vel_ref,
-                                   memory_order_relaxed);
+            /* A measured onset is the only thing that RAISES an OBSERVED
+               reference, and it does so after being mapped -- so the
+               hardest note in the last ~20 s reads 1.0 and sets the bar for
+               the rest. A supplied one is never raised; the max() inside
+               the map still keeps a louder-than-reference note at unity
+               rather than above it. */
+            if (p->vel_ref_fixed < 0.0 && p->vel_peak > p->vel_ref)
+                p->vel_ref = p->vel_peak;
             atomic_store_explicit (&p->smp_vel_out, (float) vel, memory_order_relaxed);
             /* Refine the strike this window was measuring -- the LEVEL of
                the note now sounding, not the next one's. Only the level:

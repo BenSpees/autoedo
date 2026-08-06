@@ -315,6 +315,14 @@ typedef struct
        rig's actual headroom instead of assuming the signal reaches full
        scale. See vel_from_peak. */
     double vel_ref;
+    /* A reference SUPPLIED by the caller (linear peak), overriding the
+       observation above. < 0 = observe. The map's reference is the
+       caller's by definition -- "how hard this player plays when playing
+       hard" is a fact about the performance, and a host that already knows
+       it (TENDRIL's loudest onset of the capture, an FX layer's own rolling
+       peak) should not have to wait for this engine to rediscover it from
+       the notes it happens to hear. */
+    double vel_ref_fixed;
 
     struct
     {
@@ -560,6 +568,10 @@ void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
    own attack. */
 void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
                               bool ring);
+/* Supply the strike-velocity reference (linear peak) instead of letting
+   the engine observe one; negative = observe. See vel_ref_fixed. */
+void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin);
+
 /* The LEAD voice's attack and release, in ms. Distinct from the harmony's
    (ae_corrector_set_synth): the harmony envelope hides the ghosts' arrival
    latency, this one shapes the corrected lead itself. */

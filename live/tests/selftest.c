@@ -2881,6 +2881,108 @@ static void test_velocity_relative (void)
    The probe is the slot table rather than the radiated audio, because the
    voiced gate and the harmony envelope both shape the output and would
    mask exactly the thing under test. */
+/* A SUPPLIED velocity reference. The map's reference is the caller's by
+   definition -- "how hard this player plays when playing hard" is a fact
+   about the performance, not about this engine -- so a host that already
+   knows it (TENDRIL's loudest onset of the capture) can assert it instead
+   of waiting for the engine to rediscover it note by note. The probe is
+   identical playing under two different references: under observation both
+   would read 1.0, because the note IS the loudest heard so far. */
+static void test_velocity_ref_supplied (void)
+{
+    const char *root = "/tmp/ae-smp-vref";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "vel ref: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir); write_wav (pth, 261.6256, 3.0, 0.5);
+
+    const double hard = 0.15;                 /* -16.5 dBFS peak */
+    /* At the note's own level, 12 dB above it, and 12 dB BELOW it. The
+       third case is the one that pins down "held, not raised": an observed
+       reference would climb to meet the note, a supplied one must not. */
+    const double refs[3] = { hard, hard * 3.98107, hard / 3.98107 };
+    double got[3] = { -1.0, -1.0, -1.0 }, seen[3] = { 0.0, 0.0, 0.0 };
+
+    for (int c = 0; c < 3; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        if (! ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)))
+        { CHECK (false, "vel ref: bank load (%s)", err); free (p); return; }
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v) voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_sample (p, 1.0, -1.0, false);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
+        ae_corrector_set_vel_ref (p, refs[c]);
+
+        const int gap = 36864, note = 36864, total = gap + note;
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = gap; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            in[i] = (float) ((hard / 1.13) * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+            if (off >= gap + 9600 && off < gap + 12000)
+                got[c] = p->smp[0][p->smp_cur[0]].gain;
+        }
+        seen[c] = (double) ae_corrector_sample_vel_ref (p);
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+
+    CHECK (got[0] > 0.95,
+           "supplied reference at the note's own level strikes full (%.3f)",
+           got[0]);
+    CHECK (got[1] > 0.50 && got[1] < 0.70,
+           "a reference 12 dB ABOVE the playing scores it mid-window (%.3f, "
+           "want ~0.60); under observation this same note reads 1.0, which "
+           "is what makes the supplied reference do anything at all", got[1]);
+    /* A reference BELOW the playing: the map's max() still keeps the note
+       at unity rather than above it, and -- the point of this case -- the
+       reference itself does not climb to meet the note the way an observed
+       one would. */
+    CHECK (got[2] > 0.95,
+           "a reference below the playing still lands the note at unity, "
+           "never past it (%.3f)", got[2]);
+    CHECK (fabs (seen[2] - refs[2]) < 1e-4,
+           "a supplied reference is HELD, not raised by a louder note "
+           "(%.4f vs %.4f asked for; an observed reference would have "
+           "climbed to %.4f)", seen[2], refs[2], hard);
+    CHECK (fabs (seen[1] - refs[1]) < 1e-4,
+           "a supplied reference is not decayed either (%.4f vs %.4f)",
+           seen[1], refs[1]);
+
+    /* Negative hands the reference back to observation. */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_vel_ref (p, 0.5);
+        ae_corrector_set_vel_ref (p, -1.0);
+        CHECK (p->vel_ref_fixed < 0.0,
+               "sampleVelRefDb 'auto' returns the reference to observation");
+        ae_corrector_free (p); free (p);
+    }
+
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_sample_ring (void)
 {
     const char *root = "/tmp/ae-smp-ring";
@@ -3157,6 +3259,7 @@ int main (void)
     test_sample_ghost();
     test_sample_velocity();
     test_velocity_relative();
+    test_velocity_ref_supplied();
     test_sample_ring();
     test_lead_envelope();
     test_bypass_output();
