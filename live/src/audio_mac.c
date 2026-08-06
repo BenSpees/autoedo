@@ -413,6 +413,11 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, (int) n);
 
     const float *src = bypass ? e->dry : e->proc;
+    /* bypassOutput: what bypass PUTS on the output. "dry" passes the input
+       through (byp_g 1), "mute" puts silence there (byp_g 0) for a rig
+       whose dry already reaches the desk on its own row. Scaling the dry
+       rather than branching keeps bypass a single decision. */
+    const float  byp_g = ae_bypass_gain (&mix);
     const bool   stereo = (int) io->mNumberBuffers - (e->send_client >= 0 ? 1 : 0) >= 2;
 
     float pk = atomic_load_explicit (&e->out_peak, memory_order_relaxed) * 0.98f;
@@ -441,7 +446,7 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
                     case AE_SEND_LEAD: sv = wet ? wet[i] : 0.0f;       break;
                     case AE_SEND_HARM: sv = hm;                        break;
                     default: /* FULL: exactly the live mono mix */
-                        sv = (bypass ? e->dry[i]
+                        sv = (bypass ? byp_g * e->dry[i]
                                      : (lead ? lead_g * src[i] : 0.0f) + hm)
                            * gain;
                         break;
@@ -457,7 +462,7 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
             if (i >= n) { dst[i] = 0.0f; continue; }
             /* Lead mute is harmony-only output; bypass still wins (a dry
                passthrough with the lead "muted" would be silence). */
-            float s = bypass ? src[i] : (lead ? lead_g * src[i] : 0.0f);
+            float s = bypass ? byp_g * src[i] : (lead ? lead_g * src[i] : 0.0f);
             if (! bypass)
                 s += harm != NULL ? harm[i]
                                   : 0.5f * (e->harm_l[i] + e->harm_r[i]); /* mono out */
@@ -595,6 +600,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
     out->lead_makeup     = ae_corrector_lead_makeup (&e->corrector);
     out->sample_vel      = ae_corrector_sample_vel (&e->corrector);
+    out->sample_vel_ref  = ae_corrector_sample_vel_ref (&e->corrector);
     {
         const int lv = atomic_load_explicit (&e->corrector.smp_live, memory_order_relaxed);
         out->sample_zones = lv >= 0 ? e->corrector.smp_bank[lv].n_zones : 0;

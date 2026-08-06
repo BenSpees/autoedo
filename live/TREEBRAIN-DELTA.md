@@ -1,4 +1,4 @@
-# AutoEDO → Treebrain: handoff spec for engine `main@cf43a03`
+# AutoEDO → Treebrain: handoff spec for engine `main@HEAD`
 
 Companion to Treebrain's `docs/AUTOEDO-CONTROL.md`, and a digest of
 `live/CONTROL.md` (the authoritative reference — this file is the *delta*,
@@ -10,9 +10,13 @@ key and doesn't need one: **feature-detect by key presence in the
 in the order the batches landed:
 
 `harmGainDb` → `harmHold` → `leadShiftSteps` → `attackSound` →
-`sampleInstrument` → **`expression`**
+`sendChannel` → `sampleInstrument` → `expression` → **`sampleRing`**
 
-A rig that sees `expression` echoed has everything in this document.
+This is the one authoritative ordering — it is the order the batches
+actually landed in, and `sendChannel` sits where it does because the record
+send shipped before the sample work. A rig that sees `sampleRing` echoed
+has everything in this document. Probing any key later in the chain implies
+every key before it.
 `status.engineBuild` carries the git short hash of the running binary —
 put it in the diagnostics panel and in every future report, so "which
 build" is never a question anyone has to ask.
@@ -125,12 +129,13 @@ re-read only when the binding actually moves).
 | `sampleHash` | string | live (reloads) | the librarian's "library changed" token. 120 WAVs is not a per-POST operation |
 | `sampleInstrument` | string | live (reloads) | which folder to load. **No whitelist in the engine** — see §2.2 |
 | `sampleMix` | float 0–1 | live | layer blend against the shifted rendering of the same ghost. `0` = shifted alone, `1` = sample alone, **`0.5` = both at unity** — see §2.7 |
-| `sampleVelocity` | float −1…1 | live | fixed strike level; **`-1` (default) = measure it** from the lead's attack |
+| `sampleVelocity` | float **−1…1** | live | fixed strike level. **Any negative value = measure it**; `-1` is canonical and the default. `0…1` pins and bypasses the map (a pinned `0` is silence, not the floor). The range is −1…1, not 0…1 — that is the answer to "pick one": the sentinel has to live in the same key, and it is echoed as `-1` |
+| `sampleRing` | bool | live | **let-ring**, default `true` — see §2.8 |
 | `sampleOctave` | `"auto"` \| int −24…+24 | live (reloads) | filename→**sounding** pitch offset — see §2.4 |
 
 Status: `sampleInstruments`, `sampleNormDb`, `sampleOctaveApplied`,
-`sampleClipped`, `sampleVelLast`, `sampleZones`, `sampleFiles`,
-`sampleError`. A failed load **leaves the running bank playing** — a bad
+`sampleClipped`, `sampleVelLast`, `sampleVelRefDb`, `sampleZones`,
+`sampleFiles`, `sampleError`. A failed load **leaves the running bank playing** — a bad
 path mid-set is a message, not a hole.
 
 ### 2.2 Build the SOUND picker from `sampleInstruments`, not a hardcoded list
@@ -254,15 +259,17 @@ retrigger starts a fresh slot across a 6 ms fade rather than cutting a
 sounding one (Xentar's node-swap discipline, ported to a language with no
 nodes).
 
-- **Velocity is a measurement.** Peak over the first 30 ms from the foot of
-  the attack, across 40 dB (−40 dBFS → 0, 0 dBFS → 1). The strike cannot
-  *wait* for that window without giving back the latency the feature exists
-  to hide, so a voice is struck at the fast follower's reading and the
-  window's verdict refines it over a ~15 ms ramp — a level correction that
-  slides reads as the note settling; a step reads as a second event. Level
-  only: the soft/main layer is a different recording, committed at the
-  strike, and is the one thing measuring cannot fix without delaying it.
-  Echoed as `sampleVelLast`. `sampleVelocity ≥ 0` pins it instead.
+- **Velocity is a measurement, and it is RELATIVE — your map, adopted
+  verbatim.** See §2.9; the absolute window this document previously
+  specified was the defect you had already fixed, and re-shipping it was my
+  error. The strike cannot *wait* for the 30 ms window without giving back
+  the latency the feature exists to hide, so a voice is struck at the fast
+  follower's reading and the window's verdict refines it over a ~15 ms ramp
+  — a level correction that slides reads as the note settling; a step reads
+  as a second event. Level only: the soft/main layer is a different
+  recording, committed at the strike, and is the one thing measuring cannot
+  fix without delaying it. Echoed as `sampleVelLast`, with the reference it
+  is relative to as `sampleVelRefDb`.
 - **The soft layer is TIMBRE, not level.** `<Note>_soft` files are
   softer-*played* recordings peak-matched to the main layer; loudness comes
   only from the velocity gain. Below velocity 0.6 the soft pool is
@@ -291,7 +298,94 @@ a **ratio** test, so a note much quieter than the last one, soon after it,
 is inside the previous note's decay and is deliberately *not* an edge.
 That governs the attack sound too.
 
-### 2.8 `harmLock: "mask"` breaks a tie away from the lead
+### 2.8 `sampleRing` — let-ring
+
+bool, **default `true`**. A struck sample voice plays to its natural end
+*through* the next strike. `false` is the previous behaviour:
+damp-on-repitch legato, the sounding voice retired across a 6 ms fade as
+the new one is struck.
+
+Default-on because it is what the instruments in this library actually do
+— pizzicato, piano and vibraphone all ring past the note that follows them,
+and damping every one of them at the next onset is a choice nobody made
+deliberately. A fast figure now stacks into the chord a real instrument
+would leave ringing, because the next note is a **new string**, not this
+one being re-fretted.
+
+Implementation notes that matter to a controller:
+
+- **Four playback slots per voice**, not two. Two is enough to crossfade a
+  retrigger past a dying note; let-ring needs a ring, because every slot is
+  a note still sounding on its own decay. A fifth strike steals the slot
+  furthest through its recording — the oldest, and by then the quietest, so
+  it is the least audible steal available.
+- **Only the most recent strike is re-pitched.** The others keep their own
+  pitch, which is what makes the ring a chord rather than a glissando.
+- **The release is the ceiling.** `synthReleaseMs` (ghosts) and
+  `leadReleaseMs` (lead) close a ringing note that would otherwise outlast
+  the phrase. Let-ring does not mean unbounded.
+- **Turning it off damps what is already ringing** rather than stranding
+  it, so the switch is heard as the damper coming down instead of as
+  nothing until the next note.
+
+### 2.9 The strike velocity map is RELATIVE — your map, adopted verbatim
+
+**You were right and I re-shipped a defect you had already fixed.** The
+previous version of this document specified velocity from an absolute
+window (−40 dBFS → 0, full scale → 1). That is what the engine did, and it
+was wrong for exactly the reason your 2026-08-05 addendum gives: a real
+interface leaves 12–20 dB of headroom, so hard playing peaks at −12…−20
+dBFS and never approaches full scale. The map was scoring the gain staging
+rather than the playing — every velocity on the rig sat in the bottom half
+of its range, and quiet notes fell off the bottom and vanished.
+
+Adopted verbatim, constants included:
+
+```
+ref   = max(refPeak, peak)            // never asks for more than unity
+below = 20·log10(peak / ref)          // <= 0 dB
+t     = clamp(1 + below / 24, 0, 1)   // a 24 dB window below the reference
+vel   = 0.2 + 0.8·t                   // floor 0.2
+```
+
+**24 dB window, 0.2 floor.** Treat these as a contract between the two
+rigs: changed in one place and not the other, the same playing strikes
+different velocities on each. They are named constants in
+`live/src/corrector.h` with a comment saying so.
+
+Everything else you specified is unchanged: the fast-follower strike with
+the ~15 ms refinement stays, the soft/main threshold is still 0.6, and the
+layer is still committed at the strike.
+
+**The reference is the caller's, and here the engine is the caller**, so it
+keeps its own — a rolling peak of measured onsets decaying over ~20 s, the
+same shape as your FX layer's. Three details worth matching:
+
+- Raised **only by measured onsets**, never by sustain, so a long held note
+  cannot talk itself into being a hard strike.
+- Never decays below −40 dBFS, so a silent rig maps its own noise floor to
+  the velocity floor rather than to fortissimo.
+- **Starts at that floor, not at a plausible seed.** Seeding it with a
+  likely "playing hard" level sounds reasonable and is not: the seed then
+  outranks the player until it decays, and every note until then is scored
+  against a number nobody played. Starting low costs exactly one note — the
+  first of a set reads as the loudest so far, because it is — and the first
+  genuinely hard note fixes it for good. (I tried the seed first. It put
+  the hard note at 0.85 instead of 1.0 and the 12-dB-down note at 0.49
+  instead of 0.60, which is the same bug in a smaller size.)
+
+Reported as **`sampleVelRefDb`** in status. A relative map is unreadable
+from outside without it — `sampleVelLast: 0.55` says nothing until you know
+what it is 0.55 *of*. TENDRIL's "loudest onset of the capture" is the same
+quantity from a different source; if you ever want to drive the engine's
+reference from yours instead of letting it observe, say so and I will add
+the key.
+
+**Measured**, playing at a realistic −16.5 dBFS peak: hard note strikes
+**1.00** (the absolute map scored the same playing 0.577), and 12 dB below
+the reference lands at **0.60** — mid-window, as the formula says.
+
+### 2.10 `harmLock: "mask"` breaks a tie away from the lead
 
 No key added. On a tie the walk now goes **away** from the lead — up for a
 ghost above, down for one below — so a third stops collapsing onto a second
@@ -320,8 +414,9 @@ stops collapsing.
    long-standing `latencyMs`, added under the name you probe for):
    input-to-output at current settings, algorithmic plus buffering. It
    moves with `quality`, devices and `bufferFrames` — re-read from the echo
-   after any restart-scoped write. Feed it to `captureOffsetMs`
-   automatically; keep the by-ear trim as an override.
+   after any restart-scoped write. **Shown, not applied** on this rig, per
+   your call: one trim per device would drag the dry rows, so it is a
+   readout beside the by-ear trim rather than an input to it.
 3. **No cable**: option (a) as you preferred — aim `sendChannel` at a spare
    output pair and let a loopback-capable interface close it internally.
    The UDP/shared-memory tap was considered and deliberately not built
@@ -377,6 +472,50 @@ touching the stage.
 ## 5. The rest of the config keys
 
 All `POST /api/config`, all echoed.
+
+### `bypassOutput` — what `bypass: true` puts on the output
+`"dry"` (default) | `"mute"`, live.
+
+`dry` is the historical behaviour: the input passes through uncorrected.
+`mute` puts silence there instead — for a rig whose dry already reaches the
+desk on its own row, where a passthrough is a second copy of a signal the
+mix already has. **This retires the stateful `outputGainDb: -60` dance**
+(drop the fader, remember what it was, restore it on un-bypass, get it
+wrong once and the channel is dead for a song) with one switch that has no
+level to put back.
+
+Scope is exactly what it says: it decides what *bypass* does and nothing
+else. With `bypass` false the live path is untouched either way, so it is
+safe to assert once at link-up and leave.
+
+### `leadAttackMs` / `leadReleaseMs` — the LEAD's own envelope
+`leadAttackMs` float 0–5000, default **5** (the click guard: no shaping).
+`leadReleaseMs` float 5–10000, default **500**. Both live.
+`synthAttackMs` / `synthReleaseMs` remain the HARMONY's and are unchanged.
+
+Separate keys because the two envelopes shape different things: the harmony
+envelope hides the ghosts' arrival latency, this one shapes the corrected
+lead itself.
+
+What the release buys depends on the lead source, and the difference is not
+a wart — it is what each source *is*:
+
+- **Synth lead** — an oscillator, so this is a real tail at its last pitch.
+  Previously the lead had no release at all and was cut by the voicing
+  gate; it now leaves the way the ghosts do.
+- **Sample lead** — a recording, so this is a **ceiling** over its natural
+  decay. Under `sampleRing` that is what stops a let-ringing figure from
+  ringing past the end of the phrase, which is the pairing the two keys
+  exist for.
+- **Shifted lead** — made *of* the input, so once the input stops there is
+  nothing left to sustain and the release is **inert by construction**. It
+  has to be: a shifted lead crossfades to the dry path when the voicing
+  drops, and a lingering wet would sound every consonant twice. The attack
+  still shapes its arrival.
+
+Surface both, but expect the release control to read as doing nothing on a
+`leadSource: "voice"` channel — that is correct, not a bug, and worth a
+tooltip rather than a hidden control.
 
 ### `leadShiftSteps` — the SHIFT control
 int, −72…+72, live. Static transpose of the corrected lead in EDO steps,
@@ -550,6 +689,7 @@ instead of a description.
 | `processLatencyMs` | drives `captureOffsetMs` |
 | `sendError`, `irError`, `sampleError` | non-empty = a write was refused, with the reason |
 | `sampleClipped`, `sampleNormDb`, `sampleOctaveApplied` | §2.3–2.5 |
+| `sampleVelLast`, `sampleVelRefDb` | the last strike level **and what it is relative to**. The second is not optional decoration: with a relative map, a velocity of 0.55 is unreadable without its reference. §2.9 |
 
 **Port the 5-step wrong-lead bisection** (`live/CONTROL.md` §4, "Diagnosing
 a wrong-sounding lead") into whatever runbook Treebrain shows the user. It
@@ -567,13 +707,17 @@ resolved the bassy-lead hunt in a single round of field testing:
 ## 9. CC / posting guidance
 
 - `harmHold`: **edges only** (§5).
-- `harmGainDb`, `attackGainDb`, `hg`, `hp`, `expression`: safe to sweep —
+- `harmGainDb`, `attackGainDb`, `hg`, `hp`, `expression`, `leadAttackMs`,
+  `leadReleaseMs`: safe to sweep —
   the engine smooths (~5 ms) — but coalesce CC floods; one POST per UI tick
   (≤ ~30 Hz) is plenty. Every POST returns the full fresh echo.
 - `leadShiftSteps`, `hm`, `hx`: step-valued; post on change only.
+- `bypassOutput`, `sampleRing`: assert once at link-up; they are mode
+  switches, not performance controls.
 - Restart-scoped keys (`detectMinHz`, `detectMaxHz`, `range`, `quality`,
-  devices, `bufferFrames`, `sendChannel`, `outputChannel`): batch into one
-  POST — each restart-key POST restarts the engine once.
+  devices, `bufferFrames`, **`sendChannel`**, `outputChannel`): batch into
+  one POST — each restart-key POST restarts the engine once. `sendChannel`
+  is restart-scoped; see answer (a) in §11.
 - Sample binding keys reload the bank; move `sampleHash` only when the
   library actually changed.
 
@@ -583,53 +727,110 @@ resolved the bassy-lead hunt in a single round of field testing:
 
 **Do first — audible:**
 
-1. Add the **`expression`** slider (0–1, default 1). §1.
-2. Apply the note-centre / expression split to **TENDRIL capture snap and
+1. **Nothing.** The four keys you asked for — `bypassOutput`, `sampleRing`,
+   `leadAttackMs`, `leadReleaseMs` — are live and echoed, so the code you
+   already feature-detected against lights up on the next engine build.
+   Confirm with `sampleRing` in the config echo. §2.8, §5.
+2. Add the **`expression`** slider (0–1, default 1). §1.
+3. Apply the note-centre / expression split to **TENDRIL capture snap and
    `fxSnapSteps`**, with the octave-re-vote guard restructured to test the
    detected jump alone. §1.
-3. Fix the **bass −12 / harpsichord +12** sounding octave in Treebrain's
+4. Fix the **bass −12 / harpsichord +12** sounding octave in Treebrain's
    own player. §2.4.
 
 **Do next — the silent-samples hunt:**
 
-4. `encodeURIComponent` every path segment in the sample fetch path. §2.6.
-5. Refuse and report wrong-rate cache files instead of failing silently.
-   §2.6.
+5. ~~`encodeURIComponent` every path segment in the sample fetch path.~~
+   **Closed** — the cause was `samplePath` never actually being sent, fixed
+   rig-side. Both traps in §2.6 stay documented; neither was it.
+6. Refuse and report wrong-rate cache files instead of failing silently.
+   Still worth doing on its own merit. §2.6.
 
 **Correctness and staleness:**
 
-6. Measure each bank at load (median RMS, first 300 ms, main layer only)
+7. Measure each bank at load (median RMS, first 300 ms, main layer only)
    and normalise to −22 dBFS; drop `levelConst`. §2.3.
-7. Count full-scale samples per bank and surface it. §2.5.
-8. Build the SOUND picker from `status.sampleInstruments`; mark a
+8. Count full-scale samples per bank and surface it. §2.5.
+9. Build the SOUND picker from `status.sampleInstruments`; mark a
    configured-but-missing instrument rather than dropping it. §2.2.
+10. Check the **24 dB / 0.2** velocity constants still match on your side —
+    they are now a two-rig contract. §2.9.
 
 **Carried forward from the earlier batches:**
 
-9. Light SHIFT from the `leadShiftSteps` echo; soft-limit at
-   `±floor(3600·edo/periodCents)` steps.
-10. Map HOLD to a momentary CC, **edges only**; drop any latching
+11. Light SHIFT from the `leadShiftSteps` echo; soft-limit at
+    `±floor(3600·edo/periodCents)` steps.
+12. Map HOLD to a momentary CC, **edges only**; drop any latching
     assumption.
-11. Add the `harmSustain` toggle (default-on behaviour change).
-12. Recalibrate any portamento presets made against the exponential glide.
-13. Add per-voice detune (`hd`) and the unison-ghost affordance
+13. Add the `harmSustain` toggle (default-on behaviour change).
+14. Recalibrate any portamento presets made against the exponential glide.
+15. Add per-voice detune (`hd`) and the unison-ghost affordance
     (`hm:0` + `hd≠0`).
-14. Replace `refA4` handling with the `refNote`/`refNoteHz` link-up
+16. Replace `refA4` handling with the `refNote`/`refNoteHz` link-up
     assertion; lint `refA4 ≠ 440`.
-15. Add Attack Sound controls; consider the "Pad + pick" macro.
-16. Rescale `hg` controls to −60…+12 with 0 = lead parity.
-17. Add the record send controls and feed `processLatencyMs` into
-    `captureOffsetMs`.
-18. Retire the bassy-guitar mitigation and (optionally) the `harmOn`
+17. Add Attack Sound controls; consider the "Pad + pick" macro.
+18. Rescale `hg` controls to −60…+12 with 0 = lead parity.
+19. Add the record send controls. **`processLatencyMs` stays shown, not
+    applied** — one trim per device would drag the dry rows on this rig, so
+    it is a readout next to the by-ear trim, not an input to it.
+20. Retire the bassy-guitar mitigation and (optionally) the `harmOn`
     link-up assertion.
-19. Delete any reference to `synthEnvActive`.
-20. Put the §8 diagnostics and the 5-step bisection on the panel.
+21. Delete any reference to `synthEnvActive`.
+22. Put the §8 diagnostics and the 5-step bisection on the panel.
 
 ---
 
-## 11. Open on my side
+## 11. Answers, and what's still open
 
-- **Your layer-blend taper.** §2.7 — tell me the curve and I'll match it.
-- **Samples silent in Treebrain's own player.** Three candidates in §2.6;
-  I have no visibility into which. If none of them is it, send me the
-  failing path and I'll look.
+**(a) `sendChannel` scope: RESTART.** Verified in code — the write sets the
+restart flag (`live/src/main.c`, the `sendChannel` branch) because the
+channel lives in the device channel map, same scope as `outputChannel`.
+`CONTROL.md` says restart too, in the send table; if a copy on your side
+says live, it is a third source and it is wrong. Batch it with
+`outputChannel` — each restart-key POST restarts the engine once.
+
+**(b) `sampleClipped` unit: FILES.** One increment per recording with 8 or
+more full-scale samples, not a sum of samples. The 32-vs-23 gap is real and
+measured, not a counting bug: **32 files were re-exported, 23 of them
+tripped the test.** Nine of the mis-decoded files never reached full scale
+— a quiet enough recording survives the wrong bit depth without pinning.
+So read the counter as *"at least this many files are corrupt"*: it detects
+the loud consequence of the fault, not the fault, and zero is meaningful
+while a small number is a floor. (Re-measured both sets from the caches to
+answer this: ORIG 78 files / 23 clipped, FIXED 78 / 0, 32 files differing.)
+
+**(c) Feature-detect chain — one authoritative ordering**, now at the top
+of this document and nowhere else:
+
+```
+harmGainDb → harmHold → leadShiftSteps → attackSound → sendChannel
+           → sampleInstrument → expression → sampleRing
+```
+
+`sendChannel` sits between `attackSound` and `sampleInstrument` because the
+record send shipped between those two batches. Probing any key implies
+every key before it.
+
+**(d) `processLatencyMs` → `captureOffsetMs`: dropped from the checklist**
+as asked. It now reads "shown, not applied", with your reason recorded (one
+trim per device would drag the dry rows). It stays in the status table as a
+readout next to the by-ear trim.
+
+**(e) Samples silent in Treebrain: CLOSED.** `samplePath` was never
+actually sent; fixed rig-side. Both traps in §2.6 stay documented since
+each is a real way to lose a sample path silently, but neither was this.
+
+**(f) Layer-blend taper: MATCHED.** Both sides use
+`g = sin(min(1, 2d)·π/2)` with the unity plateau at 0.5. Nothing to do.
+
+### Still open
+
+- **The velocity constants are now a two-rig contract.** 24 dB window, 0.2
+  floor, named in `live/src/corrector.h`. If either side ever moves them,
+  the same playing strikes different velocities on each rig — so move them
+  together or not at all.
+- **Driving the engine's velocity reference from yours.** The engine
+  currently observes its own (~20 s rolling peak of measured onsets). If
+  you would rather push TENDRIL's "loudest onset of the capture" in, that
+  is a key I have not added because you have not asked for it. Say the
+  word.

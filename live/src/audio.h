@@ -49,6 +49,12 @@ typedef struct
     uint64_t degrees_lo;      /* bit d set => scale degree d enabled (d 0..63) */
     uint64_t degrees_hi;      /* degrees 64..71 in bits 0..7 */
     bool     bypass;          /* true = pass input through uncorrected */
+    bool     bypass_mute;     /* what bypass PUTS on the output: false (the
+                                 default) = the dry passthrough, true =
+                                 silence. A rig whose dry already reaches the
+                                 desk on its own row wants silence, and
+                                 saying so is a plain switch instead of a
+                                 stateful output_gain_db dance. */
     double   output_gain_db;  /* -60..+12 */
     bool     lead_on;         /* corrected lead voice in the mix; false =
                                  harmony only (bypass still wins). NOTE:
@@ -128,13 +134,18 @@ typedef struct
     int      lead_source;            /* the corrected lead: 0/1/2 as above */
     double   sample_mix;             /* 0..1 layer blend, 0.5 = both at unity */
     double   sample_velocity;        /* >= 0 fixed strike level; < 0 = measure */
+    bool     sample_ring;            /* let-ring: a struck voice finishes on
+                                        its own decay THROUGH the next
+                                        strike. false = damp on repitch */
     int      synth_patch;            /* index into the engine's patch table */
     double   ensemble_depth;         /* 0..1 */
     double   synth_vowel;            /* 0..1 formant transfer */
     double   harm_tilt_db;           /* -12..+12 harmony tone tilt */
     int      vowel_mode;             /* 0 channel vocoder, 1 LPC */
-    double   synth_attack_ms;        /* 0..5000 */
-    double   synth_release_ms;       /* 0..10000 */
+    double   synth_attack_ms;        /* 0..5000, the HARMONY's */
+    double   synth_release_ms;       /* 0..10000, the HARMONY's */
+    double   lead_attack_ms;         /* 0..5000, the LEAD's own */
+    double   lead_release_ms;        /* 5..10000, the LEAD's own */
 
     /* The drone: one synth voice pinned to an absolute engine degree,
        sustained while on (a root-only chart chord means "drone that
@@ -159,6 +170,7 @@ typedef struct
 typedef struct
 {
     bool  bypass;
+    bool  bypass_mute;
     bool  lead_on;
     float lead_gain;
     float master_gain;
@@ -224,6 +236,7 @@ typedef struct
                                10 Hz status ticks are still visible */
     float  shift_st_max;
     float  sample_vel;      /* last strike level the sample voices used */
+    float  sample_vel_ref;  /* linear peak the strike map is relative TO */
     int    sample_zones;    /* loaded bank: distinct recording pitches */
     int    sample_files;    /* ...and total recordings behind them */
     float  sample_norm_db;  /* level normalisation the bank measured for

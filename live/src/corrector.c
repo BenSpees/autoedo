@@ -701,6 +701,14 @@ void ae_corrector_reset (AeCorrector *p)
     p->smp_gain_a = 1.0 - exp (-1.0 / (0.015 * p->fs));
     p->onset_pulse = false;
     p->vel_win = 0; p->vel_peak = 0.0;
+    /* Start at the floor, so the reference is OBSERVED rather than assumed.
+       Seeding it with a plausible "playing hard" level instead sounds
+       reasonable and is not: the seed then outranks the player for as long
+       as it takes to decay, and every note until then is scored against a
+       number nobody played. Starting low costs one note -- the first of a
+       set reads as the loudest so far, because it is -- and the first
+       genuinely hard note corrects it for good. */
+    p->vel_ref = AE_VEL_REF_MIN;
     memset (p->smp_rr, -1, sizeof (p->smp_rr));
     memset (p->smp, 0, sizeof (p->smp));
     memset (p->smp_cur, 0, sizeof (p->smp_cur));
@@ -708,6 +716,8 @@ void ae_corrector_reset (AeCorrector *p)
     memset (p->smp_wait, 0, sizeof (p->smp_wait));
     memset (p->smp_env, 0, sizeof (p->smp_env));
     atomic_store_explicit (&p->smp_vel_out, 0.7f, memory_order_relaxed);
+    atomic_store_explicit (&p->smp_vel_ref, (float) p->vel_ref, memory_order_relaxed);
+    p->lead_env = 0.0;
     p->atk_last_dir   = 0;
     if (p->atk_gain <= 0.0)
         p->atk_gain = pow (10.0, -26.0 / 20.0); /* Xentar's shipped 5% */
@@ -969,10 +979,29 @@ static void capture_sustain (AeCorrector *p, long long end)
     p->sus_read = 0;
 }
 
-void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity)
+void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
+                              bool ring)
 {
     p->smp_mix = mix < 0.0 ? 0.0 : (mix > 1.0 ? 1.0 : mix);
     p->smp_vel_fixed = velocity < 0.0 ? -1.0 : (velocity > 1.0 ? 1.0 : velocity);
+    /* Turning let-ring OFF must not strand notes that are already ringing:
+       retire them the way a strike would, so the switch is heard as the
+       damper coming down rather than as nothing until the next note. */
+    if (p->smp_ring && ! ring)
+        for (int v = 0; v <= AE_HARM_VOICES; ++v)
+            for (int k = 0; k < AE_SMP_SLOTS; ++k)
+                if (k != p->smp_cur[v] && p->smp[v][k].rec != NULL)
+                    p->smp[v][k].retiring = true;
+    p->smp_ring = ring;
+}
+
+/* The LEAD's own envelope. Separate control from the harmony's because the
+   two shape different things -- see the note in the header. */
+void ae_corrector_set_lead_env (AeCorrector *p, double attack_ms,
+                                double release_ms)
+{
+    p->lead_attack_ms  = dclamp (attack_ms, 0.0, 5000.0);
+    p->lead_release_ms = dclamp (release_ms, 0.0, 10000.0);
 }
 
 void ae_corrector_set_sample_octave (AeCorrector *p, int semitones)
@@ -1000,14 +1029,37 @@ bool ae_corrector_load_samples (AeCorrector *p, const char *root,
     return true;
 }
 
-/* Peak amplitude -> strike level, across 40 dB: -40 dBFS is 0, full scale
-   is 1. Used for both the estimate at the strike and the measurement that
-   refines it, so the two are on the same scale by construction. */
-static double vel_from_peak (double peak)
+/* Peak amplitude -> strike level, RELATIVE to how hard this player plays
+   when playing hard.
+
+   This used to be an absolute map: -40 dBFS is 0, full scale is 1. That
+   design was field-verified wrong, and the reason is worth keeping written
+   down because it is invisible from a synthetic test. A real interface is
+   set up with 12-20 dB of headroom, so hard playing peaks at -12..-20
+   dBFS and NEVER approaches full scale. Under the absolute map every
+   velocity on the rig therefore sat in the bottom half of its range --
+   hard playing read as medium, and anything played quietly fell off the
+   bottom and vanished. The map was measuring the gain staging, not the
+   playing.
+
+   So the reference is the CALLER's, not the format's: the loudest the
+   player has been recently. `ref = max(refPeak, peak)` means the map never
+   asks for more than unity even when the reference is stale low, a 24 dB
+   window below it spans the useful dynamic range of a plucked or struck
+   note, and the 0.2 floor keeps a note the detector CONFIRMED from being
+   struck near-silent -- a quiet note is a quiet note, not an absent one.
+
+   Shared by the estimate at the strike and by the measurement that refines
+   it, so the two stay on one scale by construction. */
+static double vel_from_peak (const AeCorrector *p, double peak)
 {
-    const double db = peak > 1e-6 ? 20.0 * log10 (peak) : -120.0;
-    const double v = (db + 40.0) / 40.0;
-    return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+    if (peak <= 1e-9)
+        return AE_VEL_FLOOR;
+    const double ref   = p->vel_ref > peak ? p->vel_ref : peak;
+    const double below = 20.0 * log10 (peak / ref); /* <= 0 by construction */
+    double t = 1.0 + below / AE_VEL_WINDOW_DB;
+    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+    return AE_VEL_FLOOR + (1.0 - AE_VEL_FLOOR) * t;
 }
 
 /* Strike one voice: pick the recording, set the read cursor and the
@@ -1029,9 +1081,27 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
     if (rec == NULL)
         return;
 
-    const int old = p->smp_cur[v];
-    const int nxt = old == 0 ? 1 : 0;
-    p->smp[v][old].fade = p->smp[v][old].rec != NULL ? p->smp[v][old].fade : 0.0;
+    /* Choose the slot to strike into: a free one if there is one, else the
+       one furthest through its recording -- the oldest, and by then the
+       quietest, so stealing it is the least audible steal on offer. */
+    int nxt = -1;
+    double worst = -1.0;
+    for (int k = 0; k < AE_SMP_SLOTS; ++k)
+    {
+        if (p->smp[v][k].rec == NULL) { nxt = k; break; }
+        const double prog = p->smp[v][k].rec->len > 0
+            ? p->smp[v][k].pos / (double) p->smp[v][k].rec->len : 1.0;
+        if (prog > worst) { worst = prog; nxt = k; }
+    }
+
+    /* Damp-on-repitch retires everything already sounding across the 6 ms
+       fade -- crossfade past a live voice, never cut it. Let-ring leaves
+       them alone to finish on their own decay, which is the whole point:
+       the next strike is a NEW string, not this one being re-fretted. */
+    if (! p->smp_ring)
+        for (int k = 0; k < AE_SMP_SLOTS; ++k)
+            if (k != nxt && p->smp[v][k].rec != NULL)
+                p->smp[v][k].retiring = true;
     p->smp_cur[v] = nxt;
 
     const double rec_hz = 440.0 * pow (2.0, (rec->midi - 69) / 12.0);
@@ -1046,6 +1116,7 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
        ringing from the previous instrument keeps ITS normalisation. */
     p->smp[v][nxt].norm   = bank->norm;
     p->smp[v][nxt].fade = 1.0;
+    p->smp[v][nxt].retiring = false;
     p->smp[v][nxt].gen  = atomic_load_explicit (&p->smp_gen, memory_order_relaxed);
 }
 
@@ -1076,6 +1147,52 @@ static double sample_tick (AeCorrector *p, int v, int slot)
     p->smp[v][slot].gain += (p->smp[v][slot].gain_t - p->smp[v][slot].gain)
                           * p->smp_gain_a;
     return x * p->smp[v][slot].gain * p->smp[v][slot].fade * p->smp[v][slot].norm;
+}
+
+/* Is every slot of this voice silent? Cheaper than it looks and asked once
+   per block, not per sample. */
+static bool sample_voice_idle (const AeCorrector *p, int v)
+{
+    for (int k = 0; k < AE_SMP_SLOTS; ++k)
+        if (p->smp[v][k].rec != NULL)
+            return false;
+    return true;
+}
+
+/* One sample of a whole voice: every slot summed, with the retiring ones
+   walked down their fade and freed at the bottom of it. Under let-ring
+   nothing is retiring, so this is simply every note still ringing. */
+static double sample_mix_slots (AeCorrector *p, int v, double fade_step)
+{
+    double x = 0.0;
+    for (int k = 0; k < AE_SMP_SLOTS; ++k)
+    {
+        if (p->smp[v][k].rec == NULL)
+            continue;
+        x += sample_tick (p, v, k);
+        if (! p->smp[v][k].retiring)
+            continue;
+        p->smp[v][k].fade -= fade_step;
+        if (p->smp[v][k].fade <= 0.0)
+        {
+            p->smp[v][k].fade    = 0.0;
+            p->smp[v][k].rec     = NULL;
+            p->smp[v][k].retiring = false;
+        }
+    }
+    return x;
+}
+
+/* Re-pitch the slot struck most recently -- and only that one. The others
+   are notes already sounding: under let-ring they keep their own pitch,
+   which is what makes the ring a chord rather than a glissando. */
+static void sample_repitch (AeCorrector *p, int v, double hz)
+{
+    const int cur = p->smp_cur[v];
+    if (hz <= 0.0 || p->smp[v][cur].rec == NULL)
+        return;
+    const AeSampleRec *r = p->smp[v][cur].rec;
+    p->smp[v][cur].rate = hz / (440.0 * pow (2.0, (r->midi - 69) / 12.0));
 }
 
 void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin)
@@ -1184,6 +1301,12 @@ static void detect_onset (AeCorrector *p, int num_samples)
     }
     const double rms = sqrt (sum / num_samples);
 
+    /* Let the velocity reference forget a loud passage. Decay only -- it is
+       raised by measured onsets below, never by sustain, so a long held
+       note cannot talk itself into being a hard strike. */
+    p->vel_ref *= exp (-(double) num_samples / (AE_VEL_REF_TAU_S * p->fs));
+    if (p->vel_ref < AE_VEL_REF_MIN) p->vel_ref = AE_VEL_REF_MIN;
+
     const double a_fast = 1.0 - exp (-(double) num_samples / (0.003 * p->fs));
     const double a_slow = 1.0 - exp (-(double) num_samples / (0.150 * p->fs));
     const double slow_prev = p->atk_slow;
@@ -1216,7 +1339,13 @@ static void detect_onset (AeCorrector *p, int num_samples)
         p->vel_win -= num_samples;
         if (p->vel_win <= 0)
         {
-            const double vel = vel_from_peak (p->vel_peak);
+            const double vel = vel_from_peak (p, p->vel_peak);
+            /* A measured onset is the only thing that RAISES the reference,
+               and it does so after being mapped -- so the hardest note in
+               the last ~20 s reads 1.0 and sets the bar for the rest. */
+            if (p->vel_peak > p->vel_ref) p->vel_ref = p->vel_peak;
+            atomic_store_explicit (&p->smp_vel_ref, (float) p->vel_ref,
+                                   memory_order_relaxed);
             atomic_store_explicit (&p->smp_vel_out, (float) vel, memory_order_relaxed);
             /* Refine the strike this window was measuring -- the LEVEL of
                the note now sounding, not the next one's. Only the level:
@@ -2226,7 +2355,7 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
        dynamics change. */
     const double vel = p->smp_vel_fixed >= 0.0
         ? p->smp_vel_fixed
-        : vel_from_peak (p->atk_fast * AE_SQRT2); /* RMS -> peak estimate */
+        : vel_from_peak (p, p->atk_fast * AE_SQRT2); /* RMS -> peak estimate */
     const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
     const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
 
@@ -2265,18 +2394,11 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
                 p->smp_pending[v] = false;
             }
         }
-        for (int k = 0; k < 2; ++k)
-            if (p->smp[v][k].rec != NULL && p->smp[v][k].rate > 0.0)
-            {
-                const AeSampleRec *r = p->smp[v][k].rec;
-                const double rec_hz = 440.0 * pow (2.0, (r->midi - 69) / 12.0);
-                if (k == p->smp_cur[v] && hz > 0.0)
-                    p->smp[v][k].rate = hz / rec_hz; /* repitch, not restrike */
-            }
+        sample_repitch (p, v, hz); /* repitch, not restrike */
 
         double env = p->smp_env[v];
         if (! gate && env < 1e-4 && ! p->smp_pending[v]
-            && p->smp[v][0].rec == NULL && p->smp[v][1].rec == NULL)
+            && sample_voice_idle (p, v))
         {
             p->smp_env[v] = 0.0;
             continue;
@@ -2285,24 +2407,13 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         const double gl = p->h_gl[v], gr = p->h_gr[v];
         const double want = gate ? 1.0 : 0.0;
         const double a = gate ? atk_a : rel_a;
-        const int    cur = p->smp_cur[v], old = cur == 0 ? 1 : 0;
-        /* 6 ms retirement fade on the slot being replaced -- crossfade past
+        /* 6 ms retirement fade on the slots being replaced -- crossfade past
            a sounding voice, never interrupt it. */
         const double fade_step = 1.0 / (0.006 * p->fs);
         for (int i = 0; i < num_samples; ++i)
         {
             env += (want - env) * a;
-            double x = sample_tick (p, v, cur);
-            if (p->smp[v][old].rec != NULL)
-            {
-                x += sample_tick (p, v, old);
-                p->smp[v][old].fade -= fade_step;
-                if (p->smp[v][old].fade <= 0.0)
-                {
-                    p->smp[v][old].fade = 0.0;
-                    p->smp[v][old].rec  = NULL;
-                }
-            }
+            const double x = sample_mix_slots (p, v, fade_step);
             const double sv = x * env * g_smp;
             harm_l[i] += (float) (gl * sv);
             harm_r[i] += (float) (gr * sv);
@@ -2418,7 +2529,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const double hz =
             (double) atomic_load_explicit (&p->target_hz_out, memory_order_relaxed);
         const double vel = p->smp_vel_fixed >= 0.0 ? p->smp_vel_fixed
-            : vel_from_peak (p->atk_fast * AE_SQRT2);
+            : vel_from_peak (p, p->atk_fast * AE_SQRT2);
         const int L = AE_HARM_VOICES;
         if (p->onset_pulse)
         {
@@ -2436,25 +2547,10 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->smp_pending[L] = false;
             }
         }
-        const int cur = p->smp_cur[L], old = cur == 0 ? 1 : 0;
-        if (p->smp[L][cur].rec != NULL && hz > 0.0)
-        {
-            const AeSampleRec *r = p->smp[L][cur].rec;
-            p->smp[L][cur].rate = hz / (440.0 * pow (2.0, (r->midi - 69) / 12.0));
-        }
+        sample_repitch (p, L, hz);
         const double fade_step = 1.0 / (0.006 * p->fs);
         for (int i = 0; i < num_samples; ++i)
-        {
-            double x = sample_tick (p, L, cur);
-            if (p->smp[L][old].rec != NULL)
-            {
-                x += sample_tick (p, L, old);
-                p->smp[L][old].fade -= fade_step;
-                if (p->smp[L][old].fade <= 0.0)
-                { p->smp[L][old].fade = 0.0; p->smp[L][old].rec = NULL; }
-            }
-            p->wet_buf[i] = (float) x;
-        }
+            p->wet_buf[i] = (float) sample_mix_slots (p, L, fade_step);
     }
     else if (lead_synth)
     {
@@ -2496,20 +2592,44 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     const double gain_alpha = 1.0 - exp (-1.0 / (0.005 * p->fs)); /* ~5 ms crossfade */
     double v_gain = p->v_gain;
 
+    /* The lead's OWN envelope, floored at the same 5 ms click guard the
+       harmony uses. Which gain it replaces depends on whether this lead has
+       a dry half:
+
+       - Synth and sample leads have none (their "unvoiced" is silence, not
+         the raw microphone). The envelope IS their gate, so the release is
+         a real tail -- and on a let-ringing sample it is a CEILING over the
+         recording's natural decay, closing a note that would otherwise ring
+         past where the player wanted it.
+       - A shifted lead crossfades to the dry input when the voicing drops,
+         so its wet must still follow v_gain or a consonant would sound
+         twice. The attack shapes its arrival; the release is inert by
+         construction, because a shifted lead is made OF the input and there
+         is nothing left to sustain once the input stops. */
+    const double la_ms = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
+    const double lr_ms = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
+    const double l_atk = 1.0 - exp (-1.0 / (la_ms * 0.001 * p->fs));
+    const double l_rel = 1.0 - exp (-1.0 / (lr_ms * 0.001 * p->fs));
+    const bool   no_dry = lead_synth || lead_sample;
+    double l_env = p->lead_env;
+
     for (int i = 0; i < num_samples; ++i)
     {
         const double target = p->voiced ? 1.0 : 0.0;
         v_gain += (target - v_gain) * gain_alpha;
+        l_env  += (target - l_env) * (p->voiced ? l_atk : l_rel);
 
         const long long t_out = block_start + i - p->latency;
-        const float dry = (lead_synth || lead_sample || t_out < 0)
+        const float dry = (no_dry || t_out < 0)
                               ? 0.0f : p->in_buf[t_out & p->buf_mask];
-        const double wet_only = v_gain * p->wet_buf[i];
+        const double wet_g = no_dry ? l_env : v_gain * l_env;
+        const double wet_only = wet_g * p->wet_buf[i];
         if (wet_out != NULL)
             wet_out[i] = (float) wet_only;
         mono[i] = (float) (wet_only + (1.0 - v_gain) * dry);
     }
     p->v_gain = v_gain;
+    p->lead_env = l_env;
 
     /* The LEAD IR point: on the finished corrected voice. Zero added
        latency by construction (direct first partition) -- this is the live

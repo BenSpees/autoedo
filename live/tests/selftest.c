@@ -2659,7 +2659,7 @@ static void test_sample_ghost (void)
         voices[v].gain = 1.0;
     voices[0].interval = 7;                     /* a fifth above A3 -> E4 */
     ae_corrector_set_harmony (p, true, 0, voices);
-    ae_corrector_set_sample (p, 1.0, 0.9);      /* sample only, fixed strike */
+    ae_corrector_set_sample (p, 1.0, 0.9, false);      /* sample only, fixed strike */
     {
         int srcs[AE_HARM_VOICES];
         for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
@@ -2735,7 +2735,7 @@ static void test_sample_velocity (void)
         voices[v].gain = 1.0;
     voices[0].interval = 7;
     ae_corrector_set_harmony (p, true, 0, voices);
-    ae_corrector_set_sample (p, 1.0, -1.0);      /* measure the velocity */
+    ae_corrector_set_sample (p, 1.0, -1.0, false);      /* measure the velocity */
     ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
     CHECK (ae_corrector_voice_source (p, 0) == AE_HARM_SRC_SAMPLE,
            "sample velocity: voice 0 really is on the sample source");
@@ -2785,6 +2785,261 @@ static void test_sample_velocity (void)
     free (p); free (in); free (hl); free (hr);
     snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
     if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* The strike map is RELATIVE, and this is the case that proved it had to
+   be. Play at a REALISTIC gain stage -- an interface with ~16 dB of
+   headroom, so "as hard as this player plays" peaks nowhere near full
+   scale -- and the hardest note must still strike at the top of the range.
+   The absolute map this replaced scored the same playing on how close it
+   came to 0 dBFS, so it read the headroom as timidity: every velocity on
+   the rig sat in the bottom half and quiet notes fell off the bottom
+   entirely. */
+static void test_velocity_relative (void)
+{
+    const char *root = "/tmp/ae-smp-rel";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "velocity map: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir); write_wav (pth, 261.6256, 3.0, 0.5);
+
+    /* Peaks: hard 0.15 (-16.5 dBFS), then 12 dB under it. Both are what a
+       correctly gain-staged interface actually delivers. */
+    const double hard = 0.15, soft = hard * 0.25; /* -12 dB */
+    double got[2] = { -1.0, -1.0 };
+
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        if (! ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)))
+        { CHECK (false, "velocity map: bank load (%s)", err); free (p); return; }
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v) voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_sample (p, 1.0, -1.0, false);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
+
+        /* Pass 0 plays only the hard note, so the reference is set by that
+           note itself. Pass 1 plays hard, then the same soft note after a
+           gap long enough to read as a fresh onset. */
+        const int gap = 36864, note = 36864;
+        const int total = pass == 0 ? gap + note : gap + note + gap + note;
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const bool n1 = i >= gap && i < gap + note;
+            const bool n2 = i >= gap + note + gap;
+            if (! n1 && ! n2) continue;
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            /* sin + 0.3*sin(2x) peaks at ~1.13x the amplitude; scale so the
+               PEAK is what the comment claims. */
+            const double amp = (n1 ? hard : soft) / 1.13;
+            in[i] = (float) (amp * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        const int probe = pass == 0 ? gap : gap + note + gap;
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+            if (off >= probe + 9600 && off < probe + 12000)
+                got[pass] = p->smp[0][p->smp_cur[0]].gain;
+        }
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+
+    CHECK (got[0] > 0.95,
+           "velocity map: hard playing at -16.5 dBFS strikes at the top "
+           "(%.3f; the absolute map scored this 0.59 because it measured "
+           "the headroom, not the playing)", got[0]);
+    /* 12 dB below the reference is half of a 24 dB window: 0.2 + 0.8*0.5. */
+    CHECK (got[1] > 0.50 && got[1] < 0.70,
+           "velocity map: 12 dB down lands mid-window (%.3f, want ~0.60)",
+           got[1]);
+    CHECK (got[1] > AE_VEL_FLOOR - 1e-9,
+           "velocity map: a confirmed note never strikes below the floor "
+           "(%.3f < %.2f)", got[1], AE_VEL_FLOOR);
+
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* Let-ring: a struck voice finishes on its own decay THROUGH the next
+   strike, instead of being damped as the new note is repitched onto it.
+   The probe is the slot table rather than the radiated audio, because the
+   voiced gate and the harmony envelope both shape the output and would
+   mask exactly the thing under test. */
+static void test_sample_ring (void)
+{
+    const char *root = "/tmp/ae-smp-ring";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "let-ring: cannot stage"); return; }
+    /* Long recordings, so a slot only falls silent because it was damped. */
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir); write_wav (pth, 261.6256, 8.0, 0.5);
+    snprintf (pth, sizeof (pth), "%s/G4.wav", dir); write_wav (pth, 391.9954, 8.0, 0.5);
+
+    int sounding[2] = { -1, -1 };
+    for (int ring = 0; ring < 2; ++ring)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        if (! ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)))
+        { CHECK (false, "let-ring: bank load (%s)", err); free (p); return; }
+
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v) voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_sample (p, 1.0, 0.8, ring != 0);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
+
+        /* Two notes, each a clear onset, the second far enough after the
+           first that it registers as an edge rather than as decay. */
+        const int gap = 36864, note = 36864;
+        const int total = gap + note + gap + note;
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const bool n1 = i >= gap && i < gap + note;
+            const bool n2 = i >= gap + note + gap;
+            if (! n1 && ! n2) continue;
+            ph += 2.0 * M_PI * (n1 ? 220.0 : 246.94) / 48000.0;
+            in[i] = (float) (0.35 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        const int probe = gap + note + gap + 14400; /* 300 ms into note 2 */
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+            if (off >= probe && off < probe + 512)
+            {
+                int live = 0;
+                for (int k = 0; k < AE_SMP_SLOTS; ++k)
+                    if (p->smp[0][k].rec != NULL) ++live;
+                sounding[ring] = live;
+            }
+        }
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+
+    CHECK (sounding[0] == 1,
+           "let-ring off: the previous note is damped as the new one is "
+           "repitched (%d slots sounding, want 1)", sounding[0]);
+    CHECK (sounding[1] >= 2,
+           "let-ring on: the previous note is still ringing under the new "
+           "one (%d slots sounding, want >= 2)", sounding[1]);
+
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* The LEAD's own release. A synth lead keeps sounding after the input
+   stops -- it is an oscillator, not a copy of the input -- so leadReleaseMs
+   is a real tail, and a long one must outlast a short one. The harmony's
+   synthReleaseMs is held identical across the two runs, which is the whole
+   point of the key: the lead's envelope is no longer the harmony's. */
+static void test_lead_envelope (void)
+{
+    double tail[2] = { 0.0, 0.0 };
+    for (int slow = 0; slow < 2; ++slow)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        /* Synth LEAD; the harmony envelope is the same in both runs. */
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SYNTH);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH, 0, 80.0, 500.0);
+        ae_corrector_set_lead_env (p, 5.0, slow ? 800.0 : 20.0);
+
+        const int note = 48000, after = 24000;
+        const int total = note + after;
+        float *in  = calloc ((size_t) total, sizeof (float));
+        float *out = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < note; ++i)
+        {
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            in[i] = (float) (0.3 * sin (ph));
+        }
+        memcpy (out, in, (size_t) total * sizeof (float));
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, out + off, NULL, NULL, n);
+        }
+        /* RMS of the 100 ms starting 150 ms after the input stopped. */
+        double sq = 0.0;
+        const int a = note + 7200, b = a + 4800;
+        for (int i = a; i < b && i < total; ++i) sq += (double) out[i] * out[i];
+        tail[slow] = sqrt (sq / (double) (b - a));
+        ae_corrector_free (p); free (p); free (in); free (out);
+    }
+    CHECK (tail[1] > tail[0] * 3.0,
+           "leadReleaseMs shapes the lead's own tail (800 ms %.5f vs 20 ms "
+           "%.5f); identical harmony release in both runs", tail[1], tail[0]);
+}
+
+/* bypassOutput decides what bypass PUTS on the output, and the decision is
+   shared by the backends so it can be checked without a device. */
+static void test_bypass_output (void)
+{
+    AeLiveParams lp;
+    memset (&lp, 0, sizeof (lp));
+    lp.edo = 12; lp.ref_hz = 261.6256; lp.period_cents = 1200.0;
+    AeAtomicParams ap;
+    memset (&ap, 0, sizeof (ap));
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    AeMixParams mix;
+
+    lp.bypass = true; lp.bypass_mute = false;
+    ae_atomic_params_store (&ap, &lp);
+    ae_atomic_params_apply (&ap, p, 0, 0, &mix);
+    CHECK (mix.bypass && ae_bypass_gain (&mix) == 1.0f,
+           "bypassOutput 'dry': bypass passes the input through");
+
+    lp.bypass_mute = true;
+    ae_atomic_params_store (&ap, &lp);
+    ae_atomic_params_apply (&ap, p, 0, 0, &mix);
+    CHECK (ae_bypass_gain (&mix) == 0.0f,
+           "bypassOutput 'mute': bypass puts silence on the output");
+
+    /* Not bypassed, the switch must not touch the live path -- it decides
+       what bypass does, not what the engine does. */
+    lp.bypass = false;
+    ae_atomic_params_store (&ap, &lp);
+    ae_atomic_params_apply (&ap, p, 0, 0, &mix);
+    CHECK (ae_bypass_gain (&mix) == 1.0f,
+           "bypassOutput only applies while bypass is engaged");
+
+    ae_corrector_free (p); free (p);
 }
 
 static void test_makeup_on_plucks (void)
@@ -2901,6 +3156,10 @@ int main (void)
     test_sampler_bank();
     test_sample_ghost();
     test_sample_velocity();
+    test_velocity_relative();
+    test_sample_ring();
+    test_lead_envelope();
+    test_bypass_output();
     test_lead_wet_tap();
     test_formant_offset();
 

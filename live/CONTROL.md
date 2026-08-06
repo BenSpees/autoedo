@@ -230,6 +230,7 @@ UI behavior you may want to replicate).
 | `humanize` | float 0–1 | live | relaxes retune on sustained notes |
 | `expression` | float 0–1 | live | **how much of the playing survives correction.** A played pitch is a note plus what the player is doing to it; the engine tracks the note's centre with a ~180 ms follower and the difference is the bend, the vibrato, the scoop. Correction is applied to the **centre alone** and the deviation is added back on top. `1` (default): bends and vibrato reach the output — and the harmony, which anchors to the corrected lead — while the note still lands on its degree. `0`: the old behaviour, output pinned to the degree. **A steady note is identical either way**; only motion faster than the follower is at stake. Without this the law `shift = target − detected` cancels a bend exactly as it happens — the harder you bend, the harder the engine bends back — which is why expression never reached the output |
 | `bypass` | bool | live | dry input passthrough (also silences harmony) |
+| `bypassOutput` | `"dry"` \| `"mute"` | live | **what `bypass` PUTS on the output.** `dry` (default) is the historical behaviour: the input passes through uncorrected. `mute` puts silence there instead — for a rig whose dry already reaches the desk on its own row, where a passthrough is a second copy of a signal the mix already has. It decides what bypass does and nothing else: with `bypass` false the live path is untouched either way. This replaces the stateful `outputGainDb: -60` dance (drop the fader, remember what it was, restore it on un-bypass) with one switch that has no level to put back |
 | `leadOn` | bool | live | the corrected lead voice in the output mix. `false` = **harmony only**: ghosts (shifted or synth) still follow the sung pitch while the singer stays out of the engine's output — for rigs that take the dry voice from another bus. `bypass` still wins (a dry passthrough with the lead muted would be silence) |
 | `outputGainDb` | float −60…12 | live | master output gain. The output stage soft-clips: transparent below ≈ −2 dBFS, then a smooth saturation that never reaches full scale — so a many-voice harmony stack (worst on a mono-folded `outputChannel` bus) saturates gently instead of crackling as hard digital clipping. If a big stack sounds *compressed*, that is the clip working: pull `hg` per voice (≈ −6 dB for five voices) or `outputGainDb` down until it cleans up |
 | `quality` | `"low"` \| `"balanced"` \| `"high"` | **restart** | pitch-shifter analysis block: 25 / 45 / 120 ms **at 48 kHz**, giving 31 / 56 / 150 ms of shifter latency. The block is a fixed *sample count* (48k-referenced), so a faster device shortens it in time — at 96 kHz the same presets are 12.5 / 22.5 / 60 ms blocks and the latency halves with them. The analysis window shortens too: frequency resolution at the bottom of the range drops, so if a bass or low guitar warbles at 96 k, step up a preset. Correction is accurate at all three; harmony intervals only stay in tune on low voices at `high` |
@@ -263,8 +264,10 @@ UI behavior you may want to replicate).
 | `synthPatch` | string | live | synth sound, by name from the status `synthPatches` list. Simple ranks: `pad` (detuned saws + low-pass, the backing-pad default), `warm` (rounded sine stack), `glass` (brighter octaves), `organ` (drawbar harmonics), `sine` (pure). String-machine voices, with per-partial vibrato and the shared **ensemble** (three delay taps swept in opposite senses per side — the Solina/Eminent trick that turns a rank of saws into a wide, breathing section): `strings` (saw ranks at 8'/4'/2'), `solina bright` (the same ranks with the tone control open, for sitting on top of a band), `choir` (vox-humana square/saw blend, rounded down), `brass` (bright detuned saw pair, no ensemble — a section pad that cuts), `bass` (sub-octave rank, filtered down, no ensemble — a wandering bass is a tuning problem, not an effect). Unknown names are ignored |
 | `hSrc` | string[5] | live | **per-voice** source override: `"voice"`, `"synth"`, or `"default"` (follow `harmSource`, the default). Mixed rigs work — voice 1 on the shifter for a real double, voices 2–3 on the synth for a pad — because the shifted and synth passes render independently into one bus |
 | `leadSource` | `"voice"` \| `"synth"` | live | what the **lead** is: the shifter's corrected vocal (default) or the synth playing that same corrected pitch. A synth lead has no dry component — unvoiced is silence, not the raw microphone — so it is a synth lead, not a passthrough with occasional synth. `leadOn` still decides whether it reaches the output at all |
-| `synthAttackMs` | float 0–5000 | live | synth envelope attack (default 80) |
-| `synthReleaseMs` | float 0–10000 | live | synth envelope release (default 500) |
+| `synthAttackMs` | float 0–5000 | live | the **HARMONY** envelope's attack (default 80) |
+| `synthReleaseMs` | float 0–10000 | live | the **HARMONY** envelope's release (default 500) |
+| `leadAttackMs` | float 0–5000 | live | the **LEAD's own** attack (default 5, i.e. the click guard and no shaping). Separate from the harmony's because the two shape different things: `synthAttackMs` hides the ghosts' arrival latency, this shapes the corrected lead itself |
+| `leadReleaseMs` | float 5–10000 | live | the **LEAD's own** release (default 500). What it buys depends on the lead source, and the difference is not a wart — it is what each source is. A **synth** lead is an oscillator, so this is a real tail at its last pitch. A **sample** lead is a recording, so this is a CEILING over its natural decay: a note that would ring past where the player wanted it is closed here (see `sampleRing`). A **shifted** lead is made *of* the input, so once the input stops there is nothing left to sustain and the release is inert by construction — it crossfades to the dry path on the voicing drop, and a lingering wet would sound every consonant twice |
 | `ensembleDepth` | float 0–1 | live | how much of the ensemble the patches that have one get (default 1). 0 leaves the dry ranks; patches without an ensemble ignore it |
 | `harmTiltDb` | float −12…+12 | live | **tilt EQ on the harmony bus**: a 700 Hz pivot with equal and opposite gains above and below it, so negative is darker and positive brighter while the pivot stays put. It reaches every harmony voice — shifted and synth alike — and never the lead, which is on its own bus |
 | `synthVowel` | float 0–1 | live | **vowel transfer**: the live voice's spectral envelope is lifted onto the synth, so a sung "ah" → "oo" moves the synth with it (default 0 = off). It applies to synth harmony voices and to a synth lead. Both transfer modes *filter* the carrier — they cannot invent partials — so they need a harmonically rich patch: `strings`, `solina bright`, `pad`, `organ` and `choir` all work; `sine` barely changes. Level is held where the volume match put it |
@@ -288,7 +291,8 @@ the wrong speed.
 | `sampleHash` | string | live (reloads) | the librarian's "the library changed" token. The bank is re-read only when this moves — 120 WAVs is not a per-POST operation |
 | `sampleInstrument` | string | live (reloads) | which instrument folder to load. **The engine carries no instrument list** — it is whatever `<samplePath>/` actually holds, so adding one (e.g. `pizzicato`) is dropping a folder in the cache and needs no engine or controller change. Status echoes `sampleInstruments` (what was found, sorted); build the picker from that, as with `synthPatches`. The shipped set is `piano` `electric` `acoustic` `bass` `vibraphone` `choir` `harpsichord` `oboe` `pizzicato`. **Feature-detect on this key** |
 | `sampleMix` | float 0–1 | live | layer blend against the shifted rendering of the same ghost. `0` = shifted alone, `1` = sample alone, **`0.5` = both at unity** — a plateau at centre with an equal-power taper either side (`g = sin(min(1, 2·d)·π/2)` per side, `d` the distance from the far end), not the textbook crossfade that would drop both to 0.707 in the middle. "sample" is a LAYER, not a swap: at any mix below 1 the voice's shifter keeps running |
-| `sampleVelocity` | float −1…1 | live | fixed strike level; **`-1` (default) = measure it** from the lead's own attack |
+| `sampleVelocity` | float **−1…1** | live | fixed strike level. **Any negative value means MEASURE it** from the lead's own attack; `-1` is the canonical spelling and the default. `0…1` pins the strike and bypasses the map entirely, `0` included (a pinned 0 is silence, not the floor). The range is −1…1 rather than 0…1 precisely so "measure" is expressible in the same key — it is echoed as `-1`, so read the echo, don't assume 0 |
+| `sampleRing` | bool | live | **let-ring.** `true` (default): a struck sample voice plays to its natural end *through* the next strike — the next note is a new string, not this one being re-fretted, so a fast figure stacks into the chord a real instrument would leave ringing. `false`: damp-on-repitch legato — the sounding voice is retired across a 6 ms fade as the new one is struck. Four playback slots per voice; a fifth strike steals the slot furthest through its recording, which is the oldest and by then the quietest. Turning it off mid-set damps what is already ringing rather than stranding it |
 | `sampleOctave` | `"auto"` \| int −24…+24 | live (reloads) | filename-to-**sounding** pitch offset in semitones. `"auto"` (default) uses the built-in table for the two shipped sets whose filenames are not their sounding pitch — **bass** is named an octave ABOVE what it sounds, **harpsichord** an octave BELOW — and 0 for everything else. A number overrides it for any set not in that table. Wrong here means the ghost is a clean octave off, so it is worth checking on any new instrument |
 | `harmSource`, `leadSource`, `hSrc[]` | += `"sample"` | live | the source selectors all take it |
 
@@ -297,7 +301,9 @@ and `sampleOctaveApplied` (the filename→sounding offset in force),
 `sampleInstruments` (the instruments discovered under `samplePath`
 — a directory counts when it holds at least one file the zone parser
 recognises), `sampleVelLast` (the level the voices were last struck with — a
-strike level you cannot see is one you cannot tune), `sampleZones` /
+strike level you cannot see is one you cannot tune), `sampleVelRefDb` (the
+reference that level is relative TO; a relative map is unreadable from
+outside without it — 0.55 says nothing until you know what it is 0.55 of), `sampleZones` /
 `sampleFiles` (what actually loaded), and `sampleError` (the last failed
 load; a failure leaves the **running bank playing** rather than going
 silent, so a bad path during a set is a message, not a hole).
@@ -310,10 +316,44 @@ known** — and then **re-pitched, never re-struck**, for as long as that
 note lasts. A retrigger starts a fresh slot across a 6 ms fade rather than
 cutting a sounding one (Xentar's node-swap discipline, ported).
 
-- **Velocity is a measurement.** Peak over the first 30 ms from the foot of
-  the attack, mapped across 40 dB (−40 dBFS → 0, 0 dBFS → 1). The strike
-  itself cannot wait for that window without giving back the latency, so a
-  voice is struck at the fast follower's reading and the window refines it.
+- **Velocity is a measurement, and it is RELATIVE.** Peak over the first
+  30 ms from the foot of the attack, mapped against how hard *this player
+  plays when playing hard* — not against full scale:
+
+  ```
+  ref   = max(refPeak, peak)          // never asks for more than unity
+  below = 20·log10(peak / ref)        // ≤ 0 dB
+  t     = clamp(1 + below / 24, 0, 1) // a 24 dB window below the reference
+  vel   = 0.2 + 0.8·t                 // floor 0.2
+  ```
+
+  This map is shared verbatim with Treebrain's FX layer and TENDRIL, so the
+  two rigs strike the same velocity for the same playing. The constants —
+  **24 dB window, 0.2 floor** — are a contract; change them in both places
+  or not at all.
+
+  It replaced an absolute map (−40 dBFS → 0, full scale → 1) that was
+  field-verified wrong, and the reason is worth keeping written down
+  because no synthetic test will ever show it. A real interface is set up
+  with 12–20 dB of headroom, so hard playing peaks at −12…−20 dBFS and
+  never approaches full scale. The absolute map therefore scored the gain
+  staging rather than the playing: every velocity on the rig sat in the
+  bottom half of its range, and quiet notes fell off the bottom and
+  vanished. The 0.2 floor is the other half of that fix — a note the
+  detector CONFIRMED is a quiet note, not an absent one.
+
+  The **reference** is a rolling peak of measured onsets that decays over
+  ~20 s: raised only by onsets (never by sustain, so a long held note
+  cannot talk itself into being a hard strike), never decaying below
+  −40 dBFS, and reported as `sampleVelRefDb`. It starts at that floor
+  rather than at a plausible-looking seed, because a seed outranks the
+  player until it decays and every note until then is scored against a
+  number nobody played; starting low costs exactly one note — the first of
+  a set reads as the loudest so far, because it is.
+
+  The strike itself cannot wait for the 30 ms window without giving back
+  the latency, so a voice is struck at the fast follower's reading and the
+  window refines it.
 - **The soft layer is TIMBRE, not level.** `<Note>_soft` files are softer-
   *played* recordings peak-normalised to the main layer; loudness always
   comes from the velocity gain. Below velocity 0.6 the soft pool is
@@ -350,9 +390,13 @@ cutting a sounding one (Xentar's node-swap discipline, ported).
   **unquantised** playback rate — that is what lands a 22-EDO degree
   exactly off a 12-per-octave map.
 
-`synthAttackMs` / `synthReleaseMs` shape the sample envelope unchanged, as
-they do for every other source. Drums are out of scope by agreement — every
-layer here is voiced by a pitch.
+`synthAttackMs` / `synthReleaseMs` shape the sample envelope on the ghosts,
+as they do for every other source; a sample LEAD is shaped by
+`leadAttackMs` / `leadReleaseMs` instead. Either way the release is a
+CEILING over a recording's own decay, never an extension of it — under
+`sampleRing` that is what stops a let-ringing figure from ringing past the
+end of the phrase. Drums are out of scope by agreement — every layer here
+is voiced by a pitch.
 
 ### The record send
 

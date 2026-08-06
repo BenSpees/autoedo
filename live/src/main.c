@@ -187,6 +187,7 @@ static void config_defaults (App *app)
     c->params.degrees_lo      = ~0ull;   /* every degree enabled */
     c->params.degrees_hi      = 0xffull;
     c->params.bypass          = false;
+    c->params.bypass_mute     = false; /* bypass passes the dry through */
     c->params.lead_on         = true;
     c->params.lead_gain_db    = 0.0;
     c->params.lead_shift_steps = 0;
@@ -227,6 +228,7 @@ static void config_defaults (App *app)
     app->send_err[0]         = '\0';
     c->params.sample_mix      = 1.0;  /* the sample alone until layered */
     c->params.sample_velocity = -1.0; /* measure it from the lead's attack */
+    c->params.sample_ring     = true; /* let-ring: struck notes finish */
     c->sample_root[0] = c->sample_manifest[0] = '\0';
     snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
     c->sample_octave = AE_SMP_OCTAVE_AUTO;
@@ -247,6 +249,8 @@ static void config_defaults (App *app)
     c->params.vowel_mode       = 0;   /* channel vocoder */
     c->params.synth_attack_ms  = 80.0;
     c->params.synth_release_ms = 500.0;
+    c->params.lead_attack_ms   = 5.0;   /* the click guard: no shaping */
+    c->params.lead_release_ms  = 500.0;
     c->params.drone_on  = false;
     c->params.drone_deg = 0;
     c->params.ir_lead_mix     = 0.25; /* a space, not a wash, when enabled */
@@ -303,7 +307,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"refNote\":%d,\"refNoteHz\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
-              "\"bypass\":%s,\"leadOn\":%s,\"leadGainDb\":%.4g,\"leadShiftSteps\":%d,"
+              "\"bypass\":%s,\"bypassOutput\":\"%s\",\"leadOn\":%s,\"leadGainDb\":%.4g,\"leadShiftSteps\":%d,"
               "\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
@@ -315,6 +319,7 @@ static void config_json (const App *app, char *out, size_t cap)
               app->stretch_cents, app->range_name, app->quality_name,
               app->det_min_hz, app->det_max_hz,
               c->params.bypass ? "true" : "false",
+              c->params.bypass_mute ? "mute" : "dry",
               c->params.lead_on ? "true" : "false",
               c->params.lead_gain_db,
               c->params.lead_shift_steps,
@@ -352,6 +357,7 @@ static void config_json (const App *app, char *out, size_t cap)
     snprintf (harm, sizeof (harm),
               ",\"harmSource\":\"%s\",\"leadSource\":\"%s\",\"synthPatch\":\"%s\","
               "\"synthAttackMs\":%.6g,\"synthReleaseMs\":%.6g,"
+              "\"leadAttackMs\":%.6g,\"leadReleaseMs\":%.6g,"
               "\"ensembleDepth\":%.6g,\"synthVowel\":%.6g,\"harmTiltDb\":%.6g,"
               "\"vowelMode\":\"%s\",\"droneOn\":%s,\"droneDeg\":%d,\"hSrc\":[",
               c->params.harm_source == 1 ? "synth"
@@ -360,6 +366,7 @@ static void config_json (const App *app, char *out, size_t cap)
                 : c->params.lead_source == 2 ? "sample" : "voice",
               ae_synth_patch_name (c->params.synth_patch),
               c->params.synth_attack_ms, c->params.synth_release_ms,
+              c->params.lead_attack_ms, c->params.lead_release_ms,
               c->params.ensemble_depth, c->params.synth_vowel,
               c->params.harm_tilt_db,
               c->params.vowel_mode == 1 ? "lpc" : "vocoder",
@@ -379,7 +386,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"harmSustain\":%s,\"harmHold\":%s,\"harmGlideMs\":%.4g,"
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
-              "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,"
+              "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
               "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
               "\"midiMode\":%s,\"midiSource\":\"",
@@ -398,6 +405,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.formant_hold ? "true" : "false",
               c->params.formant_st,
               c->params.sample_mix, c->params.sample_velocity,
+              c->params.sample_ring ? "true" : "false",
               c->sample_instrument, sample_oct_str,
               c->send_channel,
               (const char *[]){ "full", "wet", "lead", "harm" }
@@ -570,6 +578,11 @@ static bool config_apply_json (App *app, const char *json)
     }
     if (ae_json_get_bool (json, "bypass", &b))
         c->params.bypass = b;
+    /* What bypass PUTS on the output. "mute" retires the stateful
+       outputGainDb:-60 dance for a rig whose dry already reaches the desk
+       on its own row -- one switch, no level to restore afterwards. */
+    if (ae_json_get_string (json, "bypassOutput", str, sizeof (str)))
+        c->params.bypass_mute = strcmp (str, "mute") == 0;
     if (ae_json_get_bool (json, "leadOn", &b))
         c->params.lead_on = b;
     if (ae_json_get_number (json, "outputGainDb", &num))
@@ -630,6 +643,8 @@ static bool config_apply_json (App *app, const char *json)
         c->params.sample_mix = num_clamp (num, 0.0, 1.0);
     if (ae_json_get_number (json, "sampleVelocity", &num))
         c->params.sample_velocity = num < 0.0 ? -1.0 : num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_bool (json, "sampleRing", &b))
+        c->params.sample_ring = b;
     if (ae_json_get_string (json, "samplePath", str2, sizeof (str2)))
     {
         snprintf (c->sample_root, sizeof (c->sample_root), "%s", str2);
@@ -762,6 +777,10 @@ static bool config_apply_json (App *app, const char *json)
         if (idx >= 0) /* unknown names keep the current patch */
             c->params.synth_patch = idx;
     }
+    if (ae_json_get_number (json, "leadAttackMs", &num))
+        c->params.lead_attack_ms = num_clamp (num, 0.0, 5000.0);
+    if (ae_json_get_number (json, "leadReleaseMs", &num))
+        c->params.lead_release_ms = num_clamp (num, 5.0, 10000.0);
     if (ae_json_get_number (json, "synthAttackMs", &num))
         c->params.synth_attack_ms = num_clamp (num, 0.0, 5000.0);
     if (ae_json_get_number (json, "synthReleaseMs", &num))
@@ -1093,7 +1112,7 @@ static void status_refresh (App *app)
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
         "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
-        "\"sampleVelLast\":%.3f,\"sampleZones\":%d,\"sampleFiles\":%d,"
+        "\"sampleVelLast\":%.3f,\"sampleVelRefDb\":%.1f,\"sampleZones\":%d,\"sampleFiles\":%d,"
         "\"sampleInstruments\":%s,"
         "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,\"sampleClipped\":%d,"
         "\"stepCents\":%.4f,\"config\":%s}",
@@ -1110,7 +1129,9 @@ static void status_refresh (App *app)
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
         patches, ir_err, send_err_esc, sample_err_esc,
-        (double) st.sample_vel, st.sample_zones, st.sample_files, insts,
+        (double) st.sample_vel,
+        st.sample_vel_ref > 1e-6f ? 20.0 * log10 ((double) st.sample_vel_ref) : -120.0,
+        st.sample_zones, st.sample_files, insts,
         (double) st.sample_norm_db, st.sample_octave, st.sample_clipped,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0

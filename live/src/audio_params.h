@@ -28,6 +28,15 @@ static inline float ae_soft_clip (float x)
     return x < 0.0f ? -y : y;
 }
 
+/* What bypass PUTS on the output, as a gain on the dry passthrough:
+   1 = "dry" (pass the input through), 0 = "mute" (silence). Shared by the
+   backends so the decision is made once and can be tested without a
+   device. Only meaningful while bypass is engaged. */
+static inline float ae_bypass_gain (const AeMixParams *mix)
+{
+    return (mix->bypass && mix->bypass_mute) ? 0.0f : 1.0f;
+}
+
 typedef struct
 {
     _Atomic int      edo;
@@ -43,6 +52,8 @@ typedef struct
     _Atomic uint64_t deg_lo;
     _Atomic uint64_t deg_hi;
     _Atomic bool     bypass;
+    _Atomic bool     bypass_mute; /* bypass puts SILENCE on the output rather
+                                     than the dry passthrough */
     _Atomic bool     lead_on;
     _Atomic double   gain_lin;
 
@@ -69,6 +80,7 @@ typedef struct
     _Atomic double   formant_st;
     _Atomic double   sample_mix;
     _Atomic double   sample_velocity;
+    _Atomic bool     sample_ring;
     _Atomic int      attack_sound;
     _Atomic double   attack_gain_lin;
     _Atomic bool     harm_sustain;
@@ -87,6 +99,8 @@ typedef struct
     _Atomic int      vowel_mode;
     _Atomic double   synth_attack_ms;
     _Atomic double   synth_release_ms;
+    _Atomic double   lead_attack_ms;
+    _Atomic double   lead_release_ms;
     _Atomic bool     drone_on;
     _Atomic int      drone_deg;
     _Atomic double   ir_lead_mix;
@@ -115,6 +129,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->deg_lo,          p->degrees_lo,      memory_order_relaxed);
     atomic_store_explicit (&a->deg_hi,          p->degrees_hi,      memory_order_relaxed);
     atomic_store_explicit (&a->bypass,          p->bypass,          memory_order_relaxed);
+    atomic_store_explicit (&a->bypass_mute,     p->bypass_mute,     memory_order_relaxed);
     atomic_store_explicit (&a->lead_on,         p->lead_on,         memory_order_relaxed);
     atomic_store_explicit (&a->gain_lin, pow (10.0, p->output_gain_db / 20.0),
                            memory_order_relaxed);
@@ -149,6 +164,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->formant_st,   p->formant_st,   memory_order_relaxed);
     atomic_store_explicit (&a->sample_mix,      p->sample_mix,      memory_order_relaxed);
     atomic_store_explicit (&a->sample_velocity, p->sample_velocity, memory_order_relaxed);
+    atomic_store_explicit (&a->sample_ring,     p->sample_ring,     memory_order_relaxed);
     atomic_store_explicit (&a->attack_sound, p->attack_sound, memory_order_relaxed);
     atomic_store_explicit (&a->attack_gain_lin,
                            pow (10.0, p->attack_gain_db / 20.0),
@@ -170,6 +186,8 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->synth_patch,      p->synth_patch,      memory_order_relaxed);
     atomic_store_explicit (&a->synth_attack_ms,  p->synth_attack_ms,  memory_order_relaxed);
     atomic_store_explicit (&a->synth_release_ms, p->synth_release_ms, memory_order_relaxed);
+    atomic_store_explicit (&a->lead_attack_ms,   p->lead_attack_ms,   memory_order_relaxed);
+    atomic_store_explicit (&a->lead_release_ms,  p->lead_release_ms,  memory_order_relaxed);
     atomic_store_explicit (&a->drone_on,         p->drone_on,         memory_order_relaxed);
     atomic_store_explicit (&a->drone_deg,        p->drone_deg,        memory_order_relaxed);
     atomic_store_explicit (&a->ir_lead_mix,      p->ir_lead_mix,      memory_order_relaxed);
@@ -234,7 +252,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->formant_st, memory_order_relaxed));
     ae_corrector_set_sample (ps,
                           atomic_load_explicit (&a->sample_mix, memory_order_relaxed),
-                          atomic_load_explicit (&a->sample_velocity, memory_order_relaxed));
+                          atomic_load_explicit (&a->sample_velocity, memory_order_relaxed),
+                          atomic_load_explicit (&a->sample_ring, memory_order_relaxed));
     ae_corrector_set_attack (ps,
                           atomic_load_explicit (&a->attack_sound, memory_order_relaxed),
                           atomic_load_explicit (&a->attack_gain_lin, memory_order_relaxed));
@@ -255,6 +274,9 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                         atomic_load_explicit (&a->synth_patch, memory_order_relaxed),
                         atomic_load_explicit (&a->synth_attack_ms, memory_order_relaxed),
                         atomic_load_explicit (&a->synth_release_ms, memory_order_relaxed));
+    ae_corrector_set_lead_env (ps,
+                        atomic_load_explicit (&a->lead_attack_ms, memory_order_relaxed),
+                        atomic_load_explicit (&a->lead_release_ms, memory_order_relaxed));
     int vsrc[AE_HARM_VOICES];
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         vsrc[v] = atomic_load_explicit (&a->harm_voice_source[v], memory_order_relaxed);
@@ -278,6 +300,7 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                         atomic_load_explicit (&a->ir_harm_on, memory_order_relaxed));
 
     mix->bypass      = atomic_load_explicit (&a->bypass, memory_order_relaxed);
+    mix->bypass_mute = atomic_load_explicit (&a->bypass_mute, memory_order_relaxed);
     mix->lead_on     = atomic_load_explicit (&a->lead_on, memory_order_relaxed);
     mix->lead_gain   = (float) atomic_load_explicit (&a->lead_gain_lin, memory_order_relaxed);
     mix->master_gain = (float) atomic_load_explicit (&a->gain_lin, memory_order_relaxed);

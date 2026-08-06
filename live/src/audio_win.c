@@ -529,7 +529,10 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
     /* Lead mute is harmony-only output; bypass still wins (a dry passthrough
        with the lead "muted" would be silence). */
     const float *src = bypass ? e->dry : e->proc;
-    const float  lg  = bypass ? 1.0f : (lead ? lead_g : 0.0f);
+    /* bypassOutput: "dry" passes the input through, "mute" puts silence on
+       the output instead, for a rig whose dry already reaches the desk. */
+    const float  byp_g = ae_bypass_gain (&mix);
+    const float  lg  = bypass ? byp_g : (lead ? lead_g : 0.0f);
     const int    ch  = e->out_fmt.channels;
     const int    sel = e->out_channel_sel; /* -1 = stereo on channels 1-2 */
     const int    ssel = e->send_sel;       /* record send channel, -1 = none */
@@ -542,7 +545,7 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
                                         + 0.5f * (e->harm_l[i] + e->harm_r[i]) \
    : mix.send_content == AE_SEND_LEAD ? (wet ? wet[i] : 0.0f) \
    : mix.send_content == AE_SEND_HARM ? 0.5f * (e->harm_l[i] + e->harm_r[i]) \
-   : (bypass ? e->dry[i] \
+   : (bypass ? byp_g * e->dry[i] \
              : lg * src[i] + 0.5f * (e->harm_l[i] + e->harm_r[i])) * gain)
 
     if (e->out_fmt.is_float)
@@ -727,6 +730,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->shift_st_max    = ae_corrector_shift_st_max (&e->corrector);
     out->lead_makeup     = ae_corrector_lead_makeup (&e->corrector);
     out->sample_vel      = ae_corrector_sample_vel (&e->corrector);
+    out->sample_vel_ref  = ae_corrector_sample_vel_ref (&e->corrector);
     {
         const int lv = atomic_load_explicit (&e->corrector.smp_live, memory_order_relaxed);
         out->sample_zones = lv >= 0 ? e->corrector.smp_bank[lv].n_zones : 0;

@@ -52,6 +52,27 @@
    only names the voices it actually wants to differ. */
 #define AE_HARM_SRC_DEFAULT (-1)
 
+/* Playback slots per sample voice. Two is enough to crossfade a retrigger
+   past a dying note; let-ring needs a ring, because every slot is a note
+   still sounding on its own decay. Four covers a fast repeated figure at
+   the pizzicato and piano decays without stealing, and steals the OLDEST
+   when it cannot. */
+#define AE_SMP_SLOTS 4
+
+/* The strike-velocity map (vel_from_peak). Both constants are shared with
+   Treebrain's FX layer and TENDRIL so the two rigs strike the same
+   velocity for the same playing -- change them here and there together. */
+#define AE_VEL_WINDOW_DB 24.0 /* dynamic range below the reference peak */
+#define AE_VEL_FLOOR      0.2 /* a CONFIRMED note is never near-silent */
+/* How long the reference peak takes to forget a loud passage. Long enough
+   that a soft section is heard as soft rather than renormalised up to
+   sounding hard, short enough to follow a set that changes instrument or
+   player. */
+#define AE_VEL_REF_TAU_S 20.0
+/* The reference never decays below this (-40 dBFS), so a silent rig maps
+   its own noise floor to the velocity floor instead of to fortissimo. */
+#define AE_VEL_REF_MIN  0.01
+
 #define AE_SYNTH_PARTIALS 6
 
 /* Attack Sound: a transient fired at note ONSET -- energy appearing, before
@@ -240,6 +261,14 @@ typedef struct
     int    synth_patch;      /* index into the built-in patch table */
     double synth_attack_ms;
     double synth_release_ms;
+    /* The LEAD's own envelope. Separate from the harmony's above because
+       the two jobs are different: the harmony envelope hides the ghosts'
+       arrival latency, while the lead's shapes the corrected voice itself
+       -- and under let-ring the release is a CEILING over a sample's
+       natural decay rather than a tail added to it. */
+    double lead_attack_ms;
+    double lead_release_ms;
+    double lead_env;         /* the lead envelope's current value */
     double ensemble_depth;   /* 0..1 scaling on the ensemble's wet blend */
     double synth_vowel;      /* 0..1 formant transfer from the live voice */
     double harm_tilt_db;     /* -12..+12: harmony-bus tone tilt, - dark/+ bright */
@@ -265,7 +294,10 @@ typedef struct
     int           smp_mode;      /* AE_SMP_* placeholder, reserved */
     double        smp_mix;       /* 0 = shifted only, 1 = sample only */
     double        smp_vel_fixed; /* >= 0 = fixed strike level; < 0 = measure */
+    bool          smp_ring;      /* let-ring: a struck voice plays to its
+                                    natural end THROUGH the next strike */
     _Atomic float smp_vel_out;   /* last strike level, for the read-out */
+    _Atomic float smp_vel_ref;   /* the reference the map is measuring against */
     signed char   smp_rr[AE_SMP_MAX_ZONES * 2]; /* last RR pick per zone+layer */
     unsigned      smp_rng;
     int           smp_octave;    /* filename -> sounding offset, or AUTO */
@@ -278,13 +310,24 @@ typedef struct
     bool   onset_pulse;
     int    vel_win;      /* samples left in the velocity measuring window */
     double vel_peak;     /* running peak inside it */
+    /* The velocity REFERENCE: "how hard this player plays when playing
+       hard". A rolling peak that decays over ~20 s, so the map follows the
+       rig's actual headroom instead of assuming the signal reaches full
+       scale. See vel_from_peak. */
+    double vel_ref;
 
     struct
     {
         const AeSampleRec *rec;
         double pos, rate, gain, gain_t, fade, norm;
         int    gen;
-    } smp[AE_HARM_VOICES + 1][2]; /* [AE_HARM_VOICES] = the lead */
+        bool   retiring;  /* damp-on-repitch: this slot is on its way out
+                             across the 6 ms fade. Never set under let-ring,
+                             where a struck note is left to finish. */
+    } smp[AE_HARM_VOICES + 1][AE_SMP_SLOTS];
+    /* [AE_HARM_VOICES] = the lead. Slots are a ring, not a pair: under
+       let-ring every strike needs its own, because the old one is still
+       sounding rather than being faded past. */
     int    smp_cur[AE_HARM_VOICES + 1];
     bool   smp_pending[AE_HARM_VOICES + 1]; /* an onset is waiting for a
                                                pitch to strike at */
@@ -515,7 +558,13 @@ void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
    means the same thing here as it does in the rig's other layers.
    `velocity` >= 0 pins the strike level; < 0 measures it from the lead's
    own attack. */
-void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity);
+void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
+                              bool ring);
+/* The LEAD voice's attack and release, in ms. Distinct from the harmony's
+   (ae_corrector_set_synth): the harmony envelope hides the ghosts' arrival
+   latency, this one shapes the corrected lead itself. */
+void ae_corrector_set_lead_env (AeCorrector *p, double attack_ms,
+                                double release_ms);
 
 /* Load one instrument into the idle bank slot and swap it live (CONTROL
    thread -- reads files, allocates). Returns false with a reason in err;
@@ -530,6 +579,14 @@ bool ae_corrector_load_samples (AeCorrector *p, const char *root,
 
 /* The last strike level the sample voices were struck with (0..1): a
    strike level you cannot see is one you cannot tune. */
+/* The reference the strike map is measuring against, linear peak. Exposed
+   because a RELATIVE map is otherwise unreadable from outside: without it
+   a velocity of 0.55 says nothing about whether the player is loud. */
+static inline float ae_corrector_sample_vel_ref (const AeCorrector *p)
+{
+    return atomic_load_explicit (&p->smp_vel_ref, memory_order_relaxed);
+}
+
 static inline float ae_corrector_sample_vel (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->smp_vel_out,
