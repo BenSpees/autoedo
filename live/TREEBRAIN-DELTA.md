@@ -165,12 +165,20 @@ Shipped: `piano` `electric` `acoustic` `bass` `vibraphone` `choir`
 `dantranh` `folkharp` `concertharp` `strumstick` `psaltery` `kalimba` `mbira`
 `dulcimer` `koto` `shamisen` `sitar`.
 
-Those twelve needed `AE_SMP_MAX_RR` raised from 4 to 8: the banjo carries up
-to eleven round robins on one note, and variants past the limit are dropped at
-load in silence. Eight is a deliberate ceiling rather than the pack's maximum —
-it costs three files on the single note that exceeds it (banjo `As3`), which
-still round-robins over eight distinct takes. They also arrive with their
-levels already coherent — every
+Those twelve moved two fixed limits:
+
+* `AE_SMP_MAX_RR` from 4 to **8**. The banjo carries up to eleven round robins
+  on one note, and variants past the limit are dropped at load in silence.
+  Eight is a deliberate ceiling rather than the pack's maximum — it costs three
+  files on the single note that exceeds it (banjo `As3`), which still
+  round-robins over eight distinct takes.
+* `AE_SMP_MAX_ZONES` from 64 to **128**. The four General MIDI sets are sampled
+  at every semitone from A0 to C8 — 88 zones each. Past the old limit
+  `zone_slot` returns −1 and the recording is dropped, so those instruments
+  would have gone silent partway up their range. Sized to the MIDI note space
+  now, so no set can outgrow it again.
+
+They also arrive with their levels already coherent — every
 file peaks at −6 dBFS and each set's trim lands it at −22 dBFS over the first
 300 ms, i.e. exactly where `measure_bank` normalises to, so §2.3 below applies
 to the original nine rather than to these.

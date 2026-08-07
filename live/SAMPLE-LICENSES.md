@@ -15,6 +15,10 @@ domain, no attribution, no conditions.
 General MIDI SoundFont by Frank Wen** and are licensed **CC BY 3.0**, which
 requires attribution in any application that presents them to a user.
 
+These four are also the widest sets in the library — every semitone from A0 to
+C8, 88 zones each — which is why `AE_SMP_MAX_ZONES` is 128 rather than the 64
+that covered everything before them.
+
 The line, which appears beside the instrument picker whenever one of the four
 is the selected sample instrument (`showSampleCredit` in `web/index.html`):
 

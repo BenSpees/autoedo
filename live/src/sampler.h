@@ -17,7 +17,13 @@
 #include <stddef.h>
 
 #define AE_SMP_MAX_RECS  320  /* the largest shipped instrument is 120 */
-#define AE_SMP_MAX_ZONES 64   /* widest shipped zone map is the folk harp's 29 */
+/* 128 -- one slot per MIDI note, so no instrument can outgrow it again. The
+   four General MIDI sets are sampled at every semitone from A0 to C8, which
+   is 88 zones and would have overflowed the old limit of 64: past it
+   zone_slot returns -1 and the recording is dropped at load, so an
+   instrument would simply have stopped halfway up its range. Sized to the
+   note space rather than to today's widest set. */
+#define AE_SMP_MAX_ZONES 128
 /* 8. The first nine sets never went past 3 main / 2 soft, but the
    plucked-acoustics banjo carries up to ELEVEN takes of one note, and a
    variant past this limit is dropped at load without a word -- so the limit
