@@ -443,6 +443,10 @@
       <select id="synth-patch" title="synth sound" style="width:auto" hidden></select>
       <select id="smp-inst" title="sampled instrument — struck at each note onset and re-pitched, never re-struck, for as long as that note lasts. The list is whatever the sample cache actually holds; the engine has no built-in instrument list." style="width:auto" hidden></select>
       <input type="number" id="smp-mix" class="num" min="0" max="1" step="0.05" title="sample layer blend: 0 = the shifted ghost alone, 1 = the sample alone, 0.5 = BOTH at unity" style="width:52px" hidden>
+      <!-- Shown only for the sets whose licence requires a credit. See
+           SAMPLE-LICENSES.md: four of the instruments the librarian can hand
+           us are CC BY 3.0, and this is where that obligation is met. -->
+      <span id="smp-credit" class="dimtxt" hidden></span>
       <input type="number" id="synth-atk" class="num" min="0" max="5000" step="10" title="synth attack, ms" hidden>
       <input type="number" id="synth-rel" class="num" min="0" max="10000" step="10" title="synth release, ms" hidden>
       <span class="dimtxt">Attack</span>
@@ -1068,6 +1072,26 @@ function harmCfg() { // defaults until the first status lands
 // The engine's patch table rides every status frame; rebuild only on change.
 // The instrument picker is built from what the cache actually holds — the
 // engine ships no instrument list, so adding one is dropping a folder.
+// Four of the instruments the librarian can hand us are rendered from the
+// Fluid (R3) General MIDI SoundFont and are CC BY 3.0: they may not be played
+// by a shipping app without a credit the user can reach. The engine has no
+// instrument list to hang this off -- it discovers folders -- so the names are
+// matched here. A set that is not one of these gets no line, because claiming
+// a credit for a CC0 recording would be a false statement about who made it.
+const SAMPLE_CREDITS = {
+  dulcimer: 1, koto: 1, shamisen: 1, sitar: 1,
+};
+const FLUID_CREDIT =
+  'Derived from the Fluid (R3) General MIDI SoundFont by Frank Wen, licensed CC BY 3.0.';
+
+function showSampleCredit(instrument) {
+  const el = $('smp-credit');
+  if (!el) return;
+  const owed = instrument && SAMPLE_CREDITS[instrument];
+  el.textContent = owed ? FLUID_CREDIT : '';
+  el.hidden = !owed;
+}
+
 function fillSampleInstruments(names, current) {
   const sel = $('smp-inst');
   const key = names.join(',');
@@ -1269,6 +1293,7 @@ function syncHarm() {
   const synth = c.harmSource === 'synth';
   const smp = c.harmSource === 'sample';
   $('smp-inst').hidden = $('smp-mix').hidden = !smp;
+  showSampleCredit(smp ? (c.sampleInstrument || '') : '');
   if (document.activeElement !== $('smp-inst'))
     $('smp-inst').value = c.sampleInstrument || '';
   if (document.activeElement !== $('smp-mix'))

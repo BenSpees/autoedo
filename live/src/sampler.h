@@ -17,8 +17,15 @@
 #include <stddef.h>
 
 #define AE_SMP_MAX_RECS  320  /* the largest shipped instrument is 120 */
-#define AE_SMP_MAX_ZONES 64
-#define AE_SMP_MAX_RR    4    /* shipped max is 3 main / 2 soft */
+#define AE_SMP_MAX_ZONES 64   /* widest shipped zone map is the folk harp's 29 */
+/* 12, for the banjo. The first nine sets never went past 3 main / 2 soft,
+   but the plucked-acoustics banjo carries up to ELEVEN takes of a single
+   note, and a variant past this limit is dropped at load without a word.
+   Dropping them is exactly wrong for that instrument: it decays in under a
+   second, so a strummed part repeats a note often enough that reusing one
+   recording machine-guns audibly -- which is the reason those takes were
+   recorded. */
+#define AE_SMP_MAX_RR    12
 
 /* Below this velocity a zone's SOFT pool is preferred where one exists.
    The soft files are genuinely softer-PLAYED recordings, peak-normalised
@@ -110,8 +117,10 @@ int ae_sampler_zone (const AeSampleBank *bank, int midi);
 /* Pick a recording from a zone: the soft pool below AE_SMP_SOFT_VEL where
    one exists, then a round-robin variant that is never the immediately
    previous pick for that (zone, layer) -- a repeated note that reuses its
-   recording machine-guns at once. `rr_state` is the caller's per-zone
-   last-pick memory (AE_SMP_MAX_ZONES entries, init to -1). */
+   recording machine-guns at once. `rr_state` is the caller's last-pick
+   memory, indexed zone*2+soft: AE_SMP_MAX_ZONES * 2 entries, init to -1.
+   (Two per zone, not one -- the main and soft pools round-robin
+   independently.) */
 const AeSampleRec *ae_sampler_pick (const AeSampleBank *bank, int zone,
                                     double velocity, signed char *rr_state,
                                     unsigned *rng);

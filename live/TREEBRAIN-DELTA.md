@@ -161,7 +161,16 @@ picker **marked missing**, rather than silently vanishing and leaving the
 control disagreeing with the engine.
 
 Shipped: `piano` `electric` `acoustic` `bass` `vibraphone` `choir`
-`harpsichord` `oboe` `pizzicato`.
+`harpsichord` `oboe` `pizzicato`, and the twelve plucked acoustics `banjo`
+`dantranh` `folkharp` `concertharp` `strumstick` `psaltery` `kalimba` `mbira`
+`dulcimer` `koto` `shamisen` `sitar`.
+
+Those twelve needed `AE_SMP_MAX_RR` raised from 4 to 12: the banjo carries up
+to eleven round robins on one note, and variants past the limit are dropped at
+load in silence. They also arrive with their levels already coherent — every
+file peaks at −6 dBFS and each set's trim lands it at −22 dBFS over the first
+300 ms, i.e. exactly where `measure_bank` normalises to, so §2.3 below applies
+to the original nine rather than to these.
 
 ### 2.3 Per-set mastering spread is ~21 dB — measure, don't use a constant
 
