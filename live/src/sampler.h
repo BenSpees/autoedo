@@ -18,14 +18,25 @@
 
 #define AE_SMP_MAX_RECS  320  /* the largest shipped instrument is 120 */
 #define AE_SMP_MAX_ZONES 64   /* widest shipped zone map is the folk harp's 29 */
-/* 12, for the banjo. The first nine sets never went past 3 main / 2 soft,
-   but the plucked-acoustics banjo carries up to ELEVEN takes of a single
-   note, and a variant past this limit is dropped at load without a word.
-   Dropping them is exactly wrong for that instrument: it decays in under a
-   second, so a strummed part repeats a note often enough that reusing one
-   recording machine-guns audibly -- which is the reason those takes were
-   recorded. */
-#define AE_SMP_MAX_RR    12
+/* 8. The first nine sets never went past 3 main / 2 soft, but the
+   plucked-acoustics banjo carries up to ELEVEN takes of one note, and a
+   variant past this limit is dropped at load without a word -- so the limit
+   has to be a decision rather than an accident. Eight is the ceiling we
+   allow.
+
+   It costs three files. Exactly one note in the pack is above eight (banjo
+   As3, at eleven); every other banjo note has seven or fewer and no other
+   instrument has more than five. That note still round-robins over eight
+   distinct takes, which is far past the point where a repeat is audible --
+   the failure this exists to prevent is REUSING the recording you just
+   played, and eight makes that as rare as twelve would.
+
+   WHICH eight survive is readdir order, i.e. arbitrary. That is fine: they
+   are interchangeable takes of the same note at the same dynamic, so there
+   is no "right" eight to prefer. Treebrain's librarian has no such limit and
+   serves all eleven; the two engines differing on one note of one instrument
+   is not worth a fixed-size array here. */
+#define AE_SMP_MAX_RR    8
 
 /* Below this velocity a zone's SOFT pool is preferred where one exists.
    The soft files are genuinely softer-PLAYED recordings, peak-normalised

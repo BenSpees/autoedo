@@ -165,9 +165,12 @@ Shipped: `piano` `electric` `acoustic` `bass` `vibraphone` `choir`
 `dantranh` `folkharp` `concertharp` `strumstick` `psaltery` `kalimba` `mbira`
 `dulcimer` `koto` `shamisen` `sitar`.
 
-Those twelve needed `AE_SMP_MAX_RR` raised from 4 to 12: the banjo carries up
+Those twelve needed `AE_SMP_MAX_RR` raised from 4 to 8: the banjo carries up
 to eleven round robins on one note, and variants past the limit are dropped at
-load in silence. They also arrive with their levels already coherent — every
+load in silence. Eight is a deliberate ceiling rather than the pack's maximum —
+it costs three files on the single note that exceeds it (banjo `As3`), which
+still round-robins over eight distinct takes. They also arrive with their
+levels already coherent — every
 file peaks at −6 dBFS and each set's trim lands it at −22 dBFS over the first
 300 ms, i.e. exactly where `measure_bank` normalises to, so §2.3 below applies
 to the original nine rather than to these.
