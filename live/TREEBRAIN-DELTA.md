@@ -433,7 +433,60 @@ this side.
 **1.00** (the absolute map scored the same playing 0.577), and 12 dB below
 the reference lands at **0.60** — mid-window, as the formula says.
 
-### 2.10 `harmLock: "mask"` breaks a tie away from the lead
+### 2.10 Plucked Acoustics v1.1.0 — 18 new instruments, and what each rig owes
+
+The pack drops into the existing cache layout: `s`-spelled sharps,
+`<Note>[_soft][_rrN]` naming, filenames already **sounding pitch**
+(`sampleOctave` stays `"auto"`; the banjo's octave-high upstream labels are
+corrected in the pack — **never re-import an instrument from its original
+source**, the tuning fixes live only in the pack). Verified here: all 18
+load through the real loader, zone and file counts match `pack.json`
+exactly (512 files), zero full-scale recordings, and pitch spot-checks
+across eight instruments all sit within ±8 cents of nominal through a
+fresh decode.
+
+**Engine side (done):** the round-robin cap was 4 per (zone, layer) with a
+silent skip past it — the banjo ships **11 takes on one note**, so seven
+of its recordings loaded nowhere while every count in status looked
+complete. Cap is now 12, with a test staged six deep that fails at the old
+cap.
+
+**Treebrain side:**
+
+- **Index from `pack.json`, not a glob or a flat count.** Round-robin
+  counts vary per note (`perNote[<Note>].rr` / `.softRr` are the truth);
+  a fetcher that assumes `_rr2` exists everywhere will 404. This is the
+  same class of silent cap the engine just fixed on its side.
+- **`gainHint`: use it or measure, but don't do both.** The engine ignores
+  `gainHint` deliberately — it measures each bank at load and normalises
+  to −22 dBFS (measured spread across this pack: −6.3…+7.6 dB of
+  correction, consistent with the hints). If Treebrain's own player uses
+  `gainHint` as a static trim, fine — but a player that measures AND
+  applies the hint corrects twice.
+- **The attribution obligation is real and it is yours too.** Six
+  instruments — `celesta`, `musicbox`, `dulcimer`, `koto`, `shamisen`,
+  `sitar` — are CC BY 3.0 (rendered from the Fluid R3 GM SoundFont; the
+  other twelve are CC0). One user-reachable line satisfies it, verbatim:
+
+  > Celesta, music box, hammered dulcimer, koto, shamisen and sitar
+  > samples derived from the Fluid (R3) General MIDI SoundFont by Frank
+  > Wen, licensed CC BY 3.0.
+
+  The engine's built-in UI now shows this line whenever one of the six is
+  the selected instrument; Treebrain ships the same files and needs its
+  own copy (an about panel or the SOUND picker's footer both qualify).
+  Dropping the six makes the whole pack CC0.
+- **Character notes worth surfacing in the picker** (from the pack README):
+  the six CC BY sets are one-recording-per-zone GM renders — usable, not
+  sampled-instrument quality; `dantranh` is the better koto and `psaltery`
+  the better dulcimer if substitution is acceptable. `banjo` decays in
+  under a second (long releases just hold silence); `ocarina` spans only
+  As4–B5 because the instrument does; the sustained sets (`chamberorgan`,
+  `handchimes`, `ocarina`) are one-shots with **no loop points** — they
+  stop when the recording does, so a held note past ~6 s needs the synth
+  source instead.
+
+### 2.11 `harmLock: "mask"` breaks a tie away from the lead
 
 No key added. On a tie the walk now goes **away** from the lead — up for a
 ghost above, down for one below — so a third stops collapsing onto a second

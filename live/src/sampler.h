@@ -18,7 +18,12 @@
 
 #define AE_SMP_MAX_RECS  320  /* the largest shipped instrument is 120 */
 #define AE_SMP_MAX_ZONES 64
-#define AE_SMP_MAX_RR    4    /* shipped max is 3 main / 2 soft */
+/* Per-(zone, layer) round-robin pool. The Plucked Acoustics banjo carries
+   ELEVEN takes on one note, and the loader SKIPS files past this cap --
+   at the old cap of 4 that was a silent drop of seven recordings that
+   loaded in no error path anywhere. Sized past the deepest shipped pool;
+   the cost is shorts in the index tables, so headroom is nearly free. */
+#define AE_SMP_MAX_RR    12
 
 /* Below this velocity a zone's SOFT pool is preferred where one exists.
    The soft files are genuinely softer-PLAYED recordings, peak-normalised

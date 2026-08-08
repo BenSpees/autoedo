@@ -2612,15 +2612,52 @@ static void test_sampler_bank (void)
         }
     }
 
+    /* Deep round-robin pools load COMPLETELY. The Plucked Acoustics banjo
+       carries eleven takes on one note; the loader skips files past
+       AE_SMP_MAX_RR with no error path, so an undersized cap is a silent
+       drop of recordings that the zone/file counts in status would still
+       appear to include -- the worst kind of missing. Stage six variants
+       and demand the whole pool. */
+    {
+        char rdir[300];
+        snprintf (rdir, sizeof (rdir), "%s/rrdeep", root);
+        snprintf (cmd, sizeof (cmd), "mkdir -p %s", rdir);
+        if (system (cmd) == 0)
+        {
+            char rp[560];
+            snprintf (rp, sizeof (rp), "%s/A4.wav", rdir);
+            write_wav (rp, 440.0, 0.4, 0.4);
+            for (int r = 2; r <= 6; ++r)
+            {
+                snprintf (rp, sizeof (rp), "%s/A4_rr%d.wav", rdir, r);
+                write_wav (rp, 440.0, 0.4, 0.4);
+            }
+            AeSampleBank rb;
+            memset (&rb, 0, sizeof (rb));
+            if (ae_sampler_load (&rb, root, "rrdeep", NULL, 48000.0,
+                                 AE_SMP_OCTAVE_AUTO, err, sizeof (err)))
+            {
+                CHECK (rb.n_recs == 6 && rb.n_zones == 1 && rb.main_n[0] == 6,
+                       "sampler: a six-deep round-robin pool loads whole "
+                       "(%d recs, pool %d; short = the cap silently ate takes)",
+                       rb.n_recs, rb.n_zones > 0 ? rb.main_n[0] : -1);
+                ae_sampler_free (&rb);
+            }
+            else
+                CHECK (false, "sampler: rrdeep load (%s)", err);
+        }
+    }
+
     /* Instrument discovery: the engine carries no instrument list, so a
        cache directory is the only source of truth. */
     char names[AE_SMP_MAX_INSTRUMENTS][32];
     const int ni = ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS);
-    CHECK (ni == 4, "sampler: discovery finds every instrument folder (%d)", ni);
+    CHECK (ni == 5, "sampler: discovery finds every instrument folder "
+           "(%d; rrdeep above is the fifth)", ni);
     snprintf (cmd, sizeof (cmd), "mkdir -p %s/emptyish && touch %s/emptyish/readme.txt",
               root, root);
     if (system (cmd) == 0)
-        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 4,
+        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 5,
                "sampler: a folder with no recordings is not an instrument");
 
     ae_sampler_free (&b);

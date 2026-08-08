@@ -442,6 +442,7 @@
       </span>
       <select id="synth-patch" title="synth sound" style="width:auto" hidden></select>
       <select id="smp-inst" title="sampled instrument — struck at each note onset and re-pitched, never re-struck, for as long as that note lasts. The list is whatever the sample cache actually holds; the engine has no built-in instrument list." style="width:auto" hidden></select>
+      <div id="smp-credit" style="font-size:10px;opacity:.55;margin-top:2px" hidden></div>
       <input type="number" id="smp-mix" class="num" min="0" max="1" step="0.05" title="sample layer blend: 0 = the shifted ghost alone, 1 = the sample alone, 0.5 = BOTH at unity" style="width:52px" hidden>
       <input type="number" id="synth-atk" class="num" min="0" max="5000" step="10" title="synth attack, ms" hidden>
       <input type="number" id="synth-rel" class="num" min="0" max="10000" step="10" title="synth release, ms" hidden>
@@ -1271,6 +1272,7 @@ function syncHarm() {
   $('smp-inst').hidden = $('smp-mix').hidden = !smp;
   if (document.activeElement !== $('smp-inst'))
     $('smp-inst').value = c.sampleInstrument || '';
+  updateSampleCredit(c.sampleInstrument || '', smp);
   if (document.activeElement !== $('smp-mix'))
     $('smp-mix').value = c.sampleMix === undefined ? 1 : c.sampleMix;
   document.querySelectorAll('#harm-src button').forEach(b =>
@@ -1354,6 +1356,21 @@ $('lead-gain').onchange = e => {
   e.target.value = v; schedulePost({ leadGainDb: v });
 };
 $('smp-inst').onchange = e => schedulePost({ sampleInstrument: e.target.value });
+
+/* CC BY 3.0 attribution for the six Plucked Acoustics instruments rendered
+   from the Fluid (R3) GM SoundFont. The licence requires a user-reachable
+   line in any app that ships the files, and this UI plays them, so it
+   carries one. Shown only while such an instrument is selected; every
+   other shipped set is CC0 or original and needs nothing. */
+const CCBY_FLUID = ['celesta', 'musicbox', 'dulcimer', 'koto', 'shamisen', 'sitar'];
+function updateSampleCredit(inst, visible) {
+  const el = $('smp-credit');
+  const on = visible && CCBY_FLUID.includes(inst);
+  el.hidden = !on;
+  if (on)
+    el.textContent = 'Samples derived from the Fluid (R3) General MIDI '
+                   + 'SoundFont by Frank Wen, licensed CC BY 3.0.';
+}
 $('smp-mix').onchange = e => {
   const v = Math.max(0, Math.min(1, +e.target.value || 0));
   e.target.value = v; schedulePost({ sampleMix: v });
