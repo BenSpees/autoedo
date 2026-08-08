@@ -332,6 +332,16 @@ typedef struct
         bool   retiring;  /* damp-on-repitch: this slot is on its way out
                              across the 6 ms fade. Never set under let-ring,
                              where a struck note is left to finish. */
+        bool   releasing; /* let-ring, superseded: the next strike landed,
+                             and this note now decays under the RELEASE
+                             CEILING (synthReleaseMs for ghosts,
+                             leadReleaseMs for the lead) rather than
+                             ringing to the recording's natural end.
+                             Without this the ring is unbounded -- on a
+                             many-second piano recording that is a wash of
+                             old notes under every new one, which the ear
+                             reads as mud, not as sustain. */
+        double renv;      /* the ceiling's own envelope, 1 -> 0 */
     } smp[AE_HARM_VOICES + 1][AE_SMP_SLOTS];
     /* [AE_HARM_VOICES] = the lead. Slots are a ring, not a pair: under
        let-ring every strike needs its own, because the old one is still

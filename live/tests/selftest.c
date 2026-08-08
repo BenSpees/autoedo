@@ -3054,6 +3054,67 @@ static void test_sample_ring (void)
            "let-ring on: the previous note is still ringing under the new "
            "one (%d slots sounding, want >= 2)", sounding[1]);
 
+    /* The RING IS BOUNDED: from the moment it is superseded a note decays
+       under the release ceiling, so with a short release an old note is
+       GONE by the time two more have landed. Unbounded ring is not
+       sustain, it is a wash of old notes under every new one -- on the
+       8-second recordings staged here, three ringing slots at once -- and
+       the shipped default is ring ON, so this is the case the field hears.
+       (Found the hard way: the ceiling was documented and not implemented,
+       and the report was "the bassy corrected note is back".) */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err2[256] = "";
+        if (! ae_corrector_load_samples (p, root, "piano", NULL, err2, sizeof (err2)))
+        { CHECK (false, "ring ceiling: bank load (%s)", err2); free (p); return; }
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v) voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_sample (p, 1.0, 0.8, true);          /* let-ring */
+        ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 120.0);
+        /* 120 ms ceiling: a superseded slot frees ~0.84 s later (-60 dB) */
+
+        const int gap = 36864, note = 36864, leg = gap + note;
+        const int total = 3 * leg;
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const int k = i / leg;
+            if (i - k * leg < gap) continue;
+            const double hz = k == 0 ? 220.0 : k == 1 ? 246.94 : 293.66;
+            ph += 2.0 * M_PI * hz / 48000.0;
+            in[i] = (float) (0.35 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        int live = -1;
+        const int probe = 2 * leg + gap + 9600; /* 200 ms into note 3 */
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+            if (off >= probe && off < probe + 512)
+            {
+                live = 0;
+                for (int k = 0; k < AE_SMP_SLOTS; ++k)
+                    if (p->smp[0][k].rec != NULL) ++live;
+            }
+        }
+        CHECK (live >= 1 && live <= 2,
+               "let-ring is BOUNDED by the release ceiling: two notes on, "
+               "the first is gone (%d slots; 3 = unbounded ring, the wash)",
+               live);
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+
     snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
     if (system (cmd) != 0) { /* best effort */ }
 }

@@ -1117,9 +1117,18 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
        them alone to finish on their own decay, which is the whole point:
        the next strike is a NEW string, not this one being re-fretted. */
     if (! p->smp_ring)
+    {
         for (int k = 0; k < AE_SMP_SLOTS; ++k)
             if (k != nxt && p->smp[v][k].rec != NULL)
                 p->smp[v][k].retiring = true;
+    }
+    else
+        /* Let-ring is bounded: from the moment it is superseded a note
+           decays under the release ceiling. Its natural end still applies
+           if that comes sooner. */
+        for (int k = 0; k < AE_SMP_SLOTS; ++k)
+            if (k != nxt && p->smp[v][k].rec != NULL)
+                p->smp[v][k].releasing = true;
     p->smp_cur[v] = nxt;
 
     const double rec_hz = 440.0 * pow (2.0, (rec->midi - 69) / 12.0);
@@ -1134,7 +1143,9 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
        ringing from the previous instrument keeps ITS normalisation. */
     p->smp[v][nxt].norm   = bank->norm;
     p->smp[v][nxt].fade = 1.0;
-    p->smp[v][nxt].retiring = false;
+    p->smp[v][nxt].retiring  = false;
+    p->smp[v][nxt].releasing = false;
+    p->smp[v][nxt].renv      = 1.0;
     p->smp[v][nxt].gen  = atomic_load_explicit (&p->smp_gen, memory_order_relaxed);
 }
 
@@ -1164,7 +1175,8 @@ static double sample_tick (AeCorrector *p, int v, int slot)
        heard as a second event. */
     p->smp[v][slot].gain += (p->smp[v][slot].gain_t - p->smp[v][slot].gain)
                           * p->smp_gain_a;
-    return x * p->smp[v][slot].gain * p->smp[v][slot].fade * p->smp[v][slot].norm;
+    return x * p->smp[v][slot].gain * p->smp[v][slot].fade
+             * p->smp[v][slot].renv * p->smp[v][slot].norm;
 }
 
 /* Is every slot of this voice silent? Cheaper than it looks and asked once
@@ -1177,10 +1189,13 @@ static bool sample_voice_idle (const AeCorrector *p, int v)
     return true;
 }
 
-/* One sample of a whole voice: every slot summed, with the retiring ones
-   walked down their fade and freed at the bottom of it. Under let-ring
-   nothing is retiring, so this is simply every note still ringing. */
-static double sample_mix_slots (AeCorrector *p, int v, double fade_step)
+/* One sample of a whole voice: every slot summed, retiring ones walked
+   down the 6 ms damp fade, superseded ones (let-ring) walked down the
+   release ceiling `rel_a` -- the same coefficient the voice's envelope
+   uses, so "release" means one thing. A slot is freed at -60 dB; below
+   that it is only spending cycles. */
+static double sample_mix_slots (AeCorrector *p, int v, double fade_step,
+                                double rel_a)
 {
     double x = 0.0;
     for (int k = 0; k < AE_SMP_SLOTS; ++k)
@@ -1188,14 +1203,24 @@ static double sample_mix_slots (AeCorrector *p, int v, double fade_step)
         if (p->smp[v][k].rec == NULL)
             continue;
         x += sample_tick (p, v, k);
-        if (! p->smp[v][k].retiring)
-            continue;
-        p->smp[v][k].fade -= fade_step;
-        if (p->smp[v][k].fade <= 0.0)
+        if (p->smp[v][k].retiring)
         {
-            p->smp[v][k].fade    = 0.0;
-            p->smp[v][k].rec     = NULL;
-            p->smp[v][k].retiring = false;
+            p->smp[v][k].fade -= fade_step;
+            if (p->smp[v][k].fade <= 0.0)
+            {
+                p->smp[v][k].fade    = 0.0;
+                p->smp[v][k].rec     = NULL;
+                p->smp[v][k].retiring = false;
+            }
+        }
+        else if (p->smp[v][k].releasing)
+        {
+            p->smp[v][k].renv -= p->smp[v][k].renv * rel_a;
+            if (p->smp[v][k].renv < 1e-3)
+            {
+                p->smp[v][k].rec       = NULL;
+                p->smp[v][k].releasing = false;
+            }
         }
     }
     return x;
@@ -2448,7 +2473,7 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         for (int i = 0; i < num_samples; ++i)
         {
             env += (want - env) * a;
-            const double x = sample_mix_slots (p, v, fade_step);
+            const double x = sample_mix_slots (p, v, fade_step, rel_a);
             const double sv = x * env * g_smp;
             harm_l[i] += (float) (gl * sv);
             harm_r[i] += (float) (gr * sv);
@@ -2584,8 +2609,11 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         }
         sample_repitch (p, L, hz);
         const double fade_step = 1.0 / (0.006 * p->fs);
+        /* The LEAD's ceiling is its own release, not the harmony's. */
+        const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
+        const double l_rel = 1.0 - exp (-1.0 / (lr * 0.001 * p->fs));
         for (int i = 0; i < num_samples; ++i)
-            p->wet_buf[i] = (float) sample_mix_slots (p, L, fade_step);
+            p->wet_buf[i] = (float) sample_mix_slots (p, L, fade_step, l_rel);
     }
     else if (lead_synth)
     {

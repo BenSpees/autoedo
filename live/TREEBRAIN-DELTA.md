@@ -326,9 +326,18 @@ Implementation notes that matter to a controller:
   it is the least audible steal available.
 - **Only the most recent strike is re-pitched.** The others keep their own
   pitch, which is what makes the ring a chord rather than a glissando.
-- **The release is the ceiling.** `synthReleaseMs` (ghosts) and
-  `leadReleaseMs` (lead) close a ringing note that would otherwise outlast
-  the phrase. Let-ring does not mean unbounded.
+- **The release is the ceiling, and it starts at supersession.** From the
+  moment the next strike lands, the superseded note decays under
+  `synthReleaseMs` (ghosts) / `leadReleaseMs` (lead), natural end if
+  sooner. Let-ring does not mean unbounded. *(Regression note: the first
+  build of this feature documented the ceiling and did not implement it —
+  superseded notes rang to the recording's natural end, up to four
+  many-second recordings deep, default ON. In the field that was reported
+  as "the bassy corrected note is back": a sustained low-mid wash under
+  everything, same ear-description as the old soft-clip saturation,
+  entirely different mechanism. Fixed and now under test; the discriminating
+  test stages three notes under a 120 ms ceiling and asserts the first is
+  gone by the third.)*
 - **Turning it off damps what is already ringing** rather than stranding
   it, so the switch is heard as the damper coming down instead of as
   nothing until the next note.
