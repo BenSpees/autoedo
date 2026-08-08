@@ -935,6 +935,34 @@ range encodes a *mode* in part of its axis (`sampleVelocity`,
 sentinel written by the switch. Both rules are checkable in a component
 library once, instead of per-control forever.
 
+**Built in the AutoEDO web UI** (`live/web/index.html`). The component
+library is `neutralControl()`; registering a key is the whole cost of
+compliance. It gives that control, permanently: a fill drawn from the
+neutral to the thumb (never the left edge), a tick at the neutral that the
+thumb detents into within `NEUTRAL_SNAP` = 2% of travel, double-click (and
+`Home`/`0`) to reset, signed endpoint captions, a signed readout taken from
+the config echo, and a badge whenever the value is off neutral. It paints at
+construction and **never POSTs** — defaults arrive from the echo at link-up.
+Registered: `formantSemitones`, `expression`, `outputGainDb`, `stretchCents`,
+`harmGainDb`. `formantSemitones` also keeps its number box for exact entry;
+the box drives the same handle, so there is one value and one detent.
+
+The per-voice rotaries (`hg`, `hp`, `hd`) took the half of the rule a knob
+can carry: `miniKnob({neutral})` marks the neutral on the face, detents into
+it on the same 2% rule, resets on double-click, and lights the rim when the
+voice is off neutral. A rotary has no left edge to misread, so the
+centre-fill half does not apply. `leadShiftSteps` stays a number box — a
+typed `−7` cannot be misread the way a fader can — but it wears the same
+badge, because a silent static transpose is the same class of surprise.
+
+Not built, because this UI does not surface them: `harmTiltDb`, and the two
+mode-encoding keys `sampleVelocity` / `sampleVelRefDb`. When they are
+surfaced, the tilt is one `neutralControl()` registration and the other two
+are the mode-switch-plus-unipolar-fader shape — never a bare sentinel
+half-axis. An external controller (CONTROL.md §12) owes its users the same
+rules: the engine cannot enforce them, because every one of these keys
+accepts its full range by design.
+
 ### Still open
 
 - **The velocity constants are now a two-rig contract.** 24 dB window, 0.2

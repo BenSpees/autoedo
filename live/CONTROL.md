@@ -665,6 +665,53 @@ primitives: Near-12 / Near-JI mask filters, invert/rotate, computed presets
 user preset storage, A/B snapshots (two full-config objects, swap via one
 POST each), audition tones, and the stickiness auto-raise from §4.
 
+### 8.1 Keys whose neutral is not an endpoint — read this before you draw one
+
+The engine accepts the full range of every key below by design, so it cannot
+protect a player from a control that is drawn wrong. That has already cost a
+day once: `formantSemitones` was surfaced as an unmarked left-to-right
+fader, its left edge (`−12`) was read as "0, nothing applied", and the
+corrected lead carried a permanent octave of tract shift down while three
+engine mechanisms were measured and exonerated.
+
+| Key | Range | Neutral |
+|---|---|---|
+| `formantSemitones` | −12…+12 | 0 — the centre |
+| `harmTiltDb` | −12…+12 | 0 — the centre |
+| `hd` (per-voice detune, ¢) | −100…+100 | 0 — the centre |
+| `hp` (per-voice pan) | −1…+1 | 0 — the centre |
+| `leadShiftSteps` | −72…+72 | 0 — the centre |
+| `hg` (per-voice gain, dB) | −60…+12 | 0 dB = lead parity, near the right |
+| `harmGainDb` | −24…+12 | 0 dB, near the right |
+| `attackGainDb`, `sendGainDb`, `outputGainDb`, `leadGainDb` | −60…+12 | 0 dB, near the right |
+| `expression` | 0…1 | **1 — the right edge.** Left-as-default silently kills bend transfer |
+
+Whatever you build them from, these owe the player five things:
+
+1. **Rest at the neutral**, matching the engine default — a control that
+   defaults anywhere else is wrong before anyone touches it.
+2. **Fill from the neutral to the thumb**, never from the left edge.
+3. **Mark it**: a tick at the neutral, endpoints labelled with their signs.
+4. **Read out signed, from the echo.** The echo is the truth; the thumb is
+   only a request. Snap into the neutral within ~2% of travel, and let a
+   double-click return to it.
+5. **Never POST a resting position at mount.** Take defaults from the echo
+   at link-up. That is exactly how an unmarked fader becomes a permanent −12.
+
+Off-neutral is a *state*, not a preference: a nonzero `formantSemitones`
+re-engages the formant stage even on a `formantHold:false` guitar channel,
+so show it lit, the way you would show an engaged IR.
+
+Two keys encode a **mode** inside part of their axis — `sampleVelocity`
+(`−1` = "measure") and `sampleVelRefDb` (`"auto"`). Give each a mode switch
+plus a unipolar fader, with the switch writing the sentinel. Never a bare
+slider whose left half means something categorically different from its
+right half.
+
+The built-in UI implements all of this in one place — `neutralControl()` and
+`miniKnob({neutral})` in `live/web/index.html` — rather than per control;
+the shape is worth copying.
+
 ## 9. Minimal control session
 
 ```bash

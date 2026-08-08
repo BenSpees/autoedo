@@ -42,6 +42,58 @@
     border-radius: 7px; padding: 4px 8px; font-size: 13px;
   }
   input[type=range] { accent-color: var(--bone); }
+  /* ── neutral-aware faders (TREEBRAIN-DELTA §12) ───────────────────────
+     A control whose neutral is not an endpoint must never be drawn as a
+     plain left-to-right fill: every fader anyone has ever touched fills
+     from the left when it is on, so a left-filled bipolar control reads as
+     "0, nothing applied" when it is really sitting at its minimum. For
+     formantSemitones that reading put a permanent −12 on the corrected lead
+     and cost a day of engine diagnosis.
+
+     So the fill runs from the NEUTRAL to the thumb, and the neutral wears a
+     tick. JS writes three custom properties: --np is where the neutral sits,
+     --fa/--fb bracket the filled span. Two gradients stack, tick over fill. */
+  input[type=range].bip {
+    -webkit-appearance: none; appearance: none;
+    height: 18px; background: none; flex: 1 1 70px; min-width: 70px;
+  }
+  input[type=range].bip::-webkit-slider-runnable-track {
+    height: 6px; border-radius: 3px;
+    background:
+      linear-gradient(to right, transparent 0 calc(var(--np) - 1px),
+        var(--bone) calc(var(--np) - 1px) calc(var(--np) + 1px),
+        transparent calc(var(--np) + 1px) 100%),
+      linear-gradient(to right, var(--line) 0 var(--fa),
+        var(--amber) var(--fa) var(--fb), var(--line) var(--fb) 100%);
+  }
+  input[type=range].bip::-moz-range-track {
+    height: 6px; border-radius: 3px;
+    background:
+      linear-gradient(to right, transparent 0 calc(var(--np) - 1px),
+        var(--bone) calc(var(--np) - 1px) calc(var(--np) + 1px),
+        transparent calc(var(--np) + 1px) 100%),
+      linear-gradient(to right, var(--line) 0 var(--fa),
+        var(--amber) var(--fa) var(--fb), var(--line) var(--fb) 100%);
+  }
+  input[type=range].bip::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; margin-top: -4px;
+    border-radius: 50%; background: var(--bone); border: 1px solid #00000066;
+  }
+  input[type=range].bip::-moz-range-thumb {
+    width: 14px; height: 14px; border: 1px solid #00000066;
+    border-radius: 50%; background: var(--bone);
+  }
+  input[type=range].bip::-moz-range-progress { background: none; }
+  /* Endpoints carry their sign, so neither end can be read as "off". */
+  .endcap { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+  /* Off-neutral is a state, not a preference: a nonzero formant offset
+     re-engages a stage on a channel that was deliberately cleared, so it
+     wears a badge exactly as an engaged IR does. */
+  .badge {
+    font-size: 10px; letter-spacing: .08em; font-weight: 600; color: var(--amber);
+    border: 1px solid var(--amber); border-radius: 5px; padding: 0 5px;
+    white-space: nowrap; align-self: center;
+  }
   .num { text-align: center; font-variant-numeric: tabular-nums; }
   .tab { font-variant-numeric: tabular-nums; }
   .dimtxt { color: var(--dim); }
@@ -214,6 +266,15 @@
   .mknob .rot { position: absolute; inset: 0; }
   .mknob .ind { position: absolute; left: calc(50% - 1px); top: 2px; width: 2px;
                 height: 9px; border-radius: 1px; background: var(--pc); }
+  /* The knob's neutral, drawn on the face (§12): a rotary has no left edge to
+     misread, but "where is nothing applied" still has to be visible without
+     reading the number. --nd is the neutral's angle; JS sets it. */
+  .mknob.hasneutral::before {
+    content: ''; position: absolute; inset: 0; border-radius: 50%;
+    background: linear-gradient(var(--nd), var(--dim) 0 1.5px, transparent 1.5px 100%);
+    opacity: .8; pointer-events: none;
+  }
+  .mknob.offneutral { border-color: var(--amber); }
   .mklabel { font-size: 9px; color: var(--dim); }
   .msbtn { padding: 1px 7px; font-size: 10px; border-radius: 5px; }
   .msbtn.on { background: var(--pc); color: #17171c; border-color: var(--pc);
@@ -286,13 +347,23 @@
           </select>
         </div>
         <div class="prow"><label>Expression</label>
-          <input type="range" id="expr" min="0" max="1" step="0.05" value="1" style="flex:1" title="how much of your playing survives correction. 1 = bends and vibrato pass through to the output (and to the harmony) while the note's centre is still corrected — what a pitch-shifting pedal does. 0 = the output is pinned to the degree and expression is removed. A steady note sounds the same either way.">
+          <span class="endcap">0</span>
+          <input type="range" class="bip" id="expr" min="0" max="1" step="0.05" value="1" title="how much of your playing survives correction. 1 = bends and vibrato pass through to the output (and to the harmony) while the note's centre is still corrected — what a pitch-shifting pedal does. 0 = the output is pinned to the degree and expression is removed. A steady note sounds the same either way. NEUTRAL IS 1, THE RIGHT EDGE — the detent is there, not at the left.">
+          <span class="endcap">1 full</span>
           <span class="tab" id="expr-val" style="flex:0 0 40px;text-align:right">100%</span>
+          <span class="badge" id="expr-badge" hidden>REDUCED</span>
         </div>
         <div class="prow"><label>Formant hold</label>
           <label class="switch" style="display:flex" title="hold formants still under the pitch shift (a voice keeps sounding like the same singer). Turn OFF for guitar and other non-vocal sources: they have no vocal tract to preserve, and off removes the formant stage from the signal path entirely."><input type="checkbox" id="formant-hold" checked></label>
           <span class="dimtxt">offset</span>
           <input type="number" id="formant-st" class="num" min="-12" max="12" step="0.5" value="0" title="formant offset, semitones — a character control: + toward a smaller instrument, − a larger one. Independent of pitch; works with hold on or off." style="width:52px">
+        </div>
+        <div class="prow"><label>Formant offset</label>
+          <span class="endcap">−12</span>
+          <input type="range" class="bip" id="formant-fader" min="-12" max="12" step="0.5" value="0" title="formant offset, semitones. BIPOLAR: neutral is the CENTRE, not the left edge — the left edge is −12 st, a full octave of tract shift down. The thumb snaps into the centre detent; double-click resets to 0.">
+          <span class="endcap">+12 st</span>
+          <span class="tab" id="formant-val" style="flex:0 0 56px;text-align:right">0.0 st</span>
+          <span class="badge" id="formant-badge" hidden>ACTIVE</span>
         </div>
         <div class="prow"><label>Record send</label>
           <input type="number" id="send-ch" class="num" min="0" max="32" step="1" value="0" title="output channel the record send leaves on (0 = off; restart). Refused if it collides with the live output." style="width:48px">
@@ -310,8 +381,11 @@
           </select>
         </div>
         <div class="prow"><label>Output gain</label>
-          <input type="range" id="gain" min="-60" max="12" step="0.5" value="0" style="flex:1">
+          <span class="endcap">−60</span>
+          <input type="range" class="bip" id="gain" min="-60" max="12" step="0.5" value="0" title="output trim, dB. Neutral is 0 dB — unity, near the right — not the left edge, which is silence.">
+          <span class="endcap">+12 dB</span>
           <span class="tab" id="gain-val" style="flex:0 0 56px;text-align:right">0.0 dB</span>
+          <span class="badge" id="gain-badge" hidden>TRIMMED</span>
         </div>
         <hr>
         <div class="prow">
@@ -359,8 +433,11 @@
         </div>
         <hr>
         <div class="prow"><label>Octave stretch</label>
-          <input type="range" id="stretch" min="-30" max="30" step="0.5" value="0" style="flex:1">
+          <span class="endcap">−30</span>
+          <input type="range" class="bip" id="stretch" min="-30" max="30" step="0.5" value="0" title="octave stretch, cents per octave. BIPOLAR: neutral is the centre — the left edge is a 30 ¢ compressed octave, not 'no stretch'.">
+          <span class="endcap">+30 ¢</span>
           <span class="tab" id="stretch-val" style="flex:0 0 74px;text-align:right">+0.0 ¢/oct</span>
+          <span class="badge" id="stretch-badge" hidden>STRETCHED</span>
         </div>
       </div>
     </div>
@@ -376,6 +453,7 @@
     <span class="dotsep">·</span>
     <span class="dimtxt" title="static transpose of the corrected lead, in EDO steps, applied after the snap — the detector still tracks the real note. ±EDO is an exact equave (keeps the pitch class). Locked harmony stacks on the shifted lead.">Shift</span>
     <input type="number" id="lead-shift" class="num" min="-72" max="72" step="1" value="0" style="width:52px">
+    <span class="badge" id="lead-shift-badge" hidden>SHIFTED</span>
     <span id="readout" class="tab unvoiced"><span class="in">—</span> <span class="dimtxt">&rarr;</span> <span class="tgt">—</span></span>
   </div>
 
@@ -453,9 +531,10 @@
       <input type="number" id="atk-gain" class="num" min="-60" max="12" step="1" title="attack sound gain, dB relative to the note's own onset level (Xentar ships −26: felt more than heard)" style="width:56px">
       <button id="harm-hold" title="HOLD (momentary): freeze the ghosts where they are and let them ring on while you keep singing over them. Hold the button, or map a MIDI CC in the controller.">HOLD</button>
       <input type="number" id="harm-glide" class="num" min="0" max="5000" step="10" title="harmony portamento, ms — how long a ghost takes to slide to a new target when the lead moves. 0 = jump." style="width:64px">
-      <span id="harm-master-wrap" style="display:inline-flex;align-items:center;gap:6px" title="harmony bus master — one gain over every ghost (shifted and synth alike), on top of the per-voice trims. Never touches the lead.">
-        <input type="range" id="harm-master" min="-24" max="12" step="0.5" value="0" style="width:88px">
+      <span id="harm-master-wrap" style="display:inline-flex;align-items:center;gap:6px" title="harmony bus master — one gain over every ghost (shifted and synth alike), on top of the per-voice trims. Never touches the lead. Neutral is 0 dB (the detent), not the left edge: left is −24 dB, right is +12 dB OVER the lead.">
+        <input type="range" class="bip" id="harm-master" min="-24" max="12" step="0.5" value="0" style="width:88px;flex:0 0 88px">
         <span class="tab" id="harm-master-val" style="min-width:52px;text-align:right">0.0 dB</span>
+        <span class="badge" id="harm-master-badge" hidden>TRIMMED</span>
       </span>
       <span class="dimtxt">Lead sound</span>
       <span class="seg" id="lead-src" title="what the corrected lead is made of: the shifter's corrected live voice, or the built-in synth playing that same corrected pitch (a synth lead has no dry component — unvoiced is silence)">
@@ -517,6 +596,121 @@ function schedulePost(partial) {
       applyStatus(await r.json());
     } catch (e) {}
   }, 120);
+}
+
+/* ---- neutral-aware controls (TREEBRAIN-DELTA §12) --------------------------
+   The formant incident was never a formant bug. `formantSemitones` was drawn
+   as a plain fader; the left edge reads as "off" to anyone who has ever
+   touched a volume slider; the left edge is −12. The corrected lead wore a
+   permanent octave of tract shift down and three engine mechanisms were
+   measured and exonerated before the control was found.
+
+   The fix is structural, not per-control. Registering a key here buys it,
+   permanently and identically:
+
+     · a fill drawn from its NEUTRAL to the thumb, never from the left edge;
+     · a visible detent at the neutral, which the thumb snaps into within 2%
+       of travel, and which a double-click returns to;
+     · a signed readout, taken from the config echo — the echo is the truth,
+       the thumb is only a request;
+     · a badge whenever the value is off neutral, because a stray −2 st is
+       not a tone tweak: it re-engages the formant stage on a channel that
+       `formantHold:false` deliberately cleared. Same reasoning as a lit IR.
+
+   And one invariant that is impossible to break from here: a control never
+   POSTs its resting position. Defaults arrive from the engine's echo at
+   link-up; construction paints and nothing else. That rule is what turns an
+   unmarked fader into a permanent −12, and it is checked once, here, rather
+   than in every handler forever.
+
+   Adding a control to this list is the entire cost of complying with §12. */
+const NEUTRAL_SNAP = 0.02;                 // detent width, fraction of travel
+const NCTL = {};                           // key -> handle, for the echo walk
+
+function neutralControl(spec) {
+  const el = $(spec.id);
+  const min = parseFloat(el.min), max = parseFloat(el.max);
+  const span = max - min, neutral = spec.neutral;
+  const out = spec.out ? $(spec.out) : null;
+  const chip = spec.badge ? $(spec.badge) : null;
+  const pct = v => ((v - min) / span) * 100;
+
+  // Paint only. Never posts -- see the note above.
+  const paint = v => {
+    const t = pct(v), n = pct(neutral);
+    el.style.setProperty('--np', n.toFixed(2) + '%');
+    el.style.setProperty('--fa', Math.min(t, n).toFixed(2) + '%');
+    el.style.setProperty('--fb', Math.max(t, n).toFixed(2) + '%');
+    if (out) out.textContent = spec.text(v);
+    if (chip) chip.hidden = Math.abs(v - neutral) < 1e-9;
+  };
+
+  // The detent: inside 2% of travel the control IS neutral. Deliberately
+  // unreachable values -- you cannot leave a −0.5 st behind by accident.
+  const snap = v =>
+    (Math.abs(v - neutral) <= span * NEUTRAL_SNAP ? neutral : v);
+  const mirror = spec.mirror ? $(spec.mirror) : null;   // see set(), below
+
+  const set = (v, post) => {
+    v = snap(Math.max(min, Math.min(max, v)));
+    el.value = v;
+    // A second widget on the same key (the formant number box) follows every
+    // set immediately. Without this it only caught up when the dirty window
+    // expired, and two widgets showing one value disagreed for 2.5 s.
+    if (mirror && document.activeElement !== mirror) mirror.value = v;
+    paint(v);
+    if (post) {
+      schedulePost({ [spec.key]: v });
+      if (spec.after) spec.after(v);       // control-specific side effects
+    }
+    return v;
+  };
+
+  el.oninput = () => set(parseFloat(el.value), true);
+  el.ondblclick = () => set(neutral, true);          // the documented reset
+  // Keyboard parity with the double-click, for anyone driving this by tab.
+  el.onkeydown = e => { if (e.key === 'Home' || e.key === '0') { e.preventDefault(); set(neutral, true); } };
+
+  const handle = {
+    key: spec.key, neutral, set,
+    // The echo is authoritative, but it must never fight a hand mid-drag.
+    sync(v) {
+      if (document.activeElement === el) return;
+      set(v === undefined || v === null ? neutral : v, false);
+    },
+  };
+  paint(neutral);                                     // resting position, unsent
+  NCTL[spec.key] = handle;
+  return handle;
+}
+
+// Signed, with a real minus sign — "−5.0 st" reads as a direction, "-5.0"
+// reads as a typo.
+const signed = (v, digits, unit) =>
+  `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(digits)}${unit}`;
+
+neutralControl({ id: 'formant-fader', key: 'formantSemitones', neutral: 0,
+  out: 'formant-val', badge: 'formant-badge', mirror: 'formant-st',
+  text: v => signed(v, 1, ' st') });
+neutralControl({ id: 'expr', key: 'expression', neutral: 1,
+  out: 'expr-val', badge: 'expr-badge', text: v => Math.round(v * 100) + '%' });
+neutralControl({ id: 'gain', key: 'outputGainDb', neutral: 0,
+  out: 'gain-val', badge: 'gain-badge', text: v => signed(v, 1, ' dB') });
+neutralControl({ id: 'stretch', key: 'stretchCents', neutral: 0,
+  out: 'stretch-val', badge: 'stretch-badge', text: v => signed(v, 1, ' ¢/oct'),
+  after: () => buildRuler() });
+neutralControl({ id: 'harm-master', key: 'harmGainDb', neutral: 0,
+  out: 'harm-master-val', badge: 'harm-master-badge', text: v => signed(v, 1, ' dB') });
+
+// Walks every registered control from one config echo. Both sync paths call
+// it, so there is no second place where a value could be painted by hand and
+// drift from the engine's.
+function syncNeutral(c) {
+  for (const k in NCTL) NCTL[k].sync(c[k]);
+  // leadShiftSteps stays a number box -- a typed "−7" cannot be misread the
+  // way a fader can -- but a silent static transpose deserves the same badge.
+  const ls = c.leadShiftSteps === undefined ? 0 : c.leadShiftSteps;
+  $('lead-shift-badge').hidden = ls === 0;
 }
 
 let toastTimer = null;
@@ -1119,16 +1313,30 @@ function voiceLabel(v, c) {
   return `${iv > 0 ? '↑' : '↓'} ${Math.abs(iv)}${EXT_LABEL[c.hx[v]] || ''}`;
 }
 
-function miniKnob(host, color, opts) { // {min,max,get,fmt,onset}
+// {min,max,get,fmt,onset,neutral}
+// `neutral` opts a knob into the §12 rules that a rotary can carry: the
+// resting value is marked on the face, the drag detents into it within 2% of
+// travel, a double-click returns to it, and the rim lights when the voice is
+// off neutral. hg/hp/hd are all centre-zero, so all three take it.
+function miniKnob(host, color, opts) {
   const el = document.createElement('div');
-  el.className = 'mknob';
+  const span = opts.max - opts.min;
+  const hasN = opts.neutral !== undefined;
+  el.className = 'mknob' + (hasN ? ' hasneutral' : '');
   el.style.setProperty('--pc', color);
+  if (hasN)
+    el.style.setProperty('--nd',
+      `${(-135 + 270 * (opts.neutral - opts.min) / span).toFixed(1)}deg`);
   el.innerHTML = '<div class="rot"><div class="ind"></div></div>';
   host.appendChild(el);
   const draw = () => {
-    const n = (opts.get() - opts.min) / (opts.max - opts.min);
-    el.querySelector('.rot').style.transform = `rotate(${-135 + 270 * n}deg)`;
+    const v = opts.get();
+    el.querySelector('.rot').style.transform =
+      `rotate(${-135 + 270 * (v - opts.min) / span}deg)`;
+    if (hasN) el.classList.toggle('offneutral', Math.abs(v - opts.neutral) > 1e-9);
   };
+  const snap = v =>
+    (hasN && Math.abs(v - opts.neutral) <= span * NEUTRAL_SNAP ? opts.neutral : v);
   let y0 = null, v0 = null;
   el.addEventListener('pointerdown', ev => {
     y0 = ev.clientY; v0 = opts.get();
@@ -1137,12 +1345,13 @@ function miniKnob(host, color, opts) { // {min,max,get,fmt,onset}
   });
   el.addEventListener('pointermove', ev => {
     if (y0 === null) return;
-    let v = v0 + (y0 - ev.clientY) / 120 * (opts.max - opts.min);
-    v = Math.max(opts.min, Math.min(opts.max, v));
+    let v = v0 + (y0 - ev.clientY) / 120 * span;
+    v = snap(Math.max(opts.min, Math.min(opts.max, v)));
     opts.onset(v);
     draw();
   });
   el.addEventListener('pointerup', () => { y0 = null; });
+  if (hasN) el.addEventListener('dblclick', () => { opts.onset(opts.neutral); draw(); });
   el.redraw = draw;
   return el;
 }
@@ -1205,19 +1414,19 @@ function buildHarmPods() {
     }
     row.appendChild(dots);
     const gain = miniKnob(row, VOICE_COLORS[v], {
-      min: -24, max: 12,
+      min: -24, max: 12, neutral: 0,          // 0 dB is lead parity, not an edge
       get: () => Math.max(-24, harmCfg().hg[v]),
       onset: x => { const hg = harmCfg().hg.slice(); hg[v] = Math.round(x * 2) / 2; schedulePost({ hg }); updVal(); },
     });
     gain.title = 'voice gain (drag)';
     const pan = miniKnob(row, VOICE_COLORS[v], {
-      min: -1, max: 1,
+      min: -1, max: 1, neutral: 0,            // centre, not hard left
       get: () => harmCfg().hp[v],
       onset: x => { const hp = harmCfg().hp.slice(); hp[v] = Math.round(x * 20) / 20; schedulePost({ hp }); updVal(); },
     });
     pan.title = 'pan (drag)';
     const det = miniKnob(row, VOICE_COLORS[v], {
-      min: -25, max: 25,
+      min: -25, max: 25, neutral: 0,          // in tune
       get: () => (harmCfg().hd || [0,0,0,0,0])[v],
       onset: x => { const hd = (harmCfg().hd || [0,0,0,0,0]).slice();
                     hd[v] = Math.round(x * 2) / 2; schedulePost({ hd }); updVal(); },
@@ -1285,11 +1494,7 @@ function syncHarm() {
   if (document.activeElement !== $('synth-rel')) $('synth-rel').value = c.synthReleaseMs;
   if (document.activeElement !== $('lead-gain'))
     $('lead-gain').value = c.leadGainDb === undefined ? 0 : c.leadGainDb;
-  if (document.activeElement !== $('expr')) {
-    const ex = c.expression === undefined ? 1 : c.expression;
-    $('expr').value = ex;
-    $('expr-val').textContent = Math.round(ex * 100) + '%';
-  }
+  syncNeutral(c);                       // expression, formant, harm master, …
   $('formant-hold').checked = c.formantHold !== false;
   if (document.activeElement !== $('formant-st'))
     $('formant-st').value = c.formantSemitones === undefined ? 0 : c.formantSemitones;
@@ -1308,9 +1513,7 @@ function syncHarm() {
     $('atk-gain').value = c.attackGainDb === undefined ? -26 : c.attackGainDb;
   if (document.activeElement !== $('harm-glide'))
     $('harm-glide').value = c.harmGlideMs === undefined ? 0 : c.harmGlideMs;
-  const hgm = c.harmGainDb === undefined ? 0 : c.harmGainDb;
-  if (document.activeElement !== $('harm-master')) $('harm-master').value = hgm;
-  $('harm-master-val').textContent = `${hgm.toFixed(1)} dB`;
+  // harmGainDb is painted by syncNeutral() above, from the same echo.
   // collapsed chips: what the voices are, not just how many — and ONLY when
   // collapsed (expanded shows the pods; never the same state twice)
   const chips = $('harm-chips');
@@ -1358,15 +1561,14 @@ $('smp-mix').onchange = e => {
   const v = Math.max(0, Math.min(1, +e.target.value || 0));
   e.target.value = v; schedulePost({ sampleMix: v });
 };
-$('expr').oninput = e => {
-  const v = +e.target.value;
-  $('expr-val').textContent = Math.round(v * 100) + '%';
-  schedulePost({ expression: v });
-};
+// expr, gain, stretch and harm-master are neutral-aware controls now; their
+// input handling lives in neutralControl() so the detent, the centre-fill and
+// the no-POST-at-mount rule cannot be forgotten one control at a time.
 $('formant-hold').onchange = e => schedulePost({ formantHold: e.target.checked });
+// The number box stays for exact entry, but it drives the same handle as the
+// fader -- one value, one code path, one detent.
 $('formant-st').onchange = e => {
-  const v = Math.max(-12, Math.min(12, +e.target.value || 0));
-  e.target.value = v; schedulePost({ formantSemitones: v });
+  e.target.value = NCTL.formantSemitones.set(+e.target.value || 0, true);
 };
 $('send-ch').onchange = e => {
   const v = Math.max(0, Math.min(32, Math.round(+e.target.value || 0)));
@@ -1387,11 +1589,6 @@ $('atk-gain').onchange = e => {
 $('harm-glide').onchange = e => {
   const v = Math.max(0, Math.min(5000, +e.target.value || 0));
   e.target.value = v; schedulePost({ harmGlideMs: v });
-};
-$('harm-master').oninput = e => {
-  const v = parseFloat(e.target.value);
-  $('harm-master-val').textContent = `${v.toFixed(1)} dB`;
-  schedulePost({ harmGainDb: v });
 };
 document.querySelectorAll('#harm-lock button').forEach(b => {
   b.onclick = () => { schedulePost({ harmLock: b.dataset.lock }); syncHarm(); };
@@ -1606,12 +1803,6 @@ $('a4').onchange = e => {
   if (!(v > 0)) return;
   schedulePost({ refNoteHz: v });
 };
-$('stretch').oninput = e => {
-  const v = +e.target.value;
-  $('stretch-val').textContent = `${v >= 0 ? '+' : ''}${v.toFixed(1)} ¢/oct`;
-  schedulePost({ stretchCents: v });
-  buildRuler();
-};
 
 function rebuildChips() {
   const host = $('edo-chips');
@@ -1740,10 +1931,6 @@ $('out-dev').onchange = e => {
 };
 $('out-ch').onchange = e => schedulePost({ outputChannel: +e.target.value });
 $('refresh-dev').onclick = () => loadDevices();
-$('gain').oninput = e => {
-  $('gain-val').textContent = `${(+e.target.value).toFixed(1)} dB`;
-  schedulePost({ outputGainDb: +e.target.value });
-};
 $('show-piano').onchange = buildRuler;
 $('show-ji').onchange = buildRuler;
 $('restart').onclick = async () => {
@@ -1939,8 +2126,7 @@ function setControls(c) {
     $('lead-shift').value = c.leadShiftSteps === undefined ? 0 : c.leadShiftSteps;
   if (document.activeElement !== $('ref-note'))
     $('ref-note').value = c.refNote === undefined ? 9 : c.refNote;
-  $('stretch').value = c.stretchCents;
-  $('stretch-val').textContent = `${c.stretchCents >= 0 ? '+' : ''}${c.stretchCents.toFixed(1)} ¢/oct`;
+  syncNeutral(c);   // stretch, output gain, expression, formant, harm master
   // echo-back guard: never overwrite a knob whose inline editor is open
   const knobSync = (k, v) => {
     if (!$(`kval-${k.id}`).querySelector('input')) knobSet(k, v, false);
@@ -1972,8 +2158,7 @@ function setControls(c) {
   }
   $('midi-mode').classList.toggle('on', !!c.midiMode);
   if ($('midi-src').value !== (c.midiSource || '')) $('midi-src').value = c.midiSource || '';
-  $('gain').value = c.outputGainDb;
-  $('gain-val').textContent = `${c.outputGainDb.toFixed(1)} dB`;
+  // outputGainDb is painted by syncNeutral() above, from the same echo.
   $('bypass').classList.toggle('on', c.bypass);
   $('bufsize').value = String(c.bufferFrames);
   if ($('in-dev').value !== (c.inputUid || '')) $('in-dev').value = c.inputUid || '';
