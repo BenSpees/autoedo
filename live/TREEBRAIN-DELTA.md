@@ -475,7 +475,8 @@ stops collapsing.
    the reason in `status.sendError` (`""` after any accepted send write).
    Surface it like `irError`.
 
-Also landed: **`formantSemitones`** (float −12…+12, live) — the formant
+Also landed: **`formantSemitones`** (float −12…+12, live — **bipolar;
+see §12 before putting it on a fader**) — the formant
 offset flagged as nice-if-cheap. It was: the library call always took a
 semitones argument and the engine always passed zero. `+` toward a smaller
 instrument, `−` larger; composes with `formantHold` either way (hold-then-
@@ -873,6 +874,62 @@ each is a real way to lose a sample path silently, but neither was this.
 
 **(f) Layer-blend taper: MATCHED.** Both sides use
 `g = sin(min(1, 2d)·π/2)` with the unity plateau at 0.5. Nothing to do.
+
+## 12. UI correction: bipolar controls (field incident, 2026-08-08)
+
+**What happened.** `formantSemitones` was surfaced as an unmarked slider.
+The player read the left edge as "0, no correction" — the natural reading
+of an unlabelled fader — but the control is **bipolar**: the left edge is
+**−12**, neutral is the **centre**. The slider sat left of centre, which
+put a permanent formant shift *down* on the corrected lead and every
+shifted ghost, and was reported as "the bassy corrected note is back."
+Three engine-side mechanisms were measured and exonerated before the
+slider was found. Total cost: a day of diagnosis for a missing tick mark.
+
+**The correction, for any bipolar key:**
+
+1. **Render bipolar as bipolar.** Fill the track **from the centre to the
+   thumb**, not from the left edge. A centre-filled fader cannot be
+   misread as "left = off".
+2. **Mark neutral.** A tick and a `0` label at centre; endpoints labelled
+   with signed values (`−12` / `+12 st`).
+3. **Detent at neutral.** Snap to 0 within ~2% of travel, and double-click
+   (or long-press) resets to 0.
+4. **Signed readout.** Show the value with its sign next to the control
+   (`−5.0 st`), sourced from the **config echo**, never from thumb
+   position — the echo is the truth, the thumb is a request.
+5. **Show non-neutral as ACTIVE.** Any nonzero `formantSemitones` engages
+   the formant stage even on a `formantHold:false` guitar channel, so a
+   stray −2 is not a tone tweak, it is a processing stage re-entering a
+   path that was deliberately cleared. Light a badge when ≠ 0, exactly as
+   for an engaged IR.
+6. **Never initialize from the control.** Defaults come from the engine's
+   echo at link-up; a fader must not POST its resting position on mount.
+   (This is how an unmarked slider becomes a permanent −12.)
+
+**Audit these keys — every one is bipolar or has a non-edge neutral, and
+each is one unmarked fader away from the same incident:**
+
+| Key | Range | Neutral | Trap if drawn left-to-right |
+|---|---|---|---|
+| `formantSemitones` | −12…+12 | **0 (centre)** | left edge = −12: the incident above |
+| `hg` (per-voice gain) | −60…+12 | **0 dB = lead parity**, not an edge | left = −60 (off); "full right" is +12 dB OVER the lead |
+| `harmGainDb` | −24…+12 | 0 dB | same |
+| `harmTiltDb` | −12…+12 | 0 (centre) | left = maximally dark, reads as "no tilt" |
+| `hd` (detune) | −100…+100 ¢ | 0 (centre) | left = −100 ¢, a quarter-tone flat |
+| `hp` (pan) | −1…+1 | 0 (centre) | left-as-zero pins every voice hard left |
+| `leadShiftSteps` | −72…+72 | 0 (centre) | left = six equaves down |
+| `attackGainDb`, `sendGainDb`, `outputGainDb`, `leadGainDb` | −60…+12 | 0 dB, near right | left-as-zero mutes; also fine, but label it |
+| `sampleVelocity` | −1…1 | **−1 = "measure" sentinel** | the left HALF is a mode, not a level — this should be an auto/manual toggle plus a 0…1 fader, never a bare −1…1 slider |
+| `sampleVelRefDb` | auto \| −60…0 | "auto" | same shape: mode + fader, not one axis |
+| `expression` | 0…1 | 1 (right edge!) | left-as-default reads as "expression off" — default is FULL |
+
+**One structural rule covers all of it:** a control whose neutral is not
+an endpoint gets a centre-fill, a detent and a signed label; a key whose
+range encodes a *mode* in part of its axis (`sampleVelocity`,
+`sampleVelRefDb`) gets a mode switch plus a unipolar fader, with the
+sentinel written by the switch. Both rules are checkable in a component
+library once, instead of per-control forever.
 
 ### Still open
 
