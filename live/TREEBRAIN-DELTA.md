@@ -893,8 +893,11 @@ slider was found. Total cost: a day of diagnosis for a missing tick mark.
    misread as "left = off".
 2. **Mark neutral.** A tick and a `0` label at centre; endpoints labelled
    with signed values (`−12` / `+12 st`).
-3. **Detent at neutral.** Snap to 0 within ~2% of travel, and double-click
-   (or long-press) resets to 0.
+3. **Default and snap to centre.** The control's resting position IS the
+   neutral centre — matching the engine default — and the thumb snaps to
+   it within ~2% of travel; double-click (or long-press) also resets to 0.
+   A bipolar control that defaults anywhere else is wrong before anyone
+   touches it.
 4. **Signed readout.** Show the value with its sign next to the control
    (`−5.0 st`), sourced from the **config echo**, never from thumb
    position — the echo is the truth, the thumb is a request.
@@ -925,7 +928,8 @@ each is one unmarked fader away from the same incident:**
 | `expression` | 0…1 | 1 (right edge!) | left-as-default reads as "expression off" — default is FULL |
 
 **One structural rule covers all of it:** a control whose neutral is not
-an endpoint gets a centre-fill, a detent and a signed label; a key whose
+an endpoint **defaults to that neutral, snaps to it**, and gets a
+centre-fill and a signed label; a key whose
 range encodes a *mode* in part of its axis (`sampleVelocity`,
 `sampleVelRefDb`) gets a mode switch plus a unipolar fader, with the
 sentinel written by the switch. Both rules are checkable in a component
