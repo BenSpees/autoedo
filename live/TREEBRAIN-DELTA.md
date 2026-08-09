@@ -433,7 +433,58 @@ this side.
 **1.00** (the absolute map scored the same playing 0.577), and 12 dB below
 the reference lands at **0.60** — mid-window, as the formula says.
 
-### 2.10 Plucked Acoustics v1.1.0 — 18 new instruments, and what each rig owes
+### 2.10 Acoustic Instruments v2.0.0 — 24 instruments, and a BREAKING relabel
+
+**⚠ Do this first if any cache was built from Plucked Acoustics v1.x: ten
+instruments were labelled one octave BELOW the pitch they sound, and
+v2.0.0 moves their note names up an octave.** Audio bytes are unchanged —
+only labels. Affected: `dantranh` `folkharp` `strumstick` `psaltery`
+`kalimba` `mbira` `handchimes` `mbiramavembe` `chamberorgan` `ocarina`.
+Not affected: `banjo`, `concertharp`, the six SoundFont sets. **Re-extract
+and re-read pack.json — do not patch names in a cache.** If Treebrain
+hardcoded any name→MIDI map for those ten, add 12. The audit trail is
+`OCTAVE_AUDIT.md` in the zip; its general lesson is worth keeping: *a
+pitch checker that searches ±120 cents around the claimed pitch cannot
+see an octave error, by construction* — the v1.1 QA (and this side's own
+first spot-check) both passed a pack that was an octave off, for exactly
+that reason. Verified here with an explicit three-candidate harmonic
+model over all 653 files: the corrected labels win on every instrument.
+
+**New in v2.0.0 — six winds and brass, all CC0**, chosen by measured
+attack rather than articulation name:
+
+| id | Attack | Range | Notes | Max gap | Files |
+|---|---|---|---|---|---|
+| `trumpetharmon` | 606 ms | A♯3–A5 | 8 | 5 st | 16 |
+| `trombone` | 379 ms | A♯1–F4 | 11 | 7 st | 22 |
+| `tenorsaxvib` | 190 ms | A♯2–D6 | 19 | 4 st | 19 |
+| `clarinet` | 180 ms | D3–F6 | 11 | 5 st | 22 |
+| `tenorsax` | 102 ms | G♯2–E6 | 23 | 2 st | 46 |
+| `frenchhorn` | 95 ms | A♯2–F5 | 9 | 7 st | 16 |
+
+Caveats that matter at the rig: `trombone` and `frenchhorn` stretch up to
+7 semitones per sample, so artifacts arrive sooner than on the strings
+(`tenorsax` is the dense one — whole tones throughout); `frenchhorn`'s
+soft layer exists on some notes and genuinely not others (pack.json's
+`perNote` is the only truth); and the winds are 6–7 s **one-shots with no
+loop points** — a swell is the engine envelope's job (`synthAttackMs` on
+ghosts, `leadAttackMs` on a sample lead), which is the right place for it
+anyway.
+
+**Also present on this rig, NOT in the pack: `lapsteel`** — 22 notes
+C3–F♯6 at whole steps, 2 round-robins (down/up strikes), 11.7 s sustains,
+thinned from Indiginus THE STEEL. It is **licence-restricted** (commercial
+Kontakt library; format conversion changes nothing about the licence) and
+lives only in this private repo under `live/samples/lap-steel-v1.0.0/` —
+keep it out of anything public or downloadable, and out of the CC pack.
+Its labels are sounding pitch, verified. Steel wants the mellow attack
+done by envelope, per its own README.
+
+**Engine side (done):** `AE_SMP_MAX_INSTRUMENTS` raised 32 → 64 — the
+factory nine plus this pack plus the steel is already 34 folders, and
+discovery truncated past the cap, which in an echo-built picker means
+instruments that exist but cannot be selected. (Same silent-cap shape as
+the round-robin fix, one commit apart.)
 
 The pack drops into the existing cache layout: `s`-spelled sharps,
 `<Note>[_soft][_rrN]` naming, filenames already **sounding pitch**
@@ -441,9 +492,8 @@ The pack drops into the existing cache layout: `s`-spelled sharps,
 corrected in the pack — **never re-import an instrument from its original
 source**, the tuning fixes live only in the pack). Verified here: all 18
 load through the real loader, zone and file counts match `pack.json`
-exactly (512 files), zero full-scale recordings, and pitch spot-checks
-across eight instruments all sit within ±8 cents of nominal through a
-fresh decode.
+exactly (653 files in v2), zero full-scale recordings, and the v2 labels
+verified octave-proof (harmonic model, all files) after the v1.x relabel.
 
 **Engine side (done):** the round-robin cap was 4 per (zone, layer) with a
 silent skip past it — the banjo ships **11 takes on one note**, so seven

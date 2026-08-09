@@ -1,0 +1,8 @@
+This package was produced from a commercially licensed sample library by
+format conversion only (NCW -> WAV -> mono 44.1 kHz FLAC) and thinning.
+
+Converting the format changes nothing about the original licence. Commercial
+sample libraries generally allow the sounds to be used in your own productions
+while prohibiting redistribution of the sample content itself. Check the source
+library's terms before this package goes anywhere it could be downloaded by
+someone else.

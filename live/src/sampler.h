@@ -106,7 +106,11 @@ void ae_sampler_free (AeSampleBank *bank);
    returns how many were written (sorted). The engine never carries a
    hard-coded instrument list -- adding one is dropping a folder in the
    cache, which is the whole operation, forever. */
-#define AE_SMP_MAX_INSTRUMENTS 32
+/* The factory nine plus Acoustic Instruments' 24 plus a private set is
+   already 34 -- and discovery TRUNCATES past the cap, which in a UI built
+   from the echo means instruments that exist but cannot be picked. Sized
+   with the same philosophy as the RR cap: far past what ships. */
+#define AE_SMP_MAX_INSTRUMENTS 64
 int ae_sampler_list (const char *root, char names[][32], int max);
 
 /* The nearest zone by PITCH to `midi`, or -1 for an empty bank. */

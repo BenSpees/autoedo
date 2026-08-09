@@ -1,0 +1,421 @@
+{
+  "source": "The STEEL Samples",
+  "mode": "build",
+  "format": {
+    "codec": "flac",
+    "sampleRate": 44100,
+    "channels": 1
+  },
+  "articulations": [
+    {
+      "articulation": "ST-Both",
+      "noteCount": 22,
+      "lowestNote": "C3",
+      "highestNote": "Fs6",
+      "maxGapSemitones": 2,
+      "fileCount": 44
+    }
+  ],
+  "fileCount": 44,
+  "files": [
+    {
+      "source": "LSG_ST1_C2_Dn_1.ncw",
+      "file": "C3.flac",
+      "note": "C3",
+      "midi": 48,
+      "rr": 1,
+      "bytes": 396212,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST1_C2_Up_1.ncw",
+      "file": "C3_rr2.flac",
+      "note": "C3",
+      "midi": 48,
+      "rr": 2,
+      "bytes": 357337,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST1_D2_Dn_1.ncw",
+      "file": "D3.flac",
+      "note": "D3",
+      "midi": 50,
+      "rr": 1,
+      "bytes": 431690,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST1_D2_Up_1.ncw",
+      "file": "D3_rr2.flac",
+      "note": "D3",
+      "midi": 50,
+      "rr": 2,
+      "bytes": 438989,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST1_E2_Dn_1.ncw",
+      "file": "E3.flac",
+      "note": "E3",
+      "midi": 52,
+      "rr": 1,
+      "bytes": 377324,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST1_E2_Up_1.ncw",
+      "file": "E3_rr2.flac",
+      "note": "E3",
+      "midi": 52,
+      "rr": 2,
+      "bytes": 362689,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST2_F#2_Dn_1.ncw",
+      "file": "Fs3.flac",
+      "note": "Fs3",
+      "midi": 54,
+      "rr": 1,
+      "bytes": 302920,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST2_F#2_Up_1.ncw",
+      "file": "Fs3_rr2.flac",
+      "note": "Fs3",
+      "midi": 54,
+      "rr": 2,
+      "bytes": 341801,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST3_G#2_Dn_1.ncw",
+      "file": "Gs3.flac",
+      "note": "Gs3",
+      "midi": 56,
+      "rr": 1,
+      "bytes": 302095,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST3_G#2_Up_1.ncw",
+      "file": "Gs3_rr2.flac",
+      "note": "Gs3",
+      "midi": 56,
+      "rr": 2,
+      "bytes": 380635,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST3_A#2_Dn_1.ncw",
+      "file": "As3.flac",
+      "note": "As3",
+      "midi": 58,
+      "rr": 1,
+      "bytes": 248780,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST3_A#2_Up_1.ncw",
+      "file": "As3_rr2.flac",
+      "note": "As3",
+      "midi": 58,
+      "rr": 2,
+      "bytes": 247790,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST4_C3_Dn_1.ncw",
+      "file": "C4.flac",
+      "note": "C4",
+      "midi": 60,
+      "rr": 1,
+      "bytes": 366766,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST4_C3_Up_1.ncw",
+      "file": "C4_rr2.flac",
+      "note": "C4",
+      "midi": 60,
+      "rr": 2,
+      "bytes": 455698,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST4_D3_Dn_1.ncw",
+      "file": "D4.flac",
+      "note": "D4",
+      "midi": 62,
+      "rr": 1,
+      "bytes": 355570,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST4_D3_Up_1.ncw",
+      "file": "D4_rr2.flac",
+      "note": "D4",
+      "midi": 62,
+      "rr": 2,
+      "bytes": 385679,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_E3_Dn_1.ncw",
+      "file": "E4.flac",
+      "note": "E4",
+      "midi": 64,
+      "rr": 1,
+      "bytes": 360328,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_E3_Up_1.ncw",
+      "file": "E4_rr2.flac",
+      "note": "E4",
+      "midi": 64,
+      "rr": 2,
+      "bytes": 402765,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_F#3_Dn_1.ncw",
+      "file": "Fs4.flac",
+      "note": "Fs4",
+      "midi": 66,
+      "rr": 1,
+      "bytes": 201585,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_F#3_Up_1.ncw",
+      "file": "Fs4_rr2.flac",
+      "note": "Fs4",
+      "midi": 66,
+      "rr": 2,
+      "bytes": 213839,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_G#3_Dn_1.ncw",
+      "file": "Gs4.flac",
+      "note": "Gs4",
+      "midi": 68,
+      "rr": 1,
+      "bytes": 238960,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_G#3_Up_1.ncw",
+      "file": "Gs4_rr2.flac",
+      "note": "Gs4",
+      "midi": 68,
+      "rr": 2,
+      "bytes": 282511,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_A#3_Dn_1.ncw",
+      "file": "As4.flac",
+      "note": "As4",
+      "midi": 70,
+      "rr": 1,
+      "bytes": 234476,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST5_A#3_Up_1.ncw",
+      "file": "As4_rr2.flac",
+      "note": "As4",
+      "midi": 70,
+      "rr": 2,
+      "bytes": 229488,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_C4_Dn_1.ncw",
+      "file": "C5.flac",
+      "note": "C5",
+      "midi": 72,
+      "rr": 1,
+      "bytes": 292414,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_C4_Dn_2.ncw",
+      "file": "C5_rr2.flac",
+      "note": "C5",
+      "midi": 72,
+      "rr": 2,
+      "bytes": 294037,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_D4_Dn_2.ncw",
+      "file": "D5.flac",
+      "note": "D5",
+      "midi": 74,
+      "rr": 1,
+      "bytes": 264125,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_D4_Up_1.ncw",
+      "file": "D5_rr2.flac",
+      "note": "D5",
+      "midi": 74,
+      "rr": 2,
+      "bytes": 270268,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_E4_Dn_1.ncw",
+      "file": "E5.flac",
+      "note": "E5",
+      "midi": 76,
+      "rr": 1,
+      "bytes": 172396,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_E4_Up_1.ncw",
+      "file": "E5_rr2.flac",
+      "note": "E5",
+      "midi": 76,
+      "rr": 2,
+      "bytes": 172526,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_F#4_Dn_2.ncw",
+      "file": "Fs5.flac",
+      "note": "Fs5",
+      "midi": 78,
+      "rr": 1,
+      "bytes": 170888,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_F#4_Up_2.ncw",
+      "file": "Fs5_rr2.flac",
+      "note": "Fs5",
+      "midi": 78,
+      "rr": 2,
+      "bytes": 160076,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_G#4_Dn_1.ncw",
+      "file": "Gs5.flac",
+      "note": "Gs5",
+      "midi": 80,
+      "rr": 1,
+      "bytes": 202807,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_G#4_Up_1.ncw",
+      "file": "Gs5_rr2.flac",
+      "note": "Gs5",
+      "midi": 80,
+      "rr": 2,
+      "bytes": 242446,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_A#4_Dn_1.ncw",
+      "file": "As5.flac",
+      "note": "As5",
+      "midi": 82,
+      "rr": 1,
+      "bytes": 216123,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_A#4_Dn_2.ncw",
+      "file": "As5_rr2.flac",
+      "note": "As5",
+      "midi": 82,
+      "rr": 2,
+      "bytes": 184908,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_C5_Dn_1.ncw",
+      "file": "C6.flac",
+      "note": "C6",
+      "midi": 84,
+      "rr": 1,
+      "bytes": 191520,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_C5_Up_1.ncw",
+      "file": "C6_rr2.flac",
+      "note": "C6",
+      "midi": 84,
+      "rr": 2,
+      "bytes": 167636,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_D5_Dn_2.ncw",
+      "file": "D6.flac",
+      "note": "D6",
+      "midi": 86,
+      "rr": 1,
+      "bytes": 148038,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_D5_Up_1.ncw",
+      "file": "D6_rr2.flac",
+      "note": "D6",
+      "midi": 86,
+      "rr": 2,
+      "bytes": 148985,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_E5_Dn_1.ncw",
+      "file": "E6.flac",
+      "note": "E6",
+      "midi": 88,
+      "rr": 1,
+      "bytes": 70361,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_E5_Up_1.ncw",
+      "file": "E6_rr2.flac",
+      "note": "E6",
+      "midi": 88,
+      "rr": 2,
+      "bytes": 71573,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_F#5_Dn_1.ncw",
+      "file": "Fs6.flac",
+      "note": "Fs6",
+      "midi": 90,
+      "rr": 1,
+      "bytes": 83096,
+      "articulation": "ST-Both"
+    },
+    {
+      "source": "LSG_ST6_F#5_Up_1.ncw",
+      "file": "Fs6_rr2.flac",
+      "note": "Fs6",
+      "midi": 90,
+      "rr": 2,
+      "bytes": 83731,
+      "articulation": "ST-Both"
+    }
+  ],
+  "spacingSemitones": 2,
+  "takesPerNote": 2,
+  "octaveCorrection": "source names middle C as C3; +12 applied to reach xentar C4=60. Verified against measured fundamentals."
+}
