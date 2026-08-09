@@ -323,6 +323,23 @@ static void measure_bank (AeSampleBank *b)
         b->norm = 0.0794328 / b->meas_rms; /* 10^(-22/20) */
         if (b->norm < 0.1)  b->norm = 0.1;
         if (b->norm > 10.0) b->norm = 10.0;
+
+        /* Peak ceiling: normalisation must never push a recording's peak
+           into the clip. The 300 ms window reads a slow swell as near
+           silence -- Acoustic Instruments' bowed vibraphone measured a
+           +20 dB "correction" whose peaks would have landed +14 dBFS --
+           so the boost is capped where the bank's loudest sample would
+           reach -3 dBFS. A swell IS quiet early; that is the instrument,
+           not a mastering fault to correct. */
+        double peak = 0.0;
+        for (int i = 0; i < b->n_recs; ++i)
+            for (int j = 0; j < b->recs[i].len; ++j)
+            {
+                const double a = fabs ((double) b->recs[i].pcm[j]);
+                if (a > peak) peak = a;
+            }
+        if (peak > 1e-6 && b->norm * peak > 0.708)
+            b->norm = 0.708 / peak; /* -3 dBFS ceiling */
     }
 }
 
@@ -464,17 +481,26 @@ const AeSampleRec *ae_sampler_pick (const AeSampleBank *bank, int zone,
     if (zone < 0 || zone >= bank->n_zones)
         return NULL;
 
-    const bool want_soft = velocity < AE_SMP_SOFT_VEL && bank->soft_n[zone] > 0;
-    const int   n   = want_soft ? bank->soft_n[zone] : bank->main_n[zone];
-    const short *ix = want_soft ? bank->soft_idx[zone] : bank->main_idx[zone];
+    /* Layer preference, with fallback in BOTH directions: a quiet strike
+       on a zone with no soft files plays main (the original case), and a
+       hard strike on a zone with no MAIN files plays soft -- Acoustic
+       Instruments 2.1's contrabass pizzicato ships eight soft-only notes
+       (rr:0 in its pack.json), and returning NULL there made more than
+       half the instrument silent above the layer threshold. The wrong
+       timbre is a recording; silence is a hole. */
+    bool use_soft = velocity < AE_SMP_SOFT_VEL && bank->soft_n[zone] > 0;
+    if (! use_soft && bank->main_n[zone] <= 0 && bank->soft_n[zone] > 0)
+        use_soft = true;
+    const int   n   = use_soft ? bank->soft_n[zone] : bank->main_n[zone];
+    const short *ix = use_soft ? bank->soft_idx[zone] : bank->main_idx[zone];
     if (n <= 0)
-        return bank->main_n[zone] > 0 ? &bank->recs[bank->main_idx[zone][0]] : NULL;
+        return NULL;
     if (n == 1)
         return &bank->recs[ix[0]];
 
     /* Round robin, never the immediately-previous pick for this
        (zone, layer): a repeated note reusing its recording machine-guns. */
-    const int slot = zone * 2 + (want_soft ? 1 : 0);
+    const int slot = zone * 2 + (use_soft ? 1 : 0);
     *rng = *rng * 1664525u + 1013904223u;
     int pick = (int) ((*rng >> 8) % (unsigned) n);
     if (pick == rr_state[slot])

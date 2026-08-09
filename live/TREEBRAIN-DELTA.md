@@ -433,7 +433,7 @@ this side.
 **1.00** (the absolute map scored the same playing 0.577), and 12 dB below
 the reference lands at **0.60** — mid-window, as the formula says.
 
-### 2.10 Acoustic Instruments v2.0.0 — 24 instruments, and a BREAKING relabel
+### 2.10 Acoustic Instruments v2.1.0 — 46 instruments, collisions, and findings
 
 **⚠ Do this first if any cache was built from Plucked Acoustics v1.x: ten
 instruments were labelled one octave BELOW the pitch they sound, and
@@ -449,6 +449,58 @@ see an octave error, by construction* — the v1.1 QA (and this side's own
 first spot-check) both passed a pack that was an octave off, for exactly
 that reason. Verified here with an explicit three-candidate harmonic
 model over all 653 files: the corrected labels win on every instrument.
+
+**v2.1.0 adds 22 instruments** — bowed strings (`violin` `viola` `cello`
+`contrabass`, each with a pizzicato set), `harpsichord` (densest set in the
+pack, 28 notes), `vibraphone`, `vibraphonebowed`, `recordertenor`,
+`recorderbass`, `pipeorgan`, `tubularbells`, `ocarinalarge`, `balafon`,
+`wineglasses`, `harmonica`, `saxello`, `marimba`, `kalimbakenya` — plus a
+`category` field in pack.json (9 groups, by how a voice SOUNDS) that is
+the right axis for the SOUND picker. All 22 are CC0; the six CC BY sets
+and their attribution line are unchanged.
+
+**⚠ Two pack ids collide with factory cache folders: `harpsichord` and
+`vibraphone`.** The harpsichord one is octave-hazardous: the engine's
+`sampleOctave:"auto"` table applies **+12 by name** (the factory
+harpsichord's filenames sit an octave below sounding; the pack's are AT
+sounding). Demonstrated live: the pack's set in a folder named
+`harpsichord` loads with `sampleOctaveApplied: +12` — an octave high.
+Either cache the pack's two under distinct names (`harpsichord2`,
+`vibraphone2` — discovery takes any name) or replace the factory folders
+and pin `sampleOctave: 0` on that instrument. `vibraphone` is benign
+(both sets sounding-pitch), purely which set wins the name.
+
+**Engine fixes this pack forced, both landed with discriminating tests:**
+
+- **Soft-only zones sound at every velocity.** `contrabasspizz` ships
+  eight notes with soft takes and no main take (`rr: 0` — upstream
+  velocity coverage is uneven, exactly as the handoff warned). The pick
+  fell back main-ward only, so a hard strike on those zones returned
+  silence — more than half the instrument dead above the 0.6 threshold.
+  Both directions fall back now: the wrong timbre is a recording, silence
+  is a hole.
+- **Bank normalisation is peak-aware.** The level measurement reads the
+  first 300 ms; a bowed swell has nearly nothing there, so
+  `vibraphonebowed` measured a "+20 dB correction" whose peaks would have
+  landed +14 dBFS. The boost now caps where the bank's loudest sample
+  reaches −3 dBFS: that set gets +3.0 dB instead, every other set is
+  untouched. A swell being quiet early is the instrument, not a mastering
+  fault.
+
+**Pack findings from this side's octave-proof audit (1185 files), for the
+next pack rev** — none block use:
+
+- `violinpizz/C7` sounds ≈ **C5** — two octaves below its label, both by
+  harmonic model and by period measurement. One file; pull or relabel it.
+- `pipeorgan`'s bottom notes (`C1` `Ds1` `Fs1` `A1` `C2`, arguably `A2`)
+  contain **no fundamental at all** (−54…−68 dB relative; the spectrum
+  starts at the 2nd or 4th partial) — the source's bottom octave borrows a
+  higher rank, so asking for those notes SOUNDS an octave up. `C3` and
+  above are clean. Either trim the set's floor or note it; the engine
+  plays what the file contains.
+- `cellopizz/F3` (all four takes) resists both measurement methods —
+  flagged, not convicted; worth an ear at the rig. The two kalimba
+  marginals from v2.0 are unchanged and remain the instrument's acoustics.
 
 **New in v2.0.0 — six winds and brass, all CC0**, chosen by measured
 attack rather than articulation name:
@@ -492,7 +544,7 @@ The pack drops into the existing cache layout: `s`-spelled sharps,
 corrected in the pack — **never re-import an instrument from its original
 source**, the tuning fixes live only in the pack). Verified here: all 18
 load through the real loader, zone and file counts match `pack.json`
-exactly (653 files in v2), zero full-scale recordings, and the v2 labels
+exactly (1185 files in v2.1), zero full-scale recordings, and labels
 verified octave-proof (harmonic model, all files) after the v1.x relabel.
 
 **Engine side (done):** the round-robin cap was 4 per (zone, layer) with a

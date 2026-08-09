@@ -2408,6 +2408,24 @@ static void test_formant_offset (void)
 
 /* ---- the sample source ------------------------------------------------- */
 
+/* Write arbitrary mono float32 PCM as a WAV. */
+static void write_wav_pcm (const char *path, const float *pcm, int n)
+{
+    FILE *f = fopen (path, "wb");
+    if (f == NULL) return;
+    const unsigned data = (unsigned) (n * 4), riff = 36 + data;
+    fwrite ("RIFF", 1, 4, f); fwrite (&riff, 4, 1, f); fwrite ("WAVE", 1, 4, f);
+    fwrite ("fmt ", 1, 4, f);
+    const unsigned sz = 16; const unsigned short fmt = 3, ch = 1, bits = 32;
+    const unsigned rate = 48000, byterate = 48000 * 4; const unsigned short align = 4;
+    fwrite (&sz, 4, 1, f); fwrite (&fmt, 2, 1, f); fwrite (&ch, 2, 1, f);
+    fwrite (&rate, 4, 1, f); fwrite (&byterate, 4, 1, f);
+    fwrite (&align, 2, 1, f); fwrite (&bits, 2, 1, f);
+    fwrite ("data", 1, 4, f); fwrite (&data, 4, 1, f);
+    fwrite (pcm, 4, (size_t) n, f);
+    fclose (f);
+}
+
 /* Write a mono float32 WAV whose content is a decaying sine at `hz`, so a
    test can read a bank back and hear which recording it got. */
 static void write_wav (const char *path, double hz, double secs, double amp)
@@ -2612,6 +2630,87 @@ static void test_sampler_bank (void)
         }
     }
 
+    /* A SOFT-ONLY zone must sound at every velocity. Acoustic Instruments
+       2.1's contrabass pizzicato ships eight notes with soft takes and no
+       main take (rr:0 in its pack.json) -- upstream velocity coverage is
+       simply uneven. The old pick fell back main-ward only, so a hard
+       strike on such a zone returned NULL and more than half the
+       instrument was silent above the layer threshold. */
+    {
+        char odir[300];
+        snprintf (odir, sizeof (odir), "%s/softonly", root);
+        snprintf (cmd, sizeof (cmd), "mkdir -p %s", odir);
+        if (system (cmd) == 0)
+        {
+            char op[560];
+            snprintf (op, sizeof (op), "%s/A4_soft.wav", odir);
+            write_wav (op, 440.0, 0.4, 0.4);
+            snprintf (op, sizeof (op), "%s/A4_soft_rr2.wav", odir);
+            write_wav (op, 440.0, 0.4, 0.4);
+            AeSampleBank ob;
+            memset (&ob, 0, sizeof (ob));
+            if (ae_sampler_load (&ob, root, "softonly", NULL, 48000.0,
+                                 AE_SMP_OCTAVE_AUTO, err, sizeof (err)))
+            {
+                signed char rr[AE_SMP_MAX_ZONES * 2];
+                memset (rr, -1, sizeof (rr));
+                unsigned rng = 1;
+                const AeSampleRec *hard =
+                    ae_sampler_pick (&ob, 0, 0.9, rr, &rng);
+                CHECK (hard != NULL && hard->soft,
+                       "sampler: a HARD strike on a soft-only zone plays the "
+                       "soft take instead of silence");
+                ae_sampler_free (&ob);
+            }
+            else
+                CHECK (false, "sampler: softonly load (%s)", err);
+        }
+    }
+
+    /* A slow swell must not be normalised into the clip. The bank level
+       is measured over each note's first 300 ms; a bowed swell has next to
+       nothing there, so the measurement reads near-silence and the boost
+       clamp alone allows +20 dB -- which, applied to files peak-normalised
+       to -6 dBFS, parks every peak at +14. The ceiling caps the boost
+       where the bank's loudest sample reaches -3 dBFS. Staged: a note
+       whose first 300 ms is 1%% amplitude and whose body peaks at 0.5. */
+    {
+        char sdir[300];
+        snprintf (sdir, sizeof (sdir), "%s/swell", root);
+        snprintf (cmd, sizeof (cmd), "mkdir -p %s", sdir);
+        if (system (cmd) == 0)
+        {
+            char sp2[560];
+            snprintf (sp2, sizeof (sp2), "%s/A4.wav", sdir);
+            /* hand-build: 300 ms near-silence then a loud body */
+            {
+                const int n = 48000;
+                float *pcm = malloc ((size_t) n * sizeof (float));
+                for (int i = 0; i < n; ++i)
+                {
+                    const double amp = i < 14400 ? 0.005 : 0.5;
+                    pcm[i] = (float) (amp * sin (2.0 * M_PI * 440.0 * i / 48000.0));
+                }
+                write_wav_pcm (sp2, pcm, n);
+                free (pcm);
+            }
+            AeSampleBank sb;
+            memset (&sb, 0, sizeof (sb));
+            if (ae_sampler_load (&sb, root, "swell", NULL, 48000.0,
+                                 AE_SMP_OCTAVE_AUTO, err, sizeof (err)))
+            {
+                CHECK (sb.norm * 0.5 < 0.75,
+                       "sampler: a swell's boost is capped at the -3 dBFS peak "
+                       "ceiling (norm %.1f puts its peak at %.2f; the 300 ms "
+                       "window alone would boost it 10x into the clip)",
+                       sb.norm, sb.norm * 0.5);
+                ae_sampler_free (&sb);
+            }
+            else
+                CHECK (false, "sampler: swell load (%s)", err);
+        }
+    }
+
     /* Deep round-robin pools load COMPLETELY. The Plucked Acoustics banjo
        carries eleven takes on one note; the loader skips files past
        AE_SMP_MAX_RR with no error path, so an undersized cap is a silent
@@ -2652,12 +2751,12 @@ static void test_sampler_bank (void)
        cache directory is the only source of truth. */
     char names[AE_SMP_MAX_INSTRUMENTS][32];
     const int ni = ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS);
-    CHECK (ni == 5, "sampler: discovery finds every instrument folder "
-           "(%d; rrdeep above is the fifth)", ni);
+    CHECK (ni == 7, "sampler: discovery finds every instrument folder "
+           "(%d; rrdeep, swell and softonly are 5-7)", ni);
     snprintf (cmd, sizeof (cmd), "mkdir -p %s/emptyish && touch %s/emptyish/readme.txt",
               root, root);
     if (system (cmd) == 0)
-        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 5,
+        CHECK (ae_sampler_list (root, names, AE_SMP_MAX_INSTRUMENTS) == 7,
                "sampler: a folder with no recordings is not an instrument");
 
     ae_sampler_free (&b);
