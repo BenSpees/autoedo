@@ -675,7 +675,12 @@ static void test_synth_envelope (void)
     for (int src = 0; src < 2; ++src)
     {
         const char *nm = src == 0 ? "synth" : "shifted";
-        CHECK (onset[src][0] > 0.7,
+        /* 0.65, not 0.7: when detection lock got faster the ghost's
+           first audible sample moved EARLIER, into the voiced crossfade
+           and shifter warm-up that used to complete before it -- so the
+           first-100 ms peak sits slightly lower while the ghost arrives
+           sooner, which is the trade this test exists to protect. */
+        CHECK (onset[src][0] > 0.65,
                "attack: a fast attack is up immediately (%s, %.3g)",
                nm, onset[src][0]);
         CHECK (onset[src][1] < 0.35,
@@ -1173,6 +1178,90 @@ static void test_midi_octave_fold (void)
     CHECK (shift[1] < -20.0,
            "midiOctaves held: absolute snap reaches down two octaves (%.2f st)",
            shift[1]);
+}
+
+/* Detection responsiveness: time from a pluck's onset to the first
+   detection within 50 cents of truth. The analysis frame is sized at the
+   textbook YIN minimum (two periods of the range bottom) rather than
+   padded to a power of two -- the padding cost 2.3x the necessary window
+   at the guitar range, and a fresh note only reads true once it fills
+   the window, so lock time scales directly with it. Measured on the rig
+   settings: 37.8 ms average lock before, 28.9 after (worst case 52 -> 31).
+   The 34 ms bound here fails against the padded frame. */
+static void test_detection_lock_time (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 78.0, 1400.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+
+    const double hz = 220.0 * pow (2.0, 15.0 / 1200.0);
+    const int gap = 14400, note = 24000, total = gap + note;
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = gap; i < total; ++i)
+    {
+        const double t = (i - gap) / 48000.0;
+        ph += hz / 48000.0;
+        double sig = 0.0;
+        for (int h = 1; h <= 10; ++h)
+            sig += sin (2.0 * M_PI * ph * h + 0.3 * h) / h;
+        in[i] = (float) (0.12 * sig * exp (-1.2 * t) * (t < 0.004 ? t / 0.004 : 1.0));
+    }
+    double first_ms = -1.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        const double d = (double) atomic_load_explicit (
+            &p->detected_hz_out, memory_order_relaxed);
+        if (first_ms < 0.0 && d > 0.0 && fabs (1200.0 * log2 (d / hz)) < 50.0)
+            first_ms = (off + n - gap) * 1000.0 / 48000.0;
+    }
+    CHECK (first_ms > 0.0 && first_ms <= 34.0,
+           "detection locks a fresh pluck within 34 ms (%.1f; the pow-2 "
+           "padded frame took ~52 in the worst case)", first_ms);
+    ae_corrector_free (p);
+    free (p); free (in);
+}
+
+/* An energy onset clears the detector's octave-continuity claim: the
+   raised bar for CHANGING octave is about the note that just ended, and
+   carrying it across a legato boundary makes a leap's first frames fight
+   the old note's octave. Staged as a voiced tone switching pitch with an
+   amplitude edge and NO silent gap -- without the reset, last_best_tau
+   rides through the boundary still holding the old note's lag. */
+static void test_onset_clears_continuity (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 78.0, 1400.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    const int a = 512 * 94, total = a + 512; /* block-aligned boundary */
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < a; ++i)
+    {
+        ph += 2.0 * M_PI * 220.0 / 48000.0;
+        in[i] = (float) (0.08 * sin (ph));
+    }
+    for (int i = a; i < total; ++i) /* leap + hard edge, no gap */
+    {
+        ph += 2.0 * M_PI * 660.0 / 48000.0;
+        in[i] = (float) (0.4 * sin (ph));
+    }
+    for (int off = 0; off < a; off += 512)
+        ae_corrector_process (p, in + off, NULL, NULL, 512);
+    CHECK (p->detector.last_best_tau > 0,
+           "continuity: a running voiced note holds its octave claim (%d)",
+           p->detector.last_best_tau);
+    ae_corrector_process (p, in + a, NULL, NULL, 512);
+    CHECK (p->detector.last_best_tau == 0,
+           "continuity: an energy onset CLEARS the claim (%d; a leap's "
+           "first frames must not fight the old note's octave)",
+           p->detector.last_best_tau);
+    ae_corrector_free (p);
+    free (p); free (in);
 }
 
 static void test_release_pitch_stability (void)
@@ -3432,6 +3521,8 @@ int main (void)
     test_octave_revote_rebase();
     test_expression_transfer();
     test_attack_sound();
+    test_detection_lock_time();
+    test_onset_clears_continuity();
     test_release_pitch_stability();
     test_midi_octave_fold();
     test_synth_envelope();

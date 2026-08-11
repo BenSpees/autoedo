@@ -869,6 +869,18 @@ outside the window can't be voted for at all.**
   The Lead-button diagnostic (bassy with lead, clean with unison ghost) is
   explained and obsolete. If the rig carries a "guitar goes bassy"
   mitigation, retire it.
+- **Detection got faster; no keys moved.** The analysis frame is sized at
+  the textbook YIN minimum (two periods of `detectMinHz`) instead of being
+  padded to a power of two, and an energy onset clears the detector's
+  octave-continuity hysteresis (that raised bar was a claim about the note
+  that just ended). Measured at the rig's guitar settings: first lock on a
+  fresh pluck 37.8 → 30.7 ms average (worst case 52 → 31), vibrato
+  tracking lag 17.2 → 8.8 ms at 99% amplitude transfer, detector-hostile
+  fixture unchanged. Halving the detection hop was measured and rejected
+  (+55% detector CPU for ~1.5 ms). Practical knob on your side, now with
+  more leverage: `detectMinHz` set to the instrument's true bottom
+  directly shortens the window — it is the cheapest lock-time improvement
+  available from config.
 - **Ghost parity and anchoring:** at `hg` 0 a ghost sits at the lead's
   level, and every ghost stacks its (snapped) interval on the pitch
   actually being heard — the corrected lead when `leadOn`, the played note
