@@ -11,12 +11,13 @@ in the order the batches landed:
 
 `harmGainDb` → `harmHold` → `leadShiftSteps` → `attackSound` →
 `sendChannel` → `sampleInstrument` → `expression` → `sampleRing` →
-`sampleVelRefDb` → `followEnv` → **`polyMode`**
+`sampleVelRefDb` → `followEnv` → `polyMode` → **`polyNotes`**
 
 This is the one authoritative ordering — it is the order the batches
 actually landed in, and `sendChannel` sits where it does because the record
-send shipped before the sample work. A rig that sees `polyMode` in
-the **config echo** has everything in this document. Probing any key later
+send shipped before the sample work. A rig that sees `polyNotes` in
+the **config echo** has everything in this document, including the chord
+sampler (§3c-ii); `polyMode` without `polyNotes` is poly shifting only. Probing any key later
 in the chain implies every key before it. (`sampleRing` and the three keys
 beside it landed one build earlier, so a rig that has `sampleRing` but not
 `sampleVelRefDb` has everything except §2.9's supplied reference.)
@@ -769,6 +770,58 @@ all three tones intact an octave up (each shifted tone ≥3× its unshifted
 residue), the same chord through mono is the negative control (it does not
 survive), and the latency doubling is asserted in the suite and visible
 live in the echo.
+
+### 3c-ii. The chord sampler — POLY + `leadSource:"sample"` (MEL9 mode)
+
+One exception to "sources are inert in poly", and it is the headline:
+with `polyMode: true`, `leadSource: "sample"` and a bank loaded, the
+engine becomes the EHX Mellotron/9-series move done properly — **play a
+chord, hear the loaded sample library play that chord**, EDO-snapped. A
+multi-f0 tracker (harmonic-sum salience + iterative spectral subtraction,
+with note birth/death hysteresis) follows up to 6 simultaneous notes,
+snaps each to the enabled-degree grid, applies `leadShiftSteps`, and
+strikes/repitches/releases sample voices per note. Unlike the pedal, the
+library is anything under `samplePath` and the tuning is whatever the
+scale says — a 22-EDO choir chord is exactly as available as a 12-EDO
+flute one.
+
+Keys (all existing semantics, one new):
+- **`polyNotes`** (int 1–6, live, default 6) — polyphony cap. NEW key,
+  appended to the feature-detect chain (§0).
+- `sampleMix` — 1 = the library **replaces** the playing; 0.5 = layers it
+  under the shifted chord. Layering is the recommended default preset:
+  the shifted chord carries the attack while the library blooms in under
+  it, hiding the tracker's onset time.
+- `sampleVelocity` / `sampleVelRefDb` / `sampleRing` — as in mono.
+- `leadReleaseMs` — a lifted chord's sample tails decay at this pace
+  ("cutting off when notes stop", at the player's chosen speed).
+
+Status: **`polyNotesActive`** (int) — notes the tracker currently holds
+alive; 0 whenever the chord sampler is not engaged. Drive a small "notes
+held" meter next to the POLY toggle; it is also the honest diagnostic for
+"the chord isn't all sounding".
+
+**UI spec:** when POLY is on, UNGREY the sample-source cluster
+(instrument picker, `sampleMix`, velocity, ring) — in 3c's original spec
+it was listed with the greyed-out detection-dependent controls, and that
+list is now wrong for the sample source specifically (synth stays
+greyed). Add a `polyNotes` stepper (1–6) beside the instrument picker,
+and the `polyNotesActive` meter. Latency note stays as in 3c.
+
+Honest limits, for the tooltip: octave doublings merge (a power chord's
+octave reads as one note — the fifth still sounds); dense voicings
+beyond ~4 distinct pitch classes may drop the weakest note; and a fresh
+chord's sample onset trails the strings by ~90 ms on top of block
+latency, which the `sampleMix` layering hides well.
+
+Verified end-to-end in the suite: a C3–E3–G3 chord with strong 2nd/3rd
+harmonics against a pure-sine test bank comes back as all three tones
+**harmonic-free** (i.e. the recordings, not shifted input — pitch alone
+could not tell those apart), `polyNotes: 1` collapses it to exactly one
+sounding tone, `polyNotesActive` reports 3/1 accordingly, and the whole
+test fails against the reverted integration. Tracker-only test: the
+triad is exactly three notes within 20 cents, no ghosts, and silence
+kills all of them. Live-verified against the shipped v2.1 packs.
 
 ## 4. Field-fix batch — read this first if the guitar was bassy
 

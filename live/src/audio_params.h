@@ -90,6 +90,7 @@ typedef struct
     _Atomic double   sample_velocity;
     _Atomic double   sample_vel_ref;
     _Atomic bool     sample_ring;
+    _Atomic int      poly_notes;
     _Atomic int      attack_sound;
     _Atomic double   attack_gain_lin;
     _Atomic bool     harm_sustain;
@@ -186,6 +187,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->sample_mix,      p->sample_mix,      memory_order_relaxed);
     atomic_store_explicit (&a->sample_velocity, p->sample_velocity, memory_order_relaxed);
     atomic_store_explicit (&a->sample_ring,     p->sample_ring,     memory_order_relaxed);
+    atomic_store_explicit (&a->poly_notes,      p->poly_notes,      memory_order_relaxed);
     atomic_store_explicit (&a->sample_vel_ref,  p->sample_vel_ref,  memory_order_relaxed);
     atomic_store_explicit (&a->attack_sound, p->attack_sound, memory_order_relaxed);
     atomic_store_explicit (&a->attack_gain_lin,
@@ -294,6 +296,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->sample_ring, memory_order_relaxed));
     ae_corrector_set_vel_ref (ps,
                           atomic_load_explicit (&a->sample_vel_ref, memory_order_relaxed));
+    ae_corrector_set_poly_notes (ps,
+                          atomic_load_explicit (&a->poly_notes, memory_order_relaxed));
     ae_corrector_set_attack (ps,
                           atomic_load_explicit (&a->attack_sound, memory_order_relaxed),
                           atomic_load_explicit (&a->attack_gain_lin, memory_order_relaxed));

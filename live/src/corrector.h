@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include "irconv.h"
+#include "polyf0.h"
 #include "sampler.h"
 #include "shifter.h"
 #include "tuning.h"
@@ -358,6 +359,18 @@ typedef struct
     int    smp_wait[AE_HARM_VOICES + 1];    /* samples it may keep waiting */
     double smp_env[AE_HARM_VOICES + 1];
 
+    /* POLY sample mode (MEL9-style): the tracker's notes strike the
+       loaded bank, EDO-snapped -- play a chord, hear the library play it.
+       Tracker slot k maps to sample row k for the note's whole life, so
+       the strike/repitch/let-ring/release machinery is reused unchanged. */
+    AePolyF0 polyf0;        /* needs a sample row per tracked note: */
+    _Static_assert (AE_POLY_MAX_NOTES <= AE_HARM_VOICES + 1,
+                    "chord sampler note k lives on sample row k");
+    int      poly_fill;     /* samples since the tracker last ran */
+    int      poly_prev_id[AE_POLY_MAX_NOTES];
+    int      poly_cap;      /* polyNotes: strike at most this many */
+    _Atomic int poly_active_out; /* live note count, for the panel */
+
     /* FOLLOW (receiver side) --------------------------------------------- */
     double        follow_amt;      /* followEnv: 0 = pitch only (default),
                                       1 = the source's envelope IS the
@@ -606,6 +619,10 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
    the engine observe one; negative = observe. See vel_ref_fixed. */
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin);
 
+/* POLY sample mode: cap the chord sampler's polyphony (1..6, live;
+   <1 = uncapped). */
+void ae_corrector_set_poly_notes (AeCorrector *p, int cap);
+
 /* FOLLOW receiver: envelope-follow depth (0..1) and the link's level. */
 void ae_corrector_set_follow (AeCorrector *p, double amt);
 static inline void ae_corrector_set_follow_level (AeCorrector *p, double level)
@@ -675,6 +692,13 @@ static inline float ae_corrector_sample_vel_ref (const AeCorrector *p)
 static inline float ae_corrector_sample_vel (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->smp_vel_out,
+                                 memory_order_relaxed);
+}
+
+/* POLY chord sampler: notes the tracker currently holds alive. */
+static inline int ae_corrector_poly_active (const AeCorrector *p)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->poly_active_out,
                                  memory_order_relaxed);
 }
 

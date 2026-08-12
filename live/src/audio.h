@@ -146,6 +146,10 @@ typedef struct
     bool     sample_ring;            /* let-ring: a struck voice finishes on
                                         its own decay THROUGH the next
                                         strike. false = damp on repitch */
+    int      poly_notes;             /* POLY chord sampler: strike at most
+                                        this many simultaneous notes (1..6).
+                                        Live; only meaningful with polyMode
+                                        on and leadSource "sample" */
     int      synth_patch;            /* index into the engine's patch table */
     double   ensemble_depth;         /* 0..1 */
     double   synth_vowel;            /* 0..1 formant transfer */
@@ -259,6 +263,7 @@ typedef struct
     int    sample_octave;   /* filename->sounding offset actually applied */
     int    sample_clipped;  /* recordings peaking at full scale: a decode
                                fault, not a mix decision */
+    int    poly_notes_live; /* POLY chord sampler: notes sounding right now */
     float  lead_makeup;     /* the lead shifter's level-match gain, linear */
     float  out_peak;        /* decaying peak of the summed output BEFORE the
                                soft clip, linear: > ~0.79 means the clip is

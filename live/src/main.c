@@ -257,6 +257,7 @@ static void config_defaults (App *app)
     c->params.sample_velocity = -1.0; /* measure it from the lead's attack */
     c->params.sample_ring     = true; /* let-ring: struck notes finish */
     c->params.sample_vel_ref  = -1.0; /* observe the reference, "auto" */
+    c->params.poly_notes      = 6;    /* chord sampler polyphony cap */
     c->sample_root[0] = c->sample_manifest[0] = '\0';
     snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
     c->sample_octave = AE_SMP_OCTAVE_AUTO;
@@ -430,7 +431,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
               "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
-              "\"polyMode\":%s,"
+              "\"polyMode\":%s,\"polyNotes\":%d,"
               "\"sampleVelRefDb\":%s,"
               "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
@@ -454,6 +455,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->follow_url, app->follow_hold ? "true" : "false",
               c->params.follow_env,
               c->poly_mode ? "true" : "false",
+              c->params.poly_notes,
               vel_ref_str,
               c->sample_instrument, sample_oct_str,
               c->send_channel,
@@ -625,6 +627,8 @@ static bool config_apply_json (App *app, const char *json)
             restart = true; /* rebuilds the shifters at the doubled block */
         c->poly_mode = b;
     }
+    if (ae_json_get_number (json, "polyNotes", &num))
+        c->params.poly_notes = (int) num_clamp (num, 1.0, 6.0);
     if (ae_json_get_string (json, "quality", str, sizeof (str)))
     {
         if (quality_lookup (str) != quality_lookup (app->quality_name))
@@ -1225,6 +1229,7 @@ static void status_refresh (App *app)
         "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
         "\"followError\":\"%s\",\"followNote\":%d,\"followLevelIn\":%.2f,"
         "\"sampleVelLast\":%.3f,\"sampleVelRefDb\":%.1f,\"sampleZones\":%d,\"sampleFiles\":%d,"
+        "\"polyNotesActive\":%d,"
         "\"sampleInstruments\":%s,"
         "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,\"sampleClipped\":%d,"
         "\"stepCents\":%.4f,\"config\":%s}",
@@ -1245,7 +1250,8 @@ static void status_refresh (App *app)
         follow_lvl,
         (double) st.sample_vel,
         st.sample_vel_ref > 1e-6f ? 20.0 * log10 ((double) st.sample_vel_ref) : -120.0,
-        st.sample_zones, st.sample_files, insts,
+        st.sample_zones, st.sample_files,
+        st.poly_notes_live, insts,
         (double) st.sample_norm_db, st.sample_octave, st.sample_clipped,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0

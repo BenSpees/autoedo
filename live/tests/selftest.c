@@ -1274,6 +1274,184 @@ static void test_poly_mode (void)
            "(poly %d vs mono %d samples) -- the documented price", lat[0], lat[1]);
 }
 
+/* The multi-f0 tracker alone: a harmonically rich triad must come back as
+   exactly three notes at the right pitches (no ghosts at octaves or
+   combination tones), and silence must kill them all. */
+static void test_polyf0_tracker (void)
+{
+    AePolyF0 t;
+    memset (&t, 0, sizeof (t));
+    ae_polyf0_prepare (&t, 48000.0, 60.0, 1200.0);
+    CHECK (t.win_size >= 4096, "polyf0: window resolves low chords (got %d)",
+           t.win_size);
+    float *frame = calloc ((size_t) t.win_size, sizeof (float));
+
+    const double notes[3] = { 130.81, 164.81, 196.0 }; /* C3 E3 G3 */
+    double ph[3] = { 0.0, 0.4, 0.9 };
+    for (int f = 0; f < 10; ++f)
+    {
+        for (int i = 0; i < t.win_size; ++i)
+        {
+            double v = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                ph[k] += 2.0 * M_PI * notes[k] / 48000.0;
+                v += sin (ph[k]) + 0.30 * sin (2.0 * ph[k])
+                                 + 0.15 * sin (3.0 * ph[k]);
+            }
+            frame[i] = (float) (0.1 * v);
+        }
+        ae_polyf0_process (&t, frame);
+    }
+
+    int active = 0;
+    bool found[3] = { false, false, false };
+    for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+    {
+        if (! t.notes[k].active)
+            continue;
+        ++active;
+        for (int m = 0; m < 3; ++m)
+            if (fabs (1200.0 * log2 (t.notes[k].hz / notes[m])) < 20.0)
+                found[m] = true;
+    }
+    CHECK (active == 3, "polyf0: a triad is three notes, no ghosts (got %d)",
+           active);
+    CHECK (found[0] && found[1] && found[2],
+           "polyf0: every chord tone tracked within 20 cents (%d%d%d)",
+           found[0], found[1], found[2]);
+
+    memset (frame, 0, (size_t) t.win_size * sizeof (float));
+    for (int f = 0; f < 6; ++f) /* death is 4 misses; 6 is decisive */
+        ae_polyf0_process (&t, frame);
+    active = 0;
+    for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+        if (t.notes[k].active)
+            ++active;
+    CHECK (active == 0, "polyf0: silence kills every note (%d left)", active);
+
+    ae_polyf0_free (&t);
+    free (frame);
+}
+
+static void write_wav_pcm (const char *path, const float *pcm, int n);
+
+/* POLY + leadSource "sample": the MEL9 move. Play a chord, hear the loaded
+   LIBRARY play that chord. The recording is a pure sine, and the input
+   carries strong 2nd/3rd harmonics -- so if the harmonics show up at the
+   output the chord came through the shifter (the reverted integration),
+   and if each chord tone comes back harmonic-free it was re-struck from
+   the bank. Pitch alone could not tell those apart. */
+static void test_chord_sampler (void)
+{
+    const char *root = "/tmp/ae-smp-poly";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "chord sampler: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        /* A SUSTAINED pure sine (no decay): rate-shifting a decaying
+           recording stretches its decay differently per note, which would
+           skew the balance this test measures. */
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    const double notes[3] = { 130.81, 164.81, 196.0 }; /* C3 E3 G3 */
+    for (int cap = 3; cap >= 1; cap -= 2) /* full chord, then polyNotes 1 */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED
+                              | AE_SHIFT_QUALITY_POLY_FLAG);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        ae_corrector_set_poly_notes (p, cap);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+               "chord sampler: bank loads (%s)", err);
+        {
+            int srcs[AE_HARM_VOICES];
+            for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+            ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        }
+        ae_corrector_set_sample (p, 1.0, 0.9, true); /* library only, fixed strike */
+
+        const int total = 512 * 280; /* ~3 s */
+        float *buf = calloc ((size_t) total, sizeof (float));
+        double ph[3] = { 0.0, 0.3, 0.7 };
+        for (int i = 0; i < total; ++i)
+        {
+            double v = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                ph[k] += 2.0 * M_PI * notes[k] / 48000.0;
+                v += sin (ph[k]) + 0.35 * sin (2.0 * ph[k])
+                                 + 0.20 * sin (3.0 * ph[k]);
+            }
+            buf[i] = (float) (0.12 * v);
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+
+        const float *tail = buf + total - 48000;
+        double fund[3], strongest = 0.0;
+        int sounding = 0;
+        for (int k = 0; k < 3; ++k)
+        {
+            fund[k] = goertzel (tail, 48000, notes[k], 48000.0);
+            if (fund[k] > strongest) strongest = fund[k];
+        }
+        for (int k = 0; k < 3; ++k)
+            if (fund[k] > 0.2 * strongest)
+                ++sounding;
+
+        if (cap == 3)
+        {
+            CHECK (sounding == 3,
+                   "chord sampler: the library plays every chord tone "
+                   "(%d of 3: %.3g %.3g %.3g)", sounding,
+                   fund[0], fund[1], fund[2]);
+            /* The discriminator: the input's harmonics must NOT arrive.
+                2xE3 and 2xG3 are no chord tone's fundamental. */
+            const double h2e = goertzel (tail, 48000, 2.0 * notes[1], 48000.0);
+            const double h2g = goertzel (tail, 48000, 2.0 * notes[2], 48000.0);
+            CHECK (h2e < 0.1 * fund[1] && h2g < 0.1 * fund[2],
+                   "chord sampler: the output is the RECORDING, not the "
+                   "shifted input (2nd harmonics %.3g/%.3g vs %.3g/%.3g)",
+                   h2e, h2g, fund[1], fund[2]);
+            CHECK (ae_corrector_poly_active (p) == 3,
+                   "chord sampler: polyNotesActive reports the chord (got %d)",
+                   ae_corrector_poly_active (p));
+        }
+        else
+        {
+            CHECK (sounding == 1,
+                   "polyNotes 1: exactly one tone sounds "
+                   "(%d: %.3g %.3g %.3g)", sounding,
+                   fund[0], fund[1], fund[2]);
+            CHECK (ae_corrector_poly_active (p) == 1,
+                   "polyNotes 1: polyNotesActive honours the cap (got %d)",
+                   ae_corrector_poly_active (p));
+        }
+
+        ae_corrector_free (p);
+        free (p); free (buf);
+    }
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_follow_link (void)
 {
     /* encode: identity inside range, class-preserving fold outside */
@@ -3684,6 +3862,8 @@ int main (void)
     test_expression_transfer();
     test_attack_sound();
     test_poly_mode();
+    test_polyf0_tracker();
+    test_chord_sampler();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();

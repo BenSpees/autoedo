@@ -572,6 +572,20 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->block_samples = ae_shifter_block_samples (p->fs, quality);
     if (p->poly)
         p->block_samples *= 2; /* chords want the longer analysis window */
+    ae_polyf0_free (&p->polyf0);
+    if (p->poly)
+    {
+        /* The tracker's range rides the detection-range controls, exactly
+           as the mono detector's does -- the user's placement. */
+        ae_polyf0_prepare (&p->polyf0, p->fs, min_hz,
+                           max_hz < 1200.0 ? max_hz : 1200.0);
+        for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+            p->poly_prev_id[k] = -1;
+        p->poly_fill = 0;
+        if (p->poly_cap <= 0 || p->poly_cap > AE_POLY_MAX_NOTES)
+            p->poly_cap = AE_POLY_MAX_NOTES;
+    }
+    atomic_store_explicit (&p->poly_active_out, 0, memory_order_relaxed);
 
     ae_corrector_free_shifters (p);
     p->shifter = ae_shifter_create (p->fs, p->block_samples);
@@ -581,7 +595,14 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->latency = p->shifter != NULL ? ae_shifter_latency (p->shifter)
                                     : p->block_samples;
 
-    const int need = p->latency + 2 * p->max_block + p->frame_size + 16;
+    /* The poly tracker's window outgrows the YIN frame (4096+ against two
+       periods of min_hz), and it borrows p->frame as its staging scratch --
+       so the ALLOCATIONS follow the larger of the two, while frame_size
+       itself keeps its YIN meaning. */
+    const int frame_alloc =
+        p->poly && p->polyf0.win_size > p->frame_size ? p->polyf0.win_size
+                                                      : p->frame_size;
+    const int need = p->latency + 2 * p->max_block + frame_alloc + 16;
     p->buf_size = 1;
     while (p->buf_size < need)
         p->buf_size <<= 1;
@@ -593,7 +614,7 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     free (p->wet_buf);
     free (p->voice_buf);
     p->in_buf    = calloc ((size_t) p->buf_size, sizeof (float));
-    p->frame     = calloc ((size_t) p->frame_size, sizeof (float));
+    p->frame     = calloc ((size_t) frame_alloc, sizeof (float));
     p->in_block  = calloc ((size_t) p->max_block, sizeof (float));
     p->wet_buf   = calloc ((size_t) p->max_block, sizeof (float));
     p->voice_buf = calloc ((size_t) p->max_block, sizeof (float));
@@ -849,6 +870,7 @@ void ae_corrector_free_shifters (AeCorrector *p)
 
 void ae_corrector_free (AeCorrector *p)
 {
+    ae_polyf0_free (&p->polyf0);
     free (p->in_buf);
     free (p->frame);
     free (p->in_block);
@@ -1012,6 +1034,13 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
                 if (k != p->smp_cur[v] && p->smp[v][k].rec != NULL)
                     p->smp[v][k].retiring = true;
     p->smp_ring = ring;
+}
+
+void ae_corrector_set_poly_notes (AeCorrector *p, int cap)
+{
+    /* <1 = unset/uncapped: a zeroed config must not mean "monophonic". */
+    p->poly_cap = cap < 1 ? AE_POLY_MAX_NOTES
+                          : (cap > AE_POLY_MAX_NOTES ? AE_POLY_MAX_NOTES : cap);
 }
 
 void ae_corrector_set_follow (AeCorrector *p, double amt)
@@ -2595,9 +2624,103 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     atomic_store_explicit (&p->shift_st_out, (float) lead_st,
                            memory_order_relaxed);
 
-    /* Lead: the chord, shifted. Formant flags apply as configured. */
+    /* Lead: the chord, shifted -- or, with leadSource:"sample" and a bank
+       loaded, the chord PLAYED BY THE LIBRARY (the MEL9 move): the poly
+       tracker's notes strike sample voices at their EDO-snapped degrees,
+       tracker slot k living on sample row k so the strike / repitch /
+       let-ring / release-ceiling machinery is reused unchanged.
+       sampleMix keeps its meaning -- 1 replaces the playing, 0.5 layers
+       the library under the shifted chord. */
+    const bool chord_sampler =
+        p->lead_source == AE_HARM_SRC_SAMPLE
+        && atomic_load_explicit (&p->smp_live, memory_order_acquire) >= 0;
+    double g_shift_lead = 1.0, g_smp_lead = 0.0;
+    if (chord_sampler)
+    {
+        sample_layer_gains (p->smp_mix, &g_shift_lead, &g_smp_lead);
+
+        /* Feed the tracker the freshest full window, once per ~half
+           window: multi-f0 wants overlap, and the strike machinery wants
+           note edges no later than the tracker can honestly know them. */
+        p->poly_fill += num_samples;
+        const int hop = p->polyf0.win_size / 4;
+        if (p->poly_fill >= hop
+            && p->in_write >= (long long) p->polyf0.win_size)
+        {
+            p->poly_fill = 0;
+            const long long start = p->in_write - p->polyf0.win_size;
+            for (int i = 0; i < p->polyf0.win_size; ++i)
+                p->frame[i] = p->in_buf[(start + i) & p->buf_mask];
+            ae_polyf0_process (&p->polyf0, p->frame);
+
+            const double ref = p->ref_hz > 0.0 ? p->ref_hz
+                                               : AE_REFERENCE_C0_HZ;
+            const double vel = p->smp_vel_fixed >= 0.0
+                ? p->smp_vel_fixed
+                : vel_from_peak (p, p->atk_fast * AE_SQRT2);
+            int active = 0;
+            for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+            {
+                const AePolyNote *note = &p->polyf0.notes[k];
+                const bool on = note->active && k < p->poly_cap;
+                if (on)
+                    ++active;
+                double out_hz = 0.0;
+                if (on)
+                {
+                    /* snap to the enabled-degree grid, then apply the
+                       static lead transpose -- the corrective Mellotron */
+                    const AeTuningResult q = ae_quantize_to_edo_scale_ex (
+                        note->hz, p->edo, p->enabled_deg, ref, period);
+                    out_hz = ae_degree_hz ((long) q.degree + p->lead_shift,
+                                           p->edo, ref, period);
+                }
+                if (on && note->id != p->poly_prev_id[k])
+                {
+                    /* birth: a new note on this row strikes fresh */
+                    sample_strike (p, k, out_hz, vel * note->level);
+                    p->poly_prev_id[k] = note->id;
+                }
+                else if (on)
+                    sample_repitch (p, k, out_hz);
+                else if (p->poly_prev_id[k] != -1)
+                {
+                    /* death: the row's slots decay under the release
+                       ceiling (leadReleaseMs), exactly like a superseded
+                       let-ring note -- "cutting off when notes stop" at
+                       the pace the player chose */
+                    for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                        if (p->smp[k][sl].rec != NULL)
+                            p->smp[k][sl].releasing = true;
+                    p->poly_prev_id[k] = -1;
+                }
+            }
+            atomic_store_explicit (&p->poly_active_out, active,
+                                   memory_order_relaxed);
+        }
+    }
+    else
+        atomic_store_explicit (&p->poly_active_out, 0, memory_order_relaxed);
+
     set_shift (p->shifter, lead_st, 220.0, p->formant_hold, p->formant_st);
-    ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
+    if (! chord_sampler || p->smp_mix < 1.0)
+        ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
+    else
+        memset (p->wet_buf, 0, (size_t) num_samples * sizeof (float));
+    if (chord_sampler)
+    {
+        const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
+        const double l_rel_a = 1.0 - exp (-1.0 / (lr * 0.001 * p->fs));
+        const double fade_step = 1.0 / (0.006 * p->fs);
+        for (int i = 0; i < num_samples; ++i)
+        {
+            double x = 0.0;
+            for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+                x += sample_mix_slots (p, k, fade_step, l_rel_a);
+            p->wet_buf[i] = (float) (p->wet_buf[i] * g_shift_lead
+                                     + x * g_smp_lead);
+        }
+    }
 
     const double gain_alpha = 1.0 - exp (-1.0 / (0.005 * p->fs));
     const double la_ms = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
