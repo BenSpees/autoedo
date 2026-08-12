@@ -886,6 +886,16 @@ sampler" gating), and live over HTTP: the stub's A3 tone reads
 `{"note":57,"hz":221.2,"cents":9.7,"level":1.0,"id":1}` in poly and
 `[]` in mono.
 
+**Running the same algorithm Treebrain-side:** if polling `polyDetected`
+is not enough (faster-than-poll onsets, audio the engine never sees,
+detection with no engine running), the tracker itself is portable —
+`TREEBRAIN-POLYF0-PORT.md` is the implementation-grade handoff: every
+constant in execution order, the six structural rules that were each a
+measured failure during development, Web Audio integration notes, the
+acceptance fixtures both implementations are held to, and the free
+cross-check against `polyDetected`. First-party code, no licence
+strings attached.
+
 ## 4. Field-fix batch — read this first if the guitar was bassy
 
 - **`midiOctaves`** — `"nearest"` (new default) | `"held"`, live. MIDI
