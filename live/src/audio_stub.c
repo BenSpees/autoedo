@@ -247,7 +247,8 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     /* Channel 2 sings a different note (D4) than channels 0/1 (A3). */
     e->base_hz = cfg->input_channel == 2 ? 293.66 : 220.0;
     ae_corrector_prepare (&e->corrector, STUB_RATE, STUB_BLOCK,
-                          cfg->det_min_hz, cfg->det_max_hz, cfg->quality);
+                          cfg->det_min_hz, cfg->det_max_hz,
+                          cfg->quality | (cfg->poly_mode ? AE_SHIFT_QUALITY_POLY_FLAG : 0));
     ae_audio_engine_set_params (e, &cfg->params);
 
     if (pthread_create (&e->thread, NULL, stub_thread, e) != 0)

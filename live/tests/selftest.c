@@ -1194,6 +1194,86 @@ static void test_midi_octave_fold (void)
    -- the fold is free because the receiver's "nearest" mode reads only the
    pitch class. And the envelope depth law must actually CUT: at depth 1 a
    linked source at level 0 silences this instance's wet output. */
+/* POLY mode: a CHORD through the fixed-ratio lead shift arrives with all
+   its notes intact, an octave up -- the pedal "poly" contract. The same
+   chord through MONO mode is the negative control: one detected "pitch"
+   drives a correction of the whole mix, and at least one chord tone is
+   mangled or lost. Also: poly doubles the analysis block, so the latency
+   the status reports must grow -- that is poly's documented price. */
+static void test_poly_mode (void)
+{
+    const double notes[3] = { 130.81, 164.81, 196.0 }; /* C3 E3 G3 */
+    double up[2][3], base[2][3];
+    int lat[2] = { 0, 0 };
+    for (int m = 0; m < 2; ++m) /* 0 = poly, 1 = mono control */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED
+                              | (m == 0 ? AE_SHIFT_QUALITY_POLY_FLAG : 0));
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        ae_corrector_set_formant_hold (p, false);
+        ae_corrector_set_lead_shift (p, 12); /* +1 octave in 12-EDO */
+        lat[m] = p->latency;
+
+        const int total = 512 * 280; /* ~3 s */
+        float *buf = calloc ((size_t) total, sizeof (float));
+        double ph[3] = { 0.0, 0.3, 0.7 };
+        for (int i = 0; i < total; ++i)
+        {
+            double v = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                ph[k] += 2.0 * M_PI * notes[k] / 48000.0;
+                v += sin (ph[k]) + 0.25 * sin (2.0 * ph[k]);
+            }
+            buf[i] = (float) (0.1 * v);
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+
+        const float *tail = buf + total - 96000;
+        for (int k = 0; k < 3; ++k)
+        {
+            up[m][k]   = goertzel (tail, 96000, notes[k] * 2.0, 48000.0);
+            base[m][k] = goertzel (tail, 96000, notes[k], 48000.0);
+        }
+        ae_corrector_free (p); free (p); free (buf);
+    }
+
+    /* Poly: every chord tone present at the shifted position, and the
+       shifted rendering dominates its unshifted residue. */
+    double weakest = 1e9, strongest = 0.0;
+    for (int k = 0; k < 3; ++k)
+    {
+        if (up[0][k] < weakest)   weakest   = up[0][k];
+        if (up[0][k] > strongest) strongest = up[0][k];
+        CHECK (up[0][k] > 3.0 * base[0][k],
+               "poly: chord tone %d arrives SHIFTED (up %.4f vs residue %.4f)",
+               k, up[0][k], base[0][k]);
+    }
+    CHECK (weakest > 0.12 * strongest,
+           "poly: no chord tone is lost (weakest %.4f vs strongest %.4f)",
+           weakest, strongest);
+
+    /* Mono on the same chord loses or mangles at least one tone -- the
+       reason poly mode exists. If this ever PASSES all three, mono has
+       become polyphonic and this test should be rethought. */
+    int mono_ok = 0;
+    for (int k = 0; k < 3; ++k)
+        if (up[1][k] > 3.0 * base[1][k] && up[1][k] > 0.12 * strongest)
+            ++mono_ok;
+    CHECK (mono_ok < 3,
+           "poly control: MONO mode does not survive a chord (%d/3 tones "
+           "clean); if it does, poly earned a rethink", mono_ok);
+
+    CHECK (lat[0] >= 2 * lat[1] - 64,
+           "poly: the doubled analysis block is visible in latency "
+           "(poly %d vs mono %d samples) -- the documented price", lat[0], lat[1]);
+}
+
 static void test_follow_link (void)
 {
     /* encode: identity inside range, class-preserving fold outside */
@@ -3603,6 +3683,7 @@ int main (void)
     test_octave_revote_rebase();
     test_expression_transfer();
     test_attack_sound();
+    test_poly_mode();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();

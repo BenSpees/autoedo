@@ -143,6 +143,12 @@ typedef struct
     int    tau_max;
     int    latency;
     int    max_block;
+    bool   poly;       /* POLY mode: detection bypassed, fixed-ratio
+                          shifting of the whole (chordal) input, doubled
+                          analysis block. The best available real-time
+                          polyphonic shifter is the spectral one already
+                          here -- Signalsmith Stretch -- so poly is an
+                          analysis MODE, not a different library. */
 
     int    buf_size;
     int    buf_mask;

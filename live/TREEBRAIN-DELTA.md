@@ -11,11 +11,11 @@ in the order the batches landed:
 
 `harmGainDb` → `harmHold` → `leadShiftSteps` → `attackSound` →
 `sendChannel` → `sampleInstrument` → `expression` → `sampleRing` →
-`sampleVelRefDb` → **`followEnv`**
+`sampleVelRefDb` → `followEnv` → **`polyMode`**
 
 This is the one authoritative ordering — it is the order the batches
 actually landed in, and `sendChannel` sits where it does because the record
-send shipped before the sample work. A rig that sees `followEnv` in
+send shipped before the sample work. A rig that sees `polyMode` in
 the **config echo** has everything in this document. Probing any key later
 in the chain implies every key before it. (`sampleRing` and the three keys
 beside it landed one build earlier, so a rig that has `sampleRing` but not
@@ -736,6 +736,39 @@ re-balanceable after the show, and `sendGainDb` sets record level without
 touching the stage.
 
 ---
+
+## 3c. POLY mode — chords, at the pedal price
+
+`polyMode: true` (bool, **restart-scoped**, lives with the detection-range
+controls): detection is bypassed and the whole chordal input runs through
+fixed-ratio spectral shifting — the same Signalsmith Stretch instances as
+mono, at a **doubled analysis block**. That is the same trade the pedals
+make: balanced quality goes 56 → 112 ms at 48 kHz, echoed in
+`processLatencyMs`, so re-read the echo and re-feed any latency
+compensation on toggle.
+
+What the guitarist gets: `leadShiftSteps` transposes the chord (±edo is a
+clean octave — the drop-tune/12-string tricks), and the five harmony
+voices become their intervals applied to the whole chord — a fixed-
+interval poly harmonizer with per-voice gain/pan/detune intact. Envelope
+FOLLOW still transmits (energy needs no pitch), so poly guitar can still
+gate the voice.
+
+**UI spec:** a MONO/POLY toggle next to the RANGE control (the user's
+suggested placement is the right one — both describe what the detector is
+allowed to assume about the input). On switching to POLY, grey out
+everything detection-dependent: AMOUNT and the correction cluster, SCALE
+mask, `harmLock`, MIDI mode, HOLD, synth/sample sources, Attack Sound,
+`expression`, and the pitch-follow half of FOLLOW (envelope half stays).
+Show the latency change prominently — it is the cost the player is
+choosing. `detectedHz`/`targetHz` read 0 in poly; don't draw the pitch
+trace as a fault.
+
+Verified: a C3–E3–G3 chord through poly `leadShiftSteps:+12` arrives with
+all three tones intact an octave up (each shifted tone ≥3× its unshifted
+residue), the same chord through mono is the negative control (it does not
+survive), and the latency doubling is asserted in the suite and visible
+live in the echo.
 
 ## 4. Field-fix batch — read this first if the guitar was bassy
 

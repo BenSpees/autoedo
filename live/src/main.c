@@ -430,6 +430,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
               "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
+              "\"polyMode\":%s,"
               "\"sampleVelRefDb\":%s,"
               "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
@@ -452,6 +453,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.sample_ring ? "true" : "false",
               c->follow_url, app->follow_hold ? "true" : "false",
               c->params.follow_env,
+              c->poly_mode ? "true" : "false",
               vel_ref_str,
               c->sample_instrument, sample_oct_str,
               c->send_channel,
@@ -616,6 +618,12 @@ static bool config_apply_json (App *app, const char *json)
         const double hi = num == 0.0 ? 0.0 : num_clamp (num, 100.0, 4000.0);
         if (hi != app->det_max_hz) restart = true;
         app->det_max_hz = hi;
+    }
+    if (ae_json_get_bool (json, "polyMode", &b))
+    {
+        if (b != c->poly_mode)
+            restart = true; /* rebuilds the shifters at the doubled block */
+        c->poly_mode = b;
     }
     if (ae_json_get_string (json, "quality", str, sizeof (str)))
     {

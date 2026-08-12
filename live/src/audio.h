@@ -223,6 +223,11 @@ typedef struct
     double       det_min_hz;             /* detection range (0 = default) */
     double       det_max_hz;
     int          quality;                /* AeShifterQuality: shifter block/latency */
+    bool         poly_mode;              /* POLY: detection bypassed, fixed-ratio
+                                            shifting of the whole chordal input,
+                                            doubled analysis block (more latency,
+                                            chord-clean). Restart-scoped, lives
+                                            with the detection-range controls */
     AeLiveParams params;
 } AeEngineConfig;
 

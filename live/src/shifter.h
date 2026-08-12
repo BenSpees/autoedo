@@ -27,7 +27,16 @@ typedef enum
     AE_SHIFT_QUALITY_LOW      = 0, /* 25 ms block -> 31 ms latency */
     AE_SHIFT_QUALITY_BALANCED = 1, /* 45 ms block -> 56 ms latency (default) */
     AE_SHIFT_QUALITY_HIGH     = 2  /* 120 ms block -> 150 ms (library preset) */
+    /* OR this into ae_corrector_prepare's quality argument for POLY mode:
+       detection is bypassed and the shifters run at fixed ratios over the
+       whole polyphonic input, with the analysis block DOUBLED -- chords
+       need the longer window, and the extra latency is poly mode's
+       documented price. Kept as a flag so the two-axis setting rides one
+       argument without touching every prepare call site. */
+
 } AeShifterQuality;
+
+#define AE_SHIFT_QUALITY_POLY_FLAG 0x100
 
 /* Block size (samples) for a quality preset at this sample rate. */
 int ae_shifter_block_samples (double sample_rate, int quality);

@@ -528,6 +528,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
 {
     p->fs        = sample_rate > 0.0 ? sample_rate : 44100.0;
     p->max_block = max_block_size > 16 ? max_block_size : 16;
+    p->poly      = (quality & AE_SHIFT_QUALITY_POLY_FLAG) != 0;
+    quality     &= ~AE_SHIFT_QUALITY_POLY_FLAG;
 
     if (min_hz < 20.0 || min_hz > 500.0)    min_hz = AE_MIN_FREQ;
     if (max_hz < min_hz * 2.0 || max_hz > 4000.0) max_hz = AE_MAX_FREQ;
@@ -568,6 +570,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
        `latency` samples ago, so the dry path is delayed to match. The block
        size (quality preset) is what sets it. */
     p->block_samples = ae_shifter_block_samples (p->fs, quality);
+    if (p->poly)
+        p->block_samples *= 2; /* chords want the longer analysis window */
 
     ae_corrector_free_shifters (p);
     p->shifter = ae_shifter_create (p->fs, p->block_samples);
@@ -2556,6 +2560,139 @@ static void apply_harm_master (AeCorrector *p, float *harm_l, float *harm_r,
     p->harm_master_cur = fabs (target - g) < 1e-6 ? target : g;
 }
 
+/* POLY mode: the whole (chordal) input through fixed-ratio shifters --
+   the pedal "poly" contract. No detection, no snapping, no per-note
+   anything: leadShiftSteps moves the chord, each harmony voice is its
+   interval applied to the chord, and the doubled analysis block (set in
+   prepare) is what buys chord fidelity, at poly mode's documented
+   latency price. Detection-dependent machinery -- correction, masks,
+   MIDI Harmony, HOLD, sustain, synth/sample sources, attack sound, the
+   FOLLOW sender's note -- is inert here; the envelope (and so envelope
+   FOLLOW and the record send) still works, because energy needs no
+   pitch. */
+static void process_poly (AeCorrector *p, float *mono, float *harm_l,
+                          float *harm_r, float *wet_out, int num_samples)
+{
+    memcpy (p->in_block, mono, (size_t) num_samples * sizeof (float));
+    for (int i = 0; i < num_samples; ++i)
+    {
+        p->in_buf[p->in_write & p->buf_mask] = mono[i];
+        ++p->in_write;
+    }
+    detect_onset (p, num_samples); /* env_out, the gate, the vel reference */
+
+    const bool gate = p->atk_fast > AE_GATE_RMS;
+    p->voiced = gate;
+    atomic_store_explicit (&p->voiced_out, gate, memory_order_relaxed);
+    atomic_store_explicit (&p->detected_hz_out, 0.0f, memory_order_relaxed);
+    atomic_store_explicit (&p->target_hz_out,   0.0f, memory_order_relaxed);
+    atomic_store_explicit (&p->lead_deg_out, AE_HARM_DEG_OFF,
+                           memory_order_relaxed);
+
+    const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
+    const double step_c = p->edo > 0 ? period / (double) p->edo : 100.0;
+    const double lead_st = (double) p->lead_shift * step_c / 100.0;
+    atomic_store_explicit (&p->shift_st_out, (float) lead_st,
+                           memory_order_relaxed);
+
+    /* Lead: the chord, shifted. Formant flags apply as configured. */
+    set_shift (p->shifter, lead_st, 220.0, p->formant_hold, p->formant_st);
+    ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
+
+    const double gain_alpha = 1.0 - exp (-1.0 / (0.005 * p->fs));
+    const double la_ms = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
+    const double lr_ms = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
+    const double l_atk = 1.0 - exp (-1.0 / (la_ms * 0.001 * p->fs));
+    const double l_rel = 1.0 - exp (-1.0 / (lr_ms * 0.001 * p->fs));
+    const double f_lvl = (double) atomic_load_explicit (
+        &p->follow_level_in, memory_order_relaxed);
+    const double f_tgt = (1.0 - p->follow_amt) + p->follow_amt * f_lvl;
+    const double f_a   = 1.0 - exp (-1.0 / (0.010 * p->fs));
+    double v_gain = p->v_gain, l_env = p->lead_env, f_g = p->follow_gain_cur;
+    const long long block_start = p->in_write - num_samples;
+    for (int i = 0; i < num_samples; ++i)
+    {
+        const double target = gate ? 1.0 : 0.0;
+        v_gain += (target - v_gain) * gain_alpha;
+        l_env  += (target - l_env) * (gate ? l_atk : l_rel);
+        f_g    += (f_tgt - f_g) * f_a;
+        const long long t_out = block_start + i - p->latency;
+        const float dry = t_out < 0 ? 0.0f : p->in_buf[t_out & p->buf_mask];
+        const double wet_only = v_gain * l_env * f_g * p->wet_buf[i];
+        if (wet_out != NULL)
+            wet_out[i] = (float) wet_only;
+        mono[i] = (float) (wet_only + (1.0 - v_gain) * dry);
+    }
+    p->v_gain = v_gain; p->lead_env = l_env; p->follow_gain_cur = f_g;
+
+    if (p->ir_lead != NULL)
+        irc_point_process (p->ir_lead, mono, mono, num_samples);
+
+    if (harm_l == NULL)
+        return;
+    for (int i = 0; i < num_samples; ++i)
+    {
+        harm_l[i] = 0.0f;
+        harm_r[i] = 0.0f;
+    }
+
+    /* Ghosts: fixed intervals on the chord. Same envelope, gains and pans
+       as the mono path; the interval maths is the voice's own (steps +
+       octave extension in the interval's direction + detune), with no
+       lock/mask -- there is no detected root to lock TO. */
+    double h_atk, h_rel;
+    harm_env_coeffs (p, &h_atk, &h_rel);
+    for (int v = 0; v < AE_HARM_VOICES; ++v)
+    {
+        const bool configured = p->harm_on && ae_harm_voice_on (&p->harm[v])
+                              && p->h_shifter[v] != NULL;
+        if (! configured)
+        {
+            p->h_fed[v] = false;
+            p->h_mix[v] = 0.0;
+            continue;
+        }
+        if (! p->h_fed[v])
+        {
+            ae_shifter_reset (p->h_shifter[v]);
+            p->h_fed[v] = true;
+            p->h_mix[v] = 0.0;
+        }
+        const int dir = p->harm[v].interval >= 0 ? 1 : -1;
+        const double steps = (double) p->harm[v].interval
+                           + (double) (p->harm[v].ext_oct * dir * p->edo);
+        const double st = (steps * step_c + p->harm[v].detune_cents) / 100.0;
+        set_shift (p->h_shifter[v], st, 220.0, p->formant_hold, p->formant_st);
+        ae_shifter_process (p->h_shifter[v], p->in_block, p->voice_buf,
+                            num_samples);
+        const bool   vgate = gate && ! p->harm[v].mute;
+        const double want  = vgate ? 1.0 : 0.0;
+        const double a     = vgate ? h_atk : h_rel;
+        const double gl = p->h_gl[v], gr = p->h_gr[v];
+        double mix = p->h_mix[v];
+        for (int i = 0; i < num_samples; ++i)
+        {
+            mix += (want - mix) * a;
+            const double sv = p->voice_buf[i] * mix;
+            harm_l[i] += (float) (gl * sv);
+            harm_r[i] += (float) (gr * sv);
+        }
+        p->h_mix[v] = mix;
+        atomic_store_explicit (&p->h_deg_out[v],
+                               vgate ? (int) steps : AE_HARM_DEG_OFF,
+                               memory_order_relaxed);
+    }
+
+    if (p->ir_harm[0] != NULL)
+    {
+        irc_point_process (p->ir_harm[0], harm_l, harm_l, num_samples);
+        irc_point_process (p->ir_harm[1], harm_r, harm_r, num_samples);
+    }
+    if (p->harm_tilt_db != 0.0)
+        render_tilt (p, harm_l, harm_r, num_samples);
+    apply_harm_master (p, harm_l, harm_r, num_samples);
+}
+
 static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                            float *harm_r, float *wet_out, int num_samples)
 {
@@ -2930,7 +3067,14 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
     {
         int m = num_samples - done;
         if (m > p->max_block) m = p->max_block;
-        process_chunk (p, mono + done,
+        if (p->poly)
+            process_poly (p, mono + done,
+                       harm_l != NULL ? harm_l + done : NULL,
+                       harm_r != NULL ? harm_r + done : NULL,
+                       p->lead_wet != NULL && done + m <= p->max_block
+                           ? p->lead_wet + done : NULL, m);
+        else
+            process_chunk (p, mono + done,
                        harm_l != NULL ? harm_l + done : NULL,
                        harm_r != NULL ? harm_r + done : NULL,
                        p->lead_wet != NULL && done + m <= p->max_block

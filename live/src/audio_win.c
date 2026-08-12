@@ -969,7 +969,8 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     }
 
     ae_corrector_prepare (&e->corrector, e->out_rate, MAX_FRAMES,
-                          cfg->det_min_hz, cfg->det_max_hz, cfg->quality);
+                          cfg->det_min_hz, cfg->det_max_hz,
+                          cfg->quality | (cfg->poly_mode ? AE_SHIFT_QUALITY_POLY_FLAG : 0));
     ae_audio_engine_set_params (e, &cfg->params);
 
     uint64_t cushion = (uint64_t) (e->in_rate * 0.020);
