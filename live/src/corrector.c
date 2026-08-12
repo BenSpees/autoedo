@@ -1221,6 +1221,20 @@ static double sample_tick (AeCorrector *p, int v, int slot)
         return 0.0;
     }
     const AeSampleRec *r = p->smp[v][slot].rec;
+    /* A sustained recording WRAPS inside its steady state instead of ending
+       when the file does: the seam crossfade is already baked into the PCM,
+       so this is a plain index move with nothing to blend per sample, and
+       the note holds the tone it was actually playing rather than stopping
+       mid-bow. Recordings without a detected loop keep the old behaviour --
+       run off the end and free the slot -- because a plucked or struck
+       sound's decay IS the sound and looping it would be wrong. */
+    if (r->loop_end > r->loop_start && r->loop_end <= r->len
+        && p->smp[v][slot].pos >= (double) r->loop_end)
+    {
+        const double len = (double) (r->loop_end - r->loop_start);
+        p->smp[v][slot].pos = (double) r->loop_start
+            + fmod (p->smp[v][slot].pos - (double) r->loop_start, len);
+    }
     const int k = (int) p->smp[v][slot].pos;
     if (k >= r->len - 1)
     {

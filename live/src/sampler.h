@@ -32,12 +32,26 @@
    sound played-quietly instead of turned-down. */
 #define AE_SMP_SOFT_VEL  0.6
 
+/* `loop_start`/`loop_end` are frame indices into `pcm`, both 0 when this
+   recording has no usable sustain loop. Sustained voices -- bowed strings,
+   winds, brass, organs, choir -- are one-shots that simply run out after
+   6-8 seconds, so a held ghost died with the file rather than with its
+   envelope. Looping the STEADY STATE is what lets the envelope decide.
+
+   The points are DETECTED, never inherited: no source library in the set
+   carries a `smpl` chunk, and the one format that could (the Mellotron SFZ
+   set) declares `loop_mode=no_loop` on all 805 of its regions. They arrive
+   as seconds from the recording's onset and are resolved to frames at load,
+   where the seam crossfade is also baked into `pcm` -- so the audio thread
+   only ever has to wrap an index. */
 typedef struct
 {
     float *pcm;
     int    len;
     int    midi; /* the pitch this file was RECORDED at */
     bool   soft;
+    int    loop_start;
+    int    loop_end;
 } AeSampleRec;
 
 /* Filename pitch vs SOUNDING pitch. Two shipped sets are named an octave

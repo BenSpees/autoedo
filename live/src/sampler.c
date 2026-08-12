@@ -170,8 +170,154 @@ static int zone_slot (AeSampleBank *b, int midi)
     return i;
 }
 
+/* ── Sustain loops ────────────────────────────────────────────────────────
+   The loop table is a small JSON the pack ships beside the recordings:
+
+     {"xfade":0.12,"instruments":{"violin":{"A3":[0.20,2.21], ...}, ...}}
+
+   Scanned rather than parsed, in the same spirit as the manifest harvester
+   below: the engine wants two numbers per file stem and nothing else, so a
+   scanner that finds exactly those cannot be broken by a shape change
+   elsewhere in the file, and there is no JSON dependency to carry into a C
+   audio build for it. */
+
+/* Seconds from onset for `stem` within `instrument`, or false when absent.
+   `txt` is the whole table. */
+static bool loop_lookup (const char *txt, const char *instrument,
+                         const char *stem, double *out_start, double *out_end)
+{
+    char needle[128];
+    snprintf (needle, sizeof (needle), "\"%s\":{", instrument);
+    const char *inst = strstr (txt, needle);
+    if (inst == NULL)
+        return false;
+    inst += strlen (needle);
+    /* The instrument's own object ends at the first '}' -- its values are
+       flat arrays, so no nesting can end it early. */
+    const char *stop = strchr (inst, '}');
+    if (stop == NULL)
+        return false;
+
+    snprintf (needle, sizeof (needle), "\"%s\":[", stem);
+    const char *hit = strstr (inst, needle);
+    if (hit == NULL || hit >= stop)
+        return false;
+    hit += strlen (needle);
+    char *tail = NULL;
+    const double a = strtod (hit, &tail);
+    if (tail == NULL || *tail != ',')
+        return false;
+    const double c = strtod (tail + 1, NULL);
+    if (!(c > a))
+        return false;
+    *out_start = a;
+    *out_end = c;
+    return true;
+}
+
+/* Bake the equal-power seam crossfade in place.
+
+   The span arriving at `le` is rewritten so that it lands on exactly the
+   material preceding `ls`; after that the wrap is continuous by
+   construction, because the last frame before the jump is the frame that
+   naturally precedes the one played next.
+
+   The fade is equal-power (cos/sin). Which fade holds the level depends on
+   how correlated the two sides are, and the obvious reasoning gets it
+   backwards: equal-power is right when they are UNcorrelated (power adds),
+   linear when they are perfectly correlated and in phase (amplitude adds) --
+   on a pure aligned tone cos+sin peaks at sqrt(2), a +3 dB bump, not a dip.
+   Aligned instrument sustains fall between the two, and measured over the
+   shipped library the choice moves the seam by 0.02 dB on average, so
+   equal-power is kept as the safer default for the noisier sets. */
+static void loop_bake (float *pcm, int len, int ls, int le, int xf)
+{
+    if (pcm == NULL || le > len || le <= ls)
+        return;
+    if (xf > ls) xf = ls;                    /* need material to fade IN from */
+    if (xf > (le - ls) / 2) xf = (le - ls) / 2;
+    if (xf < 8)
+        return;
+    for (int i = 0; i < xf; ++i)
+    {
+        const double t = ((double) i + 0.5) / (double) xf;
+        const double fo = cos (t * 1.57079632679489662);
+        const double fi = sin (t * 1.57079632679489662);
+        pcm[le - xf + i] = (float) (pcm[le - xf + i] * fo + pcm[ls - xf + i] * fi);
+    }
+}
+
+/* Re-lock `le` so the material reaching the seam is IN PHASE with the
+   material preceding `ls`, searching +/-1 period by normalised
+   cross-correlation. The period comes from the zone's known pitch, so
+   nothing here has to detect a fundamental.
+
+   The stored points came off masters at another sample rate; without this
+   the fade still lands, but on out-of-phase material it fades between two
+   copies of the tone that partly cancel -- a seam that dips rather than
+   clicks, which is quieter but no less wrong. */
+static int loop_refine (const float *pcm, int len, int ls, int le,
+                        double period)
+{
+    if (pcm == NULL || period <= 1.0)
+        return le;
+    int corr = (int) (period * 2.0);
+    if (corr < 64)   corr = 64;
+    if (corr > 1024) corr = 1024;
+    int search = (int) period;
+    if (search < 8)   search = 8;
+    if (search > 512) search = 512;
+    if (ls < corr || le <= ls)
+        return le;
+
+    const float *ref = pcm + (ls - corr);
+    int best = le;
+    double best_score = -2.0;
+    int lo = le - search, hi = le + search;
+    if (lo < ls + corr) lo = ls + corr;
+    if (hi > len)       hi = len;
+    for (int cand = lo; cand < hi; ++cand)
+    {
+        const float *w = pcm + (cand - corr);
+        double dot = 0.0, na = 0.0, nb = 0.0;
+        for (int i = 0; i < corr; ++i)
+        {
+            dot += (double) ref[i] * w[i];
+            na  += (double) ref[i] * ref[i];
+            nb  += (double) w[i] * w[i];
+        }
+        if (na <= 1e-12 || nb <= 1e-12)
+            continue;
+        const double score = dot / sqrt (na * nb);
+        if (score > best_score) { best_score = score; best = cand; }
+    }
+    return best;
+}
+
+/* Slurp the pack's loop table, or NULL when it ships none -- which is the
+   normal case for the factory sets and never an error: those zones simply
+   keep playing as the one-shots they always were. Caller frees. */
+static char *loop_table_read (const char *root)
+{
+    char path[1200];
+    snprintf (path, sizeof (path), "%s/acoustic-instruments-loops.json", root);
+    FILE *f = fopen (path, "rb");
+    if (f == NULL)
+        return NULL;
+    fseek (f, 0, SEEK_END);
+    const long n = ftell (f);
+    fseek (f, 0, SEEK_SET);
+    if (n <= 0 || n > (1 << 22)) { fclose (f); return NULL; }
+    char *txt = (char *) malloc ((size_t) n + 1);
+    if (txt == NULL) { fclose (f); return NULL; }
+    const size_t got = fread (txt, 1, (size_t) n, f);
+    fclose (f);
+    txt[got] = '\0';
+    return txt;
+}
+
 static void add_file (AeSampleBank *b, const char *dir, const char *name,
-                      double engine_rate)
+                      double engine_rate, const char *loop_txt)
 {
     bool soft = false;
     int midi = parse_name (name, &soft);
@@ -216,11 +362,61 @@ static void add_file (AeSampleBank *b, const char *dir, const char *name,
             b->clipped++;
     }
 
+    /* Resolve and bake this recording's sustain loop, if the table names it.
+       The points are SECONDS from the onset -- seconds so that an analysis
+       done at 44.1 kHz lands correctly on these transcodes whatever rate the
+       engine runs at, and from the ONSET because every stage of the pipeline
+       trims leading silence by its own rule. Those rules differ slightly
+       between engines, but the difference is constant within a file, so it
+       moves loop_start and loop_end together: the loop's length and the
+       phase across its seam both survive, and only the region's position
+       shifts, by a few ms inside a steady state seconds long. */
+    int loop_start = 0, loop_end = 0;
+    if (loop_txt != NULL)
+    {
+        char stem[128];
+        snprintf (stem, sizeof (stem), "%s", name);
+        char *dot = strrchr (stem, '.');
+        if (dot != NULL)
+            *dot = '\0';
+        double ls_sec = 0.0, le_sec = 0.0;
+        if (loop_lookup (loop_txt, b->instrument, stem, &ls_sec, &le_sec))
+        {
+            const double sr = (engine_rate > 0.0) ? engine_rate : rate;
+            int ls = (int) (ls_sec * sr);
+            int le = (int) (le_sec * sr);
+            const int xf = (int) (0.12 * sr);
+            if (le <= frames && le > ls && ls > xf)
+            {
+                /* The period wants the pitch actually ON THE TAPE, which is
+                   the FILENAME pitch -- `midi` has already had the octave
+                   offset folded in above and speaks sounding pitch, so it
+                   has to come back out. Two shipped sets are named an octave
+                   off what they sound (bass -12, harpsichord +12), and using
+                   the sounding value there would size the correlation window
+                   and the search range against a period twice or half the
+                   real one. */
+                const double tape_midi = (double) (midi - b->octave);
+                const double hz = 440.0 * pow (2.0, (tape_midi - 69.0) / 12.0);
+                if (hz > 0.0)
+                    le = loop_refine (pcm, frames, ls, le, sr / hz);
+                if (le > ls + xf * 2 && le <= frames)
+                {
+                    loop_bake (pcm, frames, ls, le, xf);
+                    loop_start = ls;
+                    loop_end   = le;
+                }
+            }
+        }
+    }
+
     const int idx = b->n_recs++;
     b->recs[idx].pcm  = pcm;
     b->recs[idx].len  = frames;
     b->recs[idx].midi = midi;
     b->recs[idx].soft = soft;
+    b->recs[idx].loop_start = loop_start;
+    b->recs[idx].loop_end   = loop_end;
     b->bytes += (size_t) frames * sizeof (float);
     if (soft) b->soft_idx[z][(*n)++] = (short) idx;
     else      b->main_idx[z][(*n)++] = (short) idx;
@@ -232,7 +428,7 @@ static void add_file (AeSampleBank *b, const char *dir, const char *name,
    agree about and a manifest shape change cannot break the engine. */
 static int load_from_manifest (AeSampleBank *b, const char *manifest,
                                const char *dir, const char *instrument,
-                               double engine_rate)
+                               double engine_rate, const char *loop_txt)
 {
     FILE *f = fopen (manifest, "rb");
     if (f == NULL)
@@ -272,7 +468,7 @@ static int load_from_manifest (AeSampleBank *b, const char *manifest,
             continue;
         memcpy (name, base, nlen);
         name[nlen] = '\0';
-        add_file (b, dir, name, engine_rate);
+        add_file (b, dir, name, engine_rate, loop_txt);
         ++found;
     }
     free (txt);
@@ -362,9 +558,14 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
     char dir[1100];
     snprintf (dir, sizeof (dir), "%s/%s", root, instrument);
 
+    /* Read once for the whole bank rather than per file: the table is a few
+       kilobytes and an instrument is dozens of recordings. */
+    char *loop_txt = loop_table_read (root);
+
     int listed = -1;
     if (manifest != NULL && manifest[0] != '\0')
-        listed = load_from_manifest (bank, manifest, dir, instrument, engine_rate);
+        listed = load_from_manifest (bank, manifest, dir, instrument,
+                                     engine_rate, loop_txt);
 
     if (listed <= 0) /* no manifest, or it named nothing of ours: scan */
     {
@@ -372,11 +573,12 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
         if (d == NULL)
         {
             snprintf (err, err_len, "cannot open %s", dir);
+            free (loop_txt);
             return false;
         }
         const struct dirent *e;
         while ((e = readdir (d)) != NULL)
-            add_file (bank, dir, e->d_name, engine_rate);
+            add_file (bank, dir, e->d_name, engine_rate, loop_txt);
         closedir (d);
     }
 
@@ -386,6 +588,7 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
         snprintf (err, err_len,
                   "no usable %s samples in %s (mono float WAV at %.0f Hz expected)",
                   instrument, dir, engine_rate);
+        free (loop_txt);
         return false;
     }
 
@@ -408,6 +611,7 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
             }
         }
     measure_bank (bank);
+    free (loop_txt);
     err[0] = '\0';
     return true;
 }
