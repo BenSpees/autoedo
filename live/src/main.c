@@ -1530,7 +1530,7 @@ static void *follow_thread_fn (void *arg)
         {
             pthread_mutex_lock (&app->lock);
             snprintf (app->follow_err, sizeof (app->follow_err),
-                      "follow: no engine answering at %.100s:%d", host, port);
+                      "follow: no engine answering at %.90s:%d", host, port);
             pthread_mutex_unlock (&app->lock);
             err_squelch = 700;
         }
