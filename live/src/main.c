@@ -51,6 +51,13 @@
 #define AE_BUILD_ID "unknown"
 #endif
 
+static long long mono_ms (void)
+{
+    struct timespec t;
+    clock_gettime (CLOCK_MONOTONIC, &t);
+    return (long long) t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
 typedef struct
 {
     AeEngineConfig  engine_cfg;
@@ -92,6 +99,25 @@ typedef struct
     bool            ir_dirty[2]; /* changed since last (re)load */
     char            ir_err[256];
     char            send_err[128]; /* last refused send write ("" = none) */
+    /* FOLLOW link (sender side): this instance posts its lead's corrected
+       degree as a virtual MIDI note to another instance's /api/midi, where
+       stock MIDI Harmony (midiOctaves:"nearest") retunes that instance's
+       lead to the pitch class. Voice-follows-guitar with zero new receiver
+       machinery. */
+    char            follow_host[128]; /* "" = follow off */
+    int             follow_port;
+    bool            follow_hold;   /* keep the last note held through the
+                                      source's silence (else note-off) */
+    char            follow_err[128];
+    _Atomic int     follow_note;   /* last note posted, -1 = none */
+    _Atomic long long follow_in_ms;/* monotonic ms of the last /api/follow
+                                      received; 0 = never. The pump enforces
+                                      a 400 ms TTL so a dead sender cannot
+                                      pin this instance's pitch or leave it
+                                      cut: stale link returns to neutral. */
+    pthread_t       follow_thread;
+    bool            follow_thread_up;
+    _Atomic bool    follow_quit;
     char            sample_err[256];
     char            sample_insts[AE_SMP_MAX_INSTRUMENTS][32];
     int             sample_inst_n;
@@ -188,6 +214,7 @@ static void config_defaults (App *app)
     c->params.degrees_hi      = 0xffull;
     c->params.bypass          = false;
     c->params.bypass_mute     = false; /* bypass passes the dry through */
+    /* follow link defaults live on App, not AeEngineConfig: set at startup */
     c->params.lead_on         = true;
     c->params.lead_gain_db    = 0.0;
     c->params.lead_shift_steps = 0;
@@ -402,6 +429,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
+              "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
               "\"sampleVelRefDb\":%s,"
               "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
@@ -422,6 +450,8 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.formant_st,
               c->params.sample_mix, c->params.sample_velocity,
               c->params.sample_ring ? "true" : "false",
+              c->follow_url, app->follow_hold ? "true" : "false",
+              c->params.follow_env,
               vel_ref_str,
               c->sample_instrument, sample_oct_str,
               c->send_channel,
@@ -662,6 +692,45 @@ static bool config_apply_json (App *app, const char *json)
         c->params.sample_velocity = num < 0.0 ? -1.0 : num_clamp (num, 0.0, 1.0);
     if (ae_json_get_bool (json, "sampleRing", &b))
         c->params.sample_ring = b;
+    /* FOLLOW link. followUrl aims THIS instance's corrected degree and
+       envelope at another instance ("" = off); followHold keeps the last
+       note held through this instance's silence; followEnv is the
+       RECEIVER-side depth: how much of the incoming envelope shapes this
+       instance's output (1 = the source's silence cuts it). */
+    if (ae_json_get_string (json, "followUrl", str2, sizeof (str2)))
+    {
+        char host[128] = "";
+        int  fport = 0;
+        const char *u = str2;
+        if (strncmp (u, "http://", 7) == 0) u += 7;
+        const char *colon = strrchr (u, ':');
+        if (str2[0] == '\0')
+        {
+            app->follow_host[0] = '\0';
+            app->follow_port = 0;
+            snprintf (c->follow_url, sizeof (c->follow_url), "%s", "");
+            app->follow_err[0] = '\0';
+        }
+        else if (colon != NULL && colon != u
+                 && (size_t) (colon - u) < sizeof (host)
+                 && atoi (colon + 1) > 0 && atoi (colon + 1) < 65536)
+        {
+            memcpy (host, u, (size_t) (colon - u));
+            host[colon - u] = '\0';
+            fport = atoi (colon + 1);
+            snprintf (app->follow_host, sizeof (app->follow_host), "%s", host);
+            app->follow_port = fport;
+            snprintf (c->follow_url, sizeof (c->follow_url), "%.127s", str2);
+            app->follow_err[0] = '\0';
+        }
+        else
+            snprintf (app->follow_err, sizeof (app->follow_err),
+                      "follow: bad followUrl (want host:port): %.80s", str2);
+    }
+    if (ae_json_get_bool (json, "followHold", &b))
+        app->follow_hold = b;
+    if (ae_json_get_number (json, "followEnv", &num))
+        c->params.follow_env = num_clamp (num, 0.0, 1.0);
     /* The strike map's reference, in dBFS. "auto" (default) observes one;
        a number asserts it, for a host that already knows how hard this
        player plays -- TENDRIL's loudest onset of the capture, an FX
@@ -1061,9 +1130,14 @@ static void status_refresh (App *app)
     char in_name[2 * AE_NAME_MAX] = "", out_name[2 * AE_NAME_MAX] = "", err[2 * 256] = "";
     char ir_err[2 * 256] = "";
     char send_err_esc[2 * 128] = "";
+    char follow_err_esc[2 * 128] = "";
+    double follow_lvl = 1.0; /* app->lock is already held here */
+    if (app->engine != NULL)
+        follow_lvl = ae_audio_engine_follow_level (app->engine);
     char sample_err_esc[2 * 256] = "";
     ae_json_escape_append (in_name,  sizeof (in_name),  st.input_name);
     ae_json_escape_append (send_err_esc, sizeof (send_err_esc), app->send_err);
+    ae_json_escape_append (follow_err_esc, sizeof (follow_err_esc), app->follow_err);
     ae_json_escape_append (sample_err_esc, sizeof (sample_err_esc), app->sample_err);
     ae_json_escape_append (out_name, sizeof (out_name), st.output_name);
     ae_json_escape_append (err,      sizeof (err),      app->engine_err);
@@ -1141,6 +1215,7 @@ static void status_refresh (App *app)
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
         "\"shifter\":\"Signalsmith Stretch %s\",\"formantSupport\":%s,"
         "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
+        "\"followError\":\"%s\",\"followNote\":%d,\"followLevelIn\":%.2f,"
         "\"sampleVelLast\":%.3f,\"sampleVelRefDb\":%.1f,\"sampleZones\":%d,\"sampleFiles\":%d,"
         "\"sampleInstruments\":%s,"
         "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,\"sampleClipped\":%d,"
@@ -1158,6 +1233,8 @@ static void status_refresh (App *app)
         in_name, out_name,
         ae_shifter_version(), ae_shifter_has_formant_support() ? "true" : "false",
         patches, ir_err, send_err_esc, sample_err_esc,
+        follow_err_esc, atomic_load_explicit (&app->follow_note, memory_order_relaxed),
+        follow_lvl,
         (double) st.sample_vel,
         st.sample_vel_ref > 1e-6f ? 20.0 * log10 ((double) st.sample_vel_ref) : -120.0,
         st.sample_zones, st.sample_files, insts,
@@ -1318,6 +1395,29 @@ static void handle_request (void *user, const char *method, const char *path,
         api_status (app, resp);
         return;
     }
+    if (strcmp (method, "POST") == 0 && strcmp (path, "/api/follow") == 0)
+    {
+        /* FOLLOW link input: {"note": n|-1, "level": 0..1}. Deliberately
+           NOT /api/midi -- the virtual chord set belongs to the controller
+           and a link must not fight it -- and deliberately no status
+           rebuild: this arrives ~40x/s from another engine, and the reply
+           is a receipt, not a snapshot. */
+        double num = 0.0;
+        int note = -1;
+        double level = 1.0;
+        if (ae_json_get_number (body, "note", &num))
+            note = (int) num;
+        if (ae_json_get_number (body, "level", &num))
+            level = num < 0.0 ? 0.0 : (num > 1.0 ? 1.0 : num);
+        pthread_mutex_lock (&app->lock);
+        if (app->engine != NULL)
+            ae_audio_engine_set_follow (app->engine, note, level);
+        pthread_mutex_unlock (&app->lock);
+        atomic_store_explicit (&app->follow_in_ms, mono_ms (),
+                               memory_order_relaxed);
+        ae_http_resp_printf (resp, "{\"ok\":true}");
+        return;
+    }
     if (strcmp (method, "POST") == 0 && strcmp (path, "/api/restart") == 0)
     {
         pthread_mutex_lock (&app->lock);
@@ -1333,6 +1433,109 @@ static void handle_request (void *user, const char *method, const char *path,
 }
 
 /* -------------------------------------------------------------------- main */
+
+/* ---------------------------------------------------------- follow link */
+
+
+
+/* Sender thread: watch the lead's corrected degree and post changes to the
+   followed instance's /api/midi as a one-note virtual chord. Note-grained
+   (a few posts per second while playing), loopback-latency cheap, and
+   entirely outside the audio thread. The receiver needs nothing new:
+   midiMode:true + midiOctaves:"nearest" is the whole contract, and the
+   engine that plays the note stays in charge of its own register. */
+static void *follow_thread_fn (void *arg)
+{
+    App *app = arg;
+    int       sent_note  = -2;   /* -2 = nothing ever sent, -1 = note-off */
+    double    sent_level = -1.0;
+    long long last_post  = 0;
+    int       err_squelch = 0;
+
+    while (! atomic_load_explicit (&app->follow_quit, memory_order_relaxed))
+    {
+        ae_engine_sleep_ms (3);
+
+        char host[128];
+        int  port, deg = AE_HARM_DEG_OFF, edo = 12;
+        bool hold;
+        double level = 0.0;
+        pthread_mutex_lock (&app->lock);
+        snprintf (host, sizeof (host), "%s", app->follow_host);
+        port = app->follow_port;
+        hold = app->follow_hold;
+        if (app->engine != NULL)
+        {
+            deg   = ae_audio_engine_lead_degree (app->engine);
+            edo   = app->engine_cfg.params.edo;
+            level = ae_audio_engine_env (app->engine);
+        }
+        pthread_mutex_unlock (&app->lock);
+
+        if (host[0] == '\0')
+        {
+            sent_note = -2; sent_level = -1.0;
+            atomic_store_explicit (&app->follow_note, -1, memory_order_relaxed);
+            continue;
+        }
+
+        int want_note;
+        if (deg == AE_HARM_DEG_OFF)
+            want_note = hold && sent_note >= 0 ? sent_note : -1;
+        else
+            want_note = ae_follow_encode_midi (deg, edo);
+
+        /* Post on a note change, on the level moving audibly, and at
+           least every 150 ms as the keepalive the receiver's TTL rides
+           on. Level is quantized to 1% so the wire carries changes, not
+           jitter. */
+        const long long now = mono_ms ();
+        const double    ql  = (double) ((int) (level * 100.0)) / 100.0;
+        const bool note_moved  = want_note != sent_note;
+        const bool level_moved = fabs (ql - sent_level) >= 0.01
+                                 && now - last_post >= 20;
+        const bool keepalive   = now - last_post >= 150;
+        if (! note_moved && ! level_moved && ! keepalive)
+            continue;
+
+        char body[96];
+        if (want_note < 0)
+            snprintf (body, sizeof (body), "{\"note\":-1,\"level\":%.2f}", ql);
+        else
+            snprintf (body, sizeof (body), "{\"note\":%d,\"level\":%.2f}",
+                      want_note, ql);
+
+        if (ae_http_post_json (host, port, "/api/follow", body))
+        {
+            sent_note = want_note; sent_level = ql; last_post = now;
+            atomic_store_explicit (&app->follow_note, want_note,
+                                   memory_order_relaxed);
+            if (app->follow_err[0] != '\0')
+            {
+                pthread_mutex_lock (&app->lock);
+                app->follow_err[0] = '\0';
+                pthread_mutex_unlock (&app->lock);
+            }
+            err_squelch = 0;
+        }
+        else if (err_squelch <= 0)
+        {
+            pthread_mutex_lock (&app->lock);
+            snprintf (app->follow_err, sizeof (app->follow_err),
+                      "follow: no engine answering at %.100s:%d", host, port);
+            pthread_mutex_unlock (&app->lock);
+            err_squelch = 700;
+        }
+        else
+            --err_squelch;
+    }
+    /* A dead sender must not leave the follower pinned or cut: the
+       receiver's TTL handles a crash, and this handles a clean exit. */
+    if (app->follow_host[0] != '\0' && sent_note != -2)
+        ae_http_post_json (app->follow_host, app->follow_port,
+                           "/api/follow", "{\"note\":-1,\"level\":1}");
+    return NULL;
+}
 
 int main (int argc, char **argv)
 {
@@ -1369,6 +1572,20 @@ int main (int argc, char **argv)
     /* An engine failure is not fatal: the web UI still comes up so the user
        can pick a working device. */
 
+    app.follow_hold = true;
+    atomic_store_explicit (&app.follow_note, -1, memory_order_relaxed);
+    /* Re-arm the persisted followUrl (parse via the config path). */
+    if (app.engine_cfg.follow_url[0] != '\0')
+    {
+        char buf2[192];
+        snprintf (buf2, sizeof (buf2), "{\"followUrl\":\"%s\"}",
+                  app.engine_cfg.follow_url);
+        config_apply_json (&app, buf2);
+    }
+    atomic_store_explicit (&app.follow_quit, false, memory_order_relaxed);
+    app.follow_thread_up =
+        pthread_create (&app.follow_thread, NULL, follow_thread_fn, &app) == 0;
+
     status_refresh (&app); /* the cache must exist before the first GET */
 
     char err[256];
@@ -1391,6 +1608,22 @@ int main (int argc, char **argv)
        ~10x a second. The UI renders from this stream; it polls nothing. */
     while (! g_stop)
     {
+        /* FOLLOW receiver TTL: a sender that died mid-note must not pin
+           this instance's pitch or leave it cut. 400 ms of silence on the
+           link returns it to neutral (the sender keeps alive at 150 ms). */
+        {
+            const long long seen = atomic_load_explicit (&app.follow_in_ms,
+                                                         memory_order_relaxed);
+            if (seen > 0 && mono_ms () - seen > 400)
+            {
+                pthread_mutex_lock (&app.lock);
+                if (app.engine != NULL)
+                    ae_audio_engine_set_follow (app.engine, -1, 1.0);
+                pthread_mutex_unlock (&app.lock);
+                atomic_store_explicit (&app.follow_in_ms, 0,
+                                       memory_order_relaxed);
+            }
+        }
         status_refresh (&app);
         char frame[sizeof (app.status_json)];
         pthread_mutex_lock (&app.status_lock);

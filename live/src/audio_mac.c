@@ -541,6 +541,7 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)
 {
     if (e != NULL)
         ae_atomic_params_store (&e->params, p);
+    atomic_store_explicit (&e->params.follow_level, 1.0, memory_order_relaxed);
 }
 
 
@@ -574,6 +575,29 @@ bool ae_audio_engine_load_ir (AeAudioEngine *e, int point, const char *path,
     }
     return ae_ir_load_point (&e->corrector, point, path, hash, predelay_ms,
                              e->corrector.fs, err, err_len);
+}
+
+void ae_audio_engine_set_follow (AeAudioEngine *e, int note, double level)
+{
+    atomic_store_explicit (&e->params.follow_note_p1,
+                           note >= 0 && note < 128 ? note + 1 : 0,
+                           memory_order_relaxed);
+    atomic_store_explicit (&e->params.follow_level, level, memory_order_relaxed);
+}
+
+double ae_audio_engine_env (AeAudioEngine *e)
+{
+    return (double) ae_corrector_env (&e->corrector);
+}
+
+double ae_audio_engine_follow_level (AeAudioEngine *e)
+{
+    return atomic_load_explicit (&e->params.follow_level, memory_order_relaxed);
+}
+
+int ae_audio_engine_lead_degree (AeAudioEngine *e)
+{
+    return ae_corrector_lead_degree (&e->corrector);
 }
 
 void ae_audio_engine_set_midi_notes (AeAudioEngine *e, uint64_t lo, uint64_t hi)
@@ -616,10 +640,16 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);
     out->trace_len = ae_corrector_trace (&e->corrector, &out->trace_seq,
                                          out->trace_det, out->trace_tgt, AE_TRACE_MAX);
-    out->midi_held_lo = atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed)
+    {
+        uint64_t flo, fhi;
+        ae_follow_bits (&e->params, &flo, &fhi);
+        out->midi_held_lo = flo
+                      | atomic_load_explicit (&e->hw_midi_lo, memory_order_relaxed)
                       | atomic_load_explicit (&e->params.vmidi_lo, memory_order_relaxed);
-    out->midi_held_hi = atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed)
+        out->midi_held_hi = fhi
+                      | atomic_load_explicit (&e->hw_midi_hi, memory_order_relaxed)
                       | atomic_load_explicit (&e->params.vmidi_hi, memory_order_relaxed);
+    }
     snprintf (out->input_name,  sizeof (out->input_name),  "%s", e->in_name);
     snprintf (out->output_name, sizeof (out->output_name), "%s", e->out_name);
 }

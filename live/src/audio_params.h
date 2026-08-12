@@ -47,6 +47,7 @@ typedef struct
     _Atomic double   stickiness;
     _Atomic double   humanize;
     _Atomic double   expression;
+    _Atomic double   follow_env;
     _Atomic double   ref_hz;
     _Atomic double   period_cents;
     _Atomic uint64_t deg_lo;
@@ -61,6 +62,13 @@ typedef struct
     _Atomic uint64_t vmidi_lo; /* virtual held notes (API/tests); backends OR
                                   their hardware bits in at apply time */
     _Atomic uint64_t vmidi_hi;
+    /* FOLLOW link input: a note from another engine instance, OR'd into
+       the held set like a hardware note, plus the source's envelope
+       level. Stored note+1 so a zeroed struct means "none", and kept
+       OUTSIDE AeLiveParams so a config write can never clobber a live
+       link. */
+    _Atomic int      follow_note_p1;
+    _Atomic double   follow_level;
 
     _Atomic bool     harm_on;
     _Atomic int      harm_lock;
@@ -112,6 +120,17 @@ typedef struct
     _Atomic bool     ir_harm_on;
 } AeAtomicParams;
 
+/* The FOLLOW note as held-set bits, for status readouts: the panel's
+   "following note X" lamp reads the same truth the corrector plays. */
+static inline void ae_follow_bits (const AeAtomicParams *a,
+                                   uint64_t *lo, uint64_t *hi)
+{
+    const int fn = atomic_load_explicit (
+        &((AeAtomicParams *) a)->follow_note_p1, memory_order_relaxed) - 1;
+    *lo = fn >= 0 && fn < 64 ? 1ull << fn : 0;
+    *hi = fn >= 64 && fn < 128 ? 1ull << (fn - 64) : 0;
+}
+
 static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams *p)
 {
     int edo = p->edo;
@@ -125,6 +144,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->stickiness,      p->stickiness,      memory_order_relaxed);
     atomic_store_explicit (&a->humanize,        p->humanize,        memory_order_relaxed);
     atomic_store_explicit (&a->expression,      p->expression,      memory_order_relaxed);
+    atomic_store_explicit (&a->follow_env,      p->follow_env,      memory_order_relaxed);
     atomic_store_explicit (&a->ref_hz,          p->ref_hz,          memory_order_relaxed);
     atomic_store_explicit (&a->period_cents,    p->period_cents,    memory_order_relaxed);
     atomic_store_explicit (&a->deg_lo,          p->degrees_lo,      memory_order_relaxed);
@@ -207,10 +227,26 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                                            uint64_t hw_midi_lo, uint64_t hw_midi_hi,
                                            AeMixParams *mix)
 {
-    ae_corrector_set_midi (ps,
-                       atomic_load_explicit (&a->midi_mode, memory_order_relaxed),
-                       hw_midi_lo | atomic_load_explicit (&a->vmidi_lo, memory_order_relaxed),
-                       hw_midi_hi | atomic_load_explicit (&a->vmidi_hi, memory_order_relaxed));
+    /* The FOLLOW note rides in like a hardware note: OR'd into the held
+       set, never stored in the config-owned virtual set, so a config
+       write cannot clobber a live link (and vice versa). */
+    {
+        const int fn = atomic_load_explicit (&a->follow_note_p1,
+                                             memory_order_relaxed) - 1;
+        uint64_t flo = 0, fhi = 0;
+        if (fn >= 0 && fn < 64)        flo = 1ull << fn;
+        else if (fn >= 64 && fn < 128) fhi = 1ull << (fn - 64);
+        ae_corrector_set_midi (ps,
+                atomic_load_explicit (&a->midi_mode, memory_order_relaxed),
+                hw_midi_lo | flo
+                    | atomic_load_explicit (&a->vmidi_lo, memory_order_relaxed),
+                hw_midi_hi | fhi
+                    | atomic_load_explicit (&a->vmidi_hi, memory_order_relaxed));
+        ae_corrector_set_follow_level (ps,
+                atomic_load_explicit (&a->follow_level, memory_order_relaxed));
+        ae_corrector_set_follow (ps,
+                atomic_load_explicit (&a->follow_env, memory_order_relaxed));
+    }
     ae_corrector_set_edo             (ps, atomic_load_explicit (&a->edo, memory_order_relaxed));
     ae_corrector_set_retune_ms       (ps, atomic_load_explicit (&a->retune_ms, memory_order_relaxed));
     ae_corrector_set_transition_ms   (ps, atomic_load_explicit (&a->transition_ms, memory_order_relaxed));

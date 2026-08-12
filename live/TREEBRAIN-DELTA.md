@@ -11,11 +11,11 @@ in the order the batches landed:
 
 `harmGainDb` → `harmHold` → `leadShiftSteps` → `attackSound` →
 `sendChannel` → `sampleInstrument` → `expression` → `sampleRing` →
-**`sampleVelRefDb`**
+`sampleVelRefDb` → **`followEnv`**
 
 This is the one authoritative ordering — it is the order the batches
 actually landed in, and `sendChannel` sits where it does because the record
-send shipped before the sample work. A rig that sees `sampleVelRefDb` in
+send shipped before the sample work. A rig that sees `followEnv` in
 the **config echo** has everything in this document. Probing any key later
 in the chain implies every key before it. (`sampleRing` and the three keys
 beside it landed one build earlier, so a rig that has `sampleRing` but not
@@ -600,7 +600,96 @@ stops collapsing.
 
 ---
 
-## 3. The record send
+## 3. FOLLOW — voice follows guitar, and the Treebrain UI spec
+
+**What it is.** The voice engine's lead retunes to the guitar engine's
+corrected pitch class — sing anything, sound the guitar's note — and
+optionally rides the guitar's envelope, **including cutting off when the
+guitar's notes stop**. Built engine-to-engine: the guitar POSTs
+`{"note", "level"}` to the voice's `/api/follow` at note changes + ~20 ms
+level motion + a 150 ms keepalive; the voice receives the note through
+stock MIDI Harmony (`midiMode` + `midiOctaves:"nearest"` — guitar names
+the pitch CLASS, singer names the register) and applies the level through
+`followEnv`. Verified live: two engines, guitar at 220 Hz → voice holds
+the encoded note, level rides, and killing the link returns the voice to
+autonomous within the 400 ms TTL.
+
+Design decisions that answer questions you'd otherwise ask:
+
+- **Degrees, not frequencies, on the wire** — exact in any EDO
+  (`n = 60 + (j − 4·edo)`, equave-folded; class survives, which is all a
+  "nearest" receiver reads). Both instances must share the tuning grid.
+- **Envelope is ABSOLUTE, not reference-normalised** — a rolling reference
+  maps the same played level to different follower gains across a set,
+  i.e. gain inconsistency by construction. Gated to a clean 0 below the
+  sender's voicing gate, so "note stopped" transmits as silence.
+- **A dead sender cannot wedge the voice** — 400 ms receiver TTL decays
+  the link to neutral; a clean sender shutdown also clears it explicitly.
+- **The follow note never touches the virtual chord set** — your
+  `/api/midi` chords and a live link compose; the follow bit rides in
+  like a hardware note.
+
+### The keys
+
+| Key | Instance | Type | Applies | Default |
+|---|---|---|---|---|
+| `followUrl` | **guitar** (sender) | `host:port` or `""` | live | `""` |
+| `followHold` | guitar | bool | live | `true` |
+| `followEnv` | **voice** (receiver) | float 0–1 | live | `0` |
+
+Status: guitar `followNote` (−1 = none) + `followError`; voice
+`followLevelIn` (1.0 = neutral) and the followed note in `midiNotes`.
+
+### Treebrain UI spec
+
+**Placement:** a FOLLOW block on the *voice* channel strip — that is where
+the musician thinks the feature lives — but note the write direction:
+enabling it writes to BOTH instances.
+
+**Enable toggle** ("Follow guitar"):
+- ON → guitar: `{"followUrl": "127.0.0.1:<voice-port>"}` · voice:
+  `{"midiMode": true}` (assert `midiOctaves:"nearest"` — it is the
+  default, but a rig that switched to `"held"` for charts would take the
+  guitar's arbitrary post-fold register; lint this).
+- OFF → guitar: `{"followUrl": ""}` · voice: restore `midiMode` to what it
+  was before the link (Treebrain owns that memory — a rig using hardware
+  MIDI charts on the voice channel had it on for its own reasons).
+
+**ENV depth fader** (voice, `followEnv`, 0–1, live): 0 = pitch-only,
+1 = guitar's envelope is the voice's envelope — silence cuts. Unipolar
+with neutral at the left edge, so a plain fader is correct here (§12).
+
+**HOLD toggle** (guitar, `followHold`): ON (default) = the voice keeps its
+pitch target between guitar phrases; OFF = guitar silence releases the
+voice to its own correction. Independent of ENV: at depth 1 the voice is
+silent during guitar silence either way — HOLD decides what pitch it
+comes back on.
+
+**Indicators:**
+- Followed-note lamp on the voice strip: decode voice `midiNotes[0]` via
+  `j = 4·edo + (n − 60)` (mod edo for the class) and show the degree/note
+  name. Lit = link active.
+- Level meter: voice `followLevelIn` (1.0 with no link = neutral).
+- Fault lamp: guitar `followError`, surfaced exactly like `sendError`.
+
+**Lints:**
+- Both instances must agree on `edo`, `rootNote`, `refNote`/`refNoteHz` —
+  refuse to enable the link across mismatched grids (the degree transport
+  assumes one grid; a mismatch is wrong NOTES, not detune).
+- Refuse a `followUrl` that points at the instance itself.
+- Warn if the voice channel's `expression` is 0 *and* `followEnv` is 1 —
+  legal, but the combination is a hard-quantized fully-gated robot, which
+  is usually a mistake rather than a sound.
+
+**Latency expectations to set in the UI copy:** guitar detection lock
+(~31 ms) + loopback POST (~1 ms) + voice retune (`retuneMs` /
+`transitionMs`). A fast legato follow — the voice lands on the guitar's
+note a few centiseconds behind the pick, which reads as ensemble, not as
+a vocoder.
+
+**Feature-detect:** `followEnv` in the config echo.
+
+## 3b. The record send
 
 1. **The send exists.** `sendChannel` (int 0–32, **restart** — it lives in
    the device channel map, same scope as `outputChannel`; batch the two),

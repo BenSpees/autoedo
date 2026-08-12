@@ -352,6 +352,13 @@ typedef struct
     int    smp_wait[AE_HARM_VOICES + 1];    /* samples it may keep waiting */
     double smp_env[AE_HARM_VOICES + 1];
 
+    /* FOLLOW (receiver side) --------------------------------------------- */
+    double        follow_amt;      /* followEnv: 0 = pitch only (default),
+                                      1 = the source's envelope IS the
+                                      output envelope -- silence cuts */
+    _Atomic float follow_level_in; /* level from the link; 1.0 = neutral */
+    double        follow_gain_cur; /* smoothed applied gain */
+
     /* Attack Sound ---------------------------------------------------------- */
     int    atk_mode;             /* AE_ATK_* */
     double atk_gain;             /* linear; its own volume, no envelope */
@@ -529,6 +536,17 @@ typedef struct
 
     /* Live read-out (audio thread -> UI thread) ---------------------------- */
     _Atomic float detected_hz_out;
+    /* The lead's SHIFTED target degree (leadShiftSteps included -- the
+       degree the audience hears), AE_HARM_DEG_OFF while unvoiced. This is
+       what the FOLLOW link transmits: a degree is exact in any EDO where
+       a frequency would re-quantize and a MIDI number would round. */
+    _Atomic int   lead_deg_out;
+    /* The input's envelope (linear peak estimate, gated to exactly 0 below
+       the voicing gate), for the FOLLOW link's level stream. Deliberately
+       ABSOLUTE -- no rolling reference -- because a moving reference maps
+       the same played level to different follower gains across a set,
+       which is gain inconsistency by construction. */
+    _Atomic float env_out;
     _Atomic float target_hz_out;
     _Atomic bool  voiced_out;
 
@@ -582,6 +600,21 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
    the engine observe one; negative = observe. See vel_ref_fixed. */
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin);
 
+/* FOLLOW receiver: envelope-follow depth (0..1) and the link's level. */
+void ae_corrector_set_follow (AeCorrector *p, double amt);
+static inline void ae_corrector_set_follow_level (AeCorrector *p, double level)
+{
+    if (level < 0.0) level = 0.0;
+    if (level > 1.0) level = 1.0;
+    atomic_store_explicit (&p->follow_level_in, (float) level,
+                           memory_order_relaxed);
+}
+static inline float ae_corrector_env (const AeCorrector *p)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->env_out,
+                                 memory_order_relaxed);
+}
+
 /* The LEAD voice's attack and release, in ms. Distinct from the harmony's
    (ae_corrector_set_synth): the harmony envelope hides the ghosts' arrival
    latency, this one shapes the corrected lead itself. */
@@ -604,6 +637,30 @@ bool ae_corrector_load_samples (AeCorrector *p, const char *root,
 /* The reference the strike map is measuring against, linear peak. Exposed
    because a RELATIVE map is otherwise unreadable from outside: without it
    a velocity of 0.55 says nothing about whether the player is loud. */
+/* The lead's shifted target degree, AE_HARM_DEG_OFF while unvoiced. */
+static inline int ae_corrector_lead_degree (const AeCorrector *p)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->lead_deg_out,
+                                 memory_order_relaxed);
+}
+
+/* Encode a degree as the virtual-MIDI note the receiver's MIDI Harmony
+   maps back to that degree: n = 60 + (j - 4*edo), folded by whole equaves
+   into MIDI range. The fold preserves the pitch CLASS, which is all a
+   midiOctaves:"nearest" receiver reads -- and "nearest" is the follow
+   link's required fold mode for exactly this reason. Returns -1 only if
+   no equave of the degree fits (cannot happen for edo <= 72 with sane
+   pivots, but the caller checks rather than trusts). */
+static inline int ae_follow_encode_midi (int deg, int edo)
+{
+    if (edo <= 0)
+        return -1;
+    long long n = 60LL + ((long long) deg - 4LL * edo);
+    while (n < 0)    n += edo;
+    while (n > 127)  n -= edo;
+    return (n >= 0 && n <= 127) ? (int) n : -1;
+}
+
 static inline float ae_corrector_sample_vel_ref (const AeCorrector *p)
 {
     return atomic_load_explicit (&p->smp_vel_ref, memory_order_relaxed);

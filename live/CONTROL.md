@@ -403,6 +403,38 @@ CEILING over a recording's own decay, never an extension of it — under
 end of the phrase. Drums are out of scope by agreement — every layer here
 is voiced by a pitch.
 
+### Follow — one engine names the pitch (and rides the level) of another
+
+The multi-instance rig's (§10) instances can be linked: a SENDER posts its
+corrected degree and its input envelope to a RECEIVER, whose lead then
+retunes to the sender's pitch class — sing anything, sound the guitar's
+note. The receiver needs no new machinery: the note arrives through MIDI
+Harmony (`midiMode: true`, `midiOctaves: "nearest"` — the sender names the
+pitch CLASS, the singer names the register), OR'd in like a hardware note
+so it never collides with a controller's virtual chords.
+
+| Key | Side | Type | Applies | Meaning |
+|---|---|---|---|---|
+| `followUrl` | sender | string | live | `host:port` (or `http://host:port`) of the receiver; `""` = off. Malformed writes are refused into `status.followError` |
+| `followHold` | sender | bool | live | default `true`: the last note stays held through the sender's silence, so the receiver keeps its pitch target between phrases. `false`: sender silence releases the receiver back to its own mask correction |
+| `followEnv` | receiver | float 0–1 | live | envelope-follow depth. `0` (default): pitch only. `1`: the sender's envelope IS this instance's output envelope — **the sender going silent cuts this instance**, which is the talk-box shape. The level is the sender's ABSOLUTE envelope (gated to a clean 0 below its voicing gate), deliberately not normalised against any moving reference: a moving reference maps the same played level to different gains across a set |
+
+Transport: the sender POSTs `{"note": n|-1, "level": 0..1}` to the
+receiver's `/api/follow` — on every note change, on audible level motion
+(~20 ms), and at least every 150 ms as a keepalive. The receiver enforces a
+**400 ms TTL**: a sender that dies mid-note cannot pin the receiver's pitch
+or leave it cut; the link decays to neutral. The degree is encoded exactly
+(`n = 60 + (j − 4·edo)`, folded by whole equaves into MIDI range — lossless
+for the pitch class in any EDO), so nothing re-quantizes in transit. Both
+instances must share `edo` / `rootNote` / reference — the degree transport
+assumes one grid.
+
+Status: sender `followNote` (last posted, −1 none) and `followError`;
+receiver `followLevelIn` (1.0 = neutral) and the followed note visible in
+`midiNotes`. Latency is the sender's detection lock (~31 ms at the guitar
+preset) plus a loopback POST (~1 ms) plus the receiver's own retune — a
+fast legato follow, not a vocoder.
+
 ### The record send
 
 A separate output channel for the recorder, so the stem on disk and the

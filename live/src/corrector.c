@@ -826,6 +826,10 @@ void ae_corrector_reset (AeCorrector *p)
     atomic_store_explicit (&p->detected_hz_out, 0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->target_hz_out,   0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->voiced_out,      false, memory_order_relaxed);
+    atomic_store_explicit (&p->lead_deg_out, AE_HARM_DEG_OFF, memory_order_relaxed);
+    atomic_store_explicit (&p->env_out, 0.0f, memory_order_relaxed);
+    atomic_store_explicit (&p->follow_level_in, 1.0f, memory_order_relaxed);
+    p->follow_gain_cur = 1.0;
 }
 
 void ae_corrector_free_shifters (AeCorrector *p)
@@ -1004,6 +1008,11 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
                 if (k != p->smp_cur[v] && p->smp[v][k].rec != NULL)
                     p->smp[v][k].retiring = true;
     p->smp_ring = ring;
+}
+
+void ae_corrector_set_follow (AeCorrector *p, double amt)
+{
+    p->follow_amt = dclamp (amt, 0.0, 1.0);
 }
 
 /* Supply the velocity reference instead of observing one. `ref_lin` is a
@@ -1383,6 +1392,17 @@ static void detect_onset (AeCorrector *p, int num_samples)
     if (p->atk_refract > 0)
         p->atk_refract -= num_samples;
 
+    /* FOLLOW level: the fast follower as a peak estimate, absolute, and
+       gated to a clean zero so "note stopped" transmits as silence rather
+       than as the noise floor. */
+    {
+        const double lvl = p->atk_fast > AE_GATE_RMS
+                               ? p->atk_fast * AE_SQRT2 : 0.0;
+        atomic_store_explicit (&p->env_out,
+                               (float) (lvl > 1.0 ? 1.0 : lvl),
+                               memory_order_relaxed);
+    }
+
     /* One pulse per onset EDGE (Schmitt: re-arms only when the fast/slow
        ratio collapses, so a refractory expiring mid-note cannot double). */
     if (! p->atk_armed
@@ -1731,6 +1751,8 @@ static void run_detection (AeCorrector *p)
         atomic_store_explicit (&p->target_hz_out,
                                (float) (target_hz * pow (2.0, lead_shift_c / 1200.0)),
                                memory_order_relaxed);
+        atomic_store_explicit (&p->lead_deg_out,
+                               (int) (cand + p->lead_shift), memory_order_relaxed);
 
         /* On a fresh onset, start from the pitch actually sung so the
            correction glides from there (retune speed) instead of jumping
@@ -2043,6 +2065,9 @@ harmony_done: ;
     }
     p->voiced = now_voiced;
     atomic_store_explicit (&p->voiced_out, now_voiced, memory_order_relaxed);
+    if (! now_voiced)
+        atomic_store_explicit (&p->lead_deg_out, AE_HARM_DEG_OFF,
+                               memory_order_relaxed);
 
     /* Pitch-trace ring: one point per detection (~200/s), packed into a
        single atomic so a reader can never tear a pair. Unvoiced stores 0 Hz
@@ -2506,7 +2531,9 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
 static void apply_harm_master (AeCorrector *p, float *harm_l, float *harm_r,
                                int num_samples)
 {
-    const double target = p->harm_master;
+    /* The FOLLOW gain rides the master's own ~5 ms smoothing; the ghosts
+       are anchored to the followed lead, so they cut with it. */
+    const double target = p->harm_master * p->follow_gain_cur;
     double g = p->harm_master_cur;
     if (g == target)
     {
@@ -2693,6 +2720,18 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     const bool   no_dry = lead_synth || lead_sample;
     double l_env = p->lead_env;
 
+    /* FOLLOW gain: g = (1 - depth) + depth * level, smoothed ~10 ms. At
+       depth 1 the source's envelope IS this voice's envelope -- the
+       source going silent cuts the voice, which is the point. Applied to
+       the WET lead here and to the harmony bus in apply_harm_master; the
+       latency-matched dry path is not touched (it only sounds while
+       unvoiced). */
+    const double f_lvl = (double) atomic_load_explicit (
+        &p->follow_level_in, memory_order_relaxed);
+    const double f_tgt = (1.0 - p->follow_amt) + p->follow_amt * f_lvl;
+    const double f_a   = 1.0 - exp (-1.0 / (0.010 * p->fs));
+    double f_g = p->follow_gain_cur;
+
     for (int i = 0; i < num_samples; ++i)
     {
         const double target = p->voiced ? 1.0 : 0.0;
@@ -2702,7 +2741,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const long long t_out = block_start + i - p->latency;
         const float dry = (no_dry || t_out < 0)
                               ? 0.0f : p->in_buf[t_out & p->buf_mask];
-        const double wet_g = no_dry ? l_env : v_gain * l_env;
+        f_g += (f_tgt - f_g) * f_a;
+        const double wet_g = (no_dry ? l_env : v_gain * l_env) * f_g;
         const double wet_only = wet_g * p->wet_buf[i];
         if (wet_out != NULL)
             wet_out[i] = (float) wet_only;
@@ -2710,6 +2750,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     }
     p->v_gain = v_gain;
     p->lead_env = l_env;
+    p->follow_gain_cur = f_g;
 
     /* The LEAD IR point: on the finished corrected voice. Zero added
        latency by construction (direct first partition) -- this is the live

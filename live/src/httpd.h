@@ -4,6 +4,8 @@
 #ifndef AUTOEDO_HTTPD_H
 #define AUTOEDO_HTTPD_H
 
+#include <stdbool.h>
+
 #include <stddef.h>
 
 typedef struct
@@ -37,5 +39,10 @@ void ae_http_stop (AeHttpServer *s);
    server upgrades that path itself; the handler never sees it). Clients
    whose sockets fail or stall are dropped. Callable from any thread. */
 void ae_http_ws_broadcast (AeHttpServer *s, const char *data, size_t len);
+
+/* Minimal HTTP POST client (FOLLOW link). Blocking, ~100 ms budget; call
+   from a control thread only. */
+bool ae_http_post_json (const char *host, int port, const char *path,
+                        const char *json);
 
 #endif /* AUTOEDO_HTTPD_H */

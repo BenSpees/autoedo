@@ -37,6 +37,7 @@
 #else
   #include <arpa/inet.h>
   #include <fcntl.h>
+  #include <netdb.h>
   #include <netinet/in.h>
   #include <pthread.h>
   #include <signal.h>
@@ -480,6 +481,62 @@ static void *server_thread (void *arg)
     }
     return NULL;
 }
+
+/* ------------------------------------------------------------- client ----
+   Minimal HTTP POST for the FOLLOW link: one engine posting a virtual MIDI
+   note to another on the same machine. Blocking with a hard 100 ms budget
+   (connect + send + first response bytes), called from a dedicated control
+   thread -- never the audio thread. Returns true if the request was sent
+   and any response line came back. */
+bool ae_http_post_json (const char *host, int port, const char *path,
+                        const char *json)
+{
+#ifdef _WIN32
+    sock_startup ();
+#endif
+    char req[512];
+    const int blen = (int) strlen (json);
+    const int rlen = snprintf (req, sizeof (req),
+        "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n"
+        "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
+        path, host, blen, json);
+    if (rlen <= 0 || rlen >= (int) sizeof (req))
+        return false;
+
+    struct addrinfo hints, *ai = NULL;
+    memset (&hints, 0, sizeof (hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    char portstr[16];
+    snprintf (portstr, sizeof (portstr), "%d", port);
+    if (getaddrinfo (host, portstr, &hints, &ai) != 0 || ai == NULL)
+        return false;
+
+    ae_sock_t fd = socket (ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd == AE_BAD_SOCK) { freeaddrinfo (ai); return false; }
+
+#ifdef _WIN32
+    DWORD tmo = 100;
+    setsockopt (fd, SOL_SOCKET, SO_RCVTIMEO, (const char *) &tmo, sizeof (tmo));
+    setsockopt (fd, SOL_SOCKET, SO_SNDTIMEO, (const char *) &tmo, sizeof (tmo));
+#else
+    struct timeval tv = { 0, 100000 };
+    setsockopt (fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof (tv));
+    setsockopt (fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof (tv));
+#endif
+
+    bool ok = false;
+    if (connect (fd, ai->ai_addr, (int) ai->ai_addrlen) == 0
+        && send (fd, req, (size_t) rlen, 0) == (long) rlen)
+    {
+        char resp[64];
+        ok = recv (fd, resp, sizeof (resp), 0) > 0;
+    }
+    sock_close (fd);
+    freeaddrinfo (ai);
+    return ok;
+}
+
 
 AeHttpServer *ae_http_start (int port, AeHttpHandler handler, void *user,
                              char *err, size_t err_len)

@@ -40,6 +40,10 @@ typedef struct
     double   tolerance_cents; /* 0..50 dead zone around lit degrees */
     double   stickiness;      /* 0..1 hysteresis before re-snapping */
     double   humanize;        /* 0..1 relaxes retune on sustained notes */
+    double   follow_env;      /* FOLLOW receiver depth 0..1: how much of the
+                                 linked source's envelope shapes this
+                                 instance's output. 1 = the source's silence
+                                 cuts it; 0 (default) = pitch-only follow */
     double   expression;      /* 0..1: how much of the bend/vibrato survives
                                  correction. 0 pins the output to the degree,
                                  1 passes the whole deviation while the
@@ -199,6 +203,7 @@ typedef struct
     int          input_channel;          /* 1-based capture channel of the input
                                             device; 0 = backend default (mac:
                                             first channel, win: mix of all) */
+    char         follow_url[128];        /* FOLLOW sender target ("" = off) */
     char         sample_root[1024];      /* per-rate WAV cache root */
     char         sample_manifest[1024];  /* optional file list (JSON) */
     char         sample_instrument[32];
@@ -284,6 +289,20 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out);
 /* Set "virtual" held MIDI notes (bitsets, note 0..127). These merge (OR)
    with hardware MIDI input — used by the /api/midi endpoint and tests. */
 void ae_audio_engine_set_midi_notes (AeAudioEngine *e, uint64_t lo, uint64_t hi);
+
+/* The lead's shifted target degree, AE_HARM_DEG_OFF while unvoiced --
+   what the FOLLOW link transmits. Lock-free, any thread. */
+int ae_audio_engine_lead_degree (AeAudioEngine *e);
+
+/* FOLLOW link receiver input: a note from another instance (-1 = none),
+   OR'd into the MIDI-held set like a hardware note, and the source's
+   envelope level (0..1; 1 = neutral). Lock-free, control thread. */
+void ae_audio_engine_set_follow (AeAudioEngine *e, int note, double level);
+/* This instance's own envelope (linear peak estimate, gated to 0 below
+   the voicing gate) -- what a FOLLOW sender transmits. */
+double ae_audio_engine_env (AeAudioEngine *e);
+/* The follow level currently applied (receiver side; 1 = neutral). */
+double ae_audio_engine_follow_level (AeAudioEngine *e);
 
 /* Enumerate MIDI input source names into out[0..max-1]. Returns the count. */
 int ae_audio_list_midi_sources (char out[][AE_NAME_MAX], int max);

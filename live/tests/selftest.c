@@ -1188,6 +1188,88 @@ static void test_midi_octave_fold (void)
    the window, so lock time scales directly with it. Measured on the rig
    settings: 37.8 ms average lock before, 28.9 after (worst case 52 -> 31).
    The 34 ms bound here fails against the padded frame. */
+/* FOLLOW link pieces that live below the HTTP layer. The degree encode
+   must round-trip through the receiver's MIDI map (j = 4*edo + n - 60) in
+   any EDO, folding by whole equaves when a degree sits outside MIDI range
+   -- the fold is free because the receiver's "nearest" mode reads only the
+   pitch class. And the envelope depth law must actually CUT: at depth 1 a
+   linked source at level 0 silences this instance's wet output. */
+static void test_follow_link (void)
+{
+    /* encode: identity inside range, class-preserving fold outside */
+    CHECK (ae_follow_encode_midi (4 * 22, 22) == 60,
+           "follow encode: the pivot degree is middle C in any EDO");
+    CHECK (ae_follow_encode_midi (4 * 22 + 9, 22) == 69,
+           "follow encode: offsets ride steps");
+    {
+        const int deg = 4 * 72 - 100;          /* far below MIDI range raw */
+        const int n = ae_follow_encode_midi (deg, 72);
+        CHECK (n >= 0 && n <= 127
+               && ((n - 60) % 72 + 72) % 72 == ((deg - 4 * 72) % 72 + 72) % 72,
+               "follow encode: out-of-range degrees fold by equaves, class "
+               "intact (deg %d -> n %d in 72-EDO)", deg, n);
+    }
+
+    /* envelope depth: level 0 at depth 1 cuts the wet lead */
+    double rms_cut = 0.0, rms_open = 0.0;
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        ae_corrector_set_follow (p, 1.0);
+        ae_corrector_set_follow_level (p, c == 0 ? 0.0 : 1.0);
+        const int total = 512 * 188; /* block-aligned */
+        float *buf = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            buf[i] = (float) (0.3 * sin (ph));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        double sq = 0.0;
+        for (int i = total - 24000; i < total; ++i)
+            sq += (double) buf[i] * buf[i];
+        if (c == 0) rms_cut = sqrt (sq / 24000.0);
+        else        rms_open = sqrt (sq / 24000.0);
+        ae_corrector_free (p); free (p); free (buf);
+    }
+    CHECK (rms_open > 0.05 && rms_cut < rms_open * 0.02,
+           "followEnv 1: a source at level 0 CUTS the wet output "
+           "(open %.4f vs cut %.4f); notes stopping must stop the voice",
+           rms_open, rms_cut);
+
+    /* the lead degree publishes, and silence withdraws it */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        const int total = 512 * 60;
+        float *buf = calloc ((size_t) (total + 512 * 40), sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * 440.0 / 48000.0;
+            buf[i] = (float) (0.3 * sin (ph));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        const int deg = ae_corrector_lead_degree (p);
+        CHECK (deg != AE_HARM_DEG_OFF && deg == 4 * 12 + 9,
+               "follow: the lead's corrected degree publishes (%d, want %d "
+               "= A4 in 12-EDO)", deg, 4 * 12 + 9);
+        for (int off = 0; off < 512 * 40; off += 512)
+            ae_corrector_process (p, buf + total + off, NULL, NULL, 512);
+        CHECK (ae_corrector_lead_degree (p) == AE_HARM_DEG_OFF,
+               "follow: silence withdraws the degree (note-stop transmits)");
+        ae_corrector_free (p); free (p); free (buf);
+    }
+}
+
 static void test_detection_lock_time (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -3521,6 +3603,7 @@ int main (void)
     test_octave_revote_rebase();
     test_expression_transfer();
     test_attack_sound();
+    test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();
     test_release_pitch_stability();
