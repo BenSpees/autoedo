@@ -1521,6 +1521,126 @@ static void test_chord_sampler (void)
     if (system (cmd) != 0) { /* best effort */ }
 }
 
+/* Onset-first staging in the chord sampler (research batch 2026-08):
+   an onset doubles the tracker rate for 150 ms (fresh chords commit a
+   frame sooner) and arms a re-strum window -- a still-tracked note whose
+   raw salience rises past its onset-time baseline was re-plucked and
+   strikes again (without this a re-strum of a ringing chord is silent).
+   Early wrong guesses (born then corrected/died young) crossfade out in
+   6 ms instead of ringing at a wrong degree through the release. */
+static void test_poly_onset_response (void)
+{
+    const char *root = "/tmp/ae-smp-onset";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "onset response: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000; /* sustained sine: no decay skew */
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                          AE_SHIFT_QUALITY_BALANCED
+                          | AE_SHIFT_QUALITY_POLY_FLAG);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    char err[256] = "";
+    CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+           "onset response: bank loads (%s)", err);
+    {
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+    }
+    ae_corrector_set_sample (p, 1.0, 0.9, true);
+    ae_corrector_set_lead_env (p, 5.0, 400.0); /* audible ring for the count */
+
+    /* Chord attacks at `quiet`, decays to ~0.3, is re-plucked at t1. */
+    const double notes[3] = { 130.81, 164.81, 196.0 };
+    const int quiet = 512 * 20, t1 = 512 * 120, total = 512 * 220;
+    float *buf = calloc ((size_t) total, sizeof (float));
+    double ph[3] = { 0.0, 0.3, 0.7 };
+    for (int i = 0; i < total; ++i)
+    {
+        double v = 0.0;
+        for (int k = 0; k < 3; ++k)
+        {
+            ph[k] += 2.0 * M_PI * notes[k] / 48000.0;
+            v += sin (ph[k]) + 0.35 * sin (2.0 * ph[k]);
+        }
+        double env = 0.0;
+        if (i >= quiet)
+        {
+            const int since = i - (i >= t1 ? t1 : quiet);
+            env = exp (-(double) since / (0.45 * 48000.0));
+        }
+        buf[i] = (float) (0.15 * v * env);
+    }
+
+    int live_pre = 0, live_post = 0;
+    for (int off = 0; off < total; off += 512)
+    {
+        ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        if (off == t1 - 512 * 4 || off == t1 + 512 * 28)
+        {
+            int live = 0;
+            for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+                for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                    if (p->smp[k][sl].rec != NULL)
+                        ++live;
+            if (off < t1) live_pre = live; else live_post = live;
+        }
+    }
+
+    /* Onset burst: the library answers a fresh chord fast. Without the
+       burst this measures 32 ms; the bound discriminates. */
+    int first = -1;
+    for (int i = quiet; i < total; ++i)
+        if (fabsf (buf[i]) > 1e-4f) { first = i; break; }
+    CHECK (first >= 0 && (first - quiet) <= (int) (0.027 * 48000.0),
+           "onset burst: first sample out within 27 ms of the pluck "
+           "(got %.1f ms)", first < 0 ? -1.0 : (first - quiet) / 48.0);
+
+    /* One live slot per chord tone before the re-strum: no double
+       strikes on the attack, no early wrong guesses left ringing. */
+    CHECK (live_pre == 3,
+           "onset response: a struck chord holds exactly one slot per "
+           "tone (got %d)", live_pre);
+    /* The re-strum strikes again on every row: old ring + fresh strike.
+       Without restrike this stays at 3-4. */
+    CHECK (live_post >= 5,
+           "re-strum: an onset on a ringing chord strikes fresh slots "
+           "(got %d live)", live_post);
+
+    /* And it is audible: energy after the re-pluck beats the decayed
+       ring before it. Reverted this measures ~1.2. */
+    double pre = 0.0, post = 0.0;
+    for (int i = t1 - 12000; i < t1 - 2400; ++i)
+        pre += (double) buf[i] * buf[i];
+    for (int i = t1 + 2400; i < t1 + 12000; ++i)
+        post += (double) buf[i] * buf[i];
+    CHECK (pre > 0.0 && post > 1.45 * pre,
+           "re-strum: the fresh strike is audible over the ring "
+           "(ratio %.2f)", pre > 0.0 ? post / pre : -1.0);
+
+    ae_corrector_free (p);
+    free (p); free (buf);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_follow_link (void)
 {
     /* encode: identity inside range, class-preserving fold outside */
@@ -3933,6 +4053,7 @@ int main (void)
     test_poly_mode();
     test_polyf0_tracker();
     test_poly_detect_export();
+    test_poly_onset_response();
     test_chord_sampler();
     test_follow_link();
     test_detection_lock_time();

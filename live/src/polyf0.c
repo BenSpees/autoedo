@@ -242,6 +242,7 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
        silent input yields no notes rather than noise-floor ghosts. */
     int    n_cand = 0;
     double cand_hz[AE_POLY_MAX_NOTES], cand_lv[AE_POLY_MAX_NOTES];
+    double cand_raw[AE_POLY_MAX_NOTES];
     const double gate = 1e-4 * t->win_size; /* window power gate */
     if (power > gate)
     {
@@ -288,7 +289,10 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
         }
         double top = 0.0;
         for (int c = 0; c < n_cand; ++c)
+        {
+            cand_raw[c] = cand_lv[c];
             if (cand_lv[c] > top) top = cand_lv[c];
+        }
         if (top > 0.0)
             for (int c = 0; c < n_cand; ++c)
                 cand_lv[c] /= top;
@@ -322,6 +326,7 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
             /* smooth the pitch a little; bends still track */
             t->notes[k].hz += (cand_hz[best] - t->notes[k].hz) * 0.5;
             t->notes[k].level = cand_lv[best];
+            t->notes[k].raw   = cand_raw[best];
             t->miss[k] = 0;
         }
         else if (++t->miss[k] >= 4)
@@ -355,6 +360,7 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
             t->notes[slot].active = true;
             t->notes[slot].hz     = cand_hz[c];
             t->notes[slot].level  = cand_lv[c];
+            t->notes[slot].raw    = cand_raw[c];
             t->notes[slot].id     = t->next_id++;
             t->miss[slot] = 0;
             t->seen[slot] = 0;

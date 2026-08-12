@@ -172,6 +172,26 @@ whole life; a re-struck same pitch gets a new `id`; birth latency is
 - Run the tracker every **`win/4`** samples on the freshest full window
   (75 % overlap): ≈ every 21 ms at 48 k/4096. Multi-f0 wants overlap,
   and note edges should be known no later than honesty allows.
+- **Onset burst** (research batch 2026-08): on a detected onset, halve
+  the hop to `win/8` for 150 ms — the event is known in milliseconds,
+  so spend the frames where the notes are changing. Measured on the
+  engine's chord sampler: first sample out 32 → **21.3 ms** after the
+  pluck. Onset detection itself is a cheap fast/slow envelope follower
+  with a Schmitt edge; any spectral-flux stage does the same job.
+- **Re-strum staging** (same batch, consumer-side policy): notes that
+  never die can still be re-plucked. On an onset, snapshot each active
+  note's **raw** salience as a baseline and watch ~200 ms (the window's
+  fill time — the jump takes several frames to show because the Hann
+  window centre-weights old audio): a note whose raw salience rises past
+  ~1.3× its baseline was re-struck. One shot per note per onset. The
+  relative `level` cannot detect this — a new loud note renormalises
+  everyone — which is what the `raw` field exists for.
+- **Young-note correction** (same batch): a consumer that triggers
+  something per note should treat a note superseded or dead within
+  ~120 ms of its own birth as a *correction* (the burst's early guess
+  settling), not a note — cut its artefact fast (the engine crossfades
+  the sample in 6 ms) instead of letting a wrong pitch ring through a
+  long release.
 - Total birth-to-report: window fill (85 ms) is already behind you in
   steady state; a *fresh* chord is seen once the window mostly contains
   it (~40–60 ms) plus 2 frames confirmation (~43 ms) — ≈ 60–90 ms
@@ -271,7 +291,105 @@ native tracker, and keep the engine's `polyDetected` as the agreement
 check; where the two disagree beyond a poll tick, badge it as a
 diagnostic rather than silently preferring either.
 
-## 11. Appendix — the mono detector's portable rules
+## 11. Research review (2026-08) — the polyphonic-detection survey, answered
+
+Response to the "Real-Time Polyphonic Pitch Detection — State of the Art"
+survey (compiled 2026-08). Verdicts from the engine side, with
+measurements; recommendations for Treebrain's own build at the end.
+
+### 11a. Where the survey and this engine already agree
+
+The survey's architecture conclusions are the ones this engine shipped:
+- Its §7.4.3 "detection-driven doubling" — MPE events driving a synthesis
+  layer, "polyphonic, microtonal, zero-artifact… reinforcement rather
+  than correction" — **is the chord sampler** (delta §3c-ii), including
+  the `sampleMix` blend-under-dry framing.
+- Its bottom line that summed-signal polyphonic *retuning* is unsolved
+  in real time is why poly mode does fixed-ratio shifting of the whole
+  chord (the pedal contract) and never per-note retuning.
+- Its §3.2 names this tracker's lineage (Klapuri iterative estimation &
+  cancellation) "a respectable baseline and a good verifier" — correct,
+  and §11d below is the honest boundary of that baseline.
+- Its `polyDetected`-shaped event bus (§7.3: note_on/update/off with Hz,
+  confidence, stable identity) matches what the engine already exports.
+
+### 11b. Adopted into the engine (measured)
+
+**Onset-first staging** (survey §1.2/§5.6) — the burst, re-strum
+restrike, and young-note correction now in §7 above. Discriminating
+test: first-out 21.3 ms vs 32 ms reverted; re-strum slot counts 6 vs 3;
+all three asserted in the engine suite (`test_poly_onset_response`).
+
+### 11c. Measured and REJECTED — so nobody re-walks these
+
+Both were implemented in full, measured, and reverted; the details are
+kept because a Treebrain-side implementation would hit the same walls.
+
+1. **Inharmonicity-aware partial search** (survey §7.5's stiff-string
+   point): locating each partial by peak search within the stiffness
+   allowance `Δf ≈ B·k³·f0/2` (B up to 6e-4). On an in-scope stiff
+   chord (A2-C#3-E3, B = 4e-4, partials to k = 10) the shipped code
+   already tracks at ≤ 2 cents — identical to the "improved" version.
+   The 1/k² refinement weighting (fundamental dominates) already absorbs
+   realistic guitar inharmonicity; the allowance only changes behaviour
+   below the resolution line (§11d), where nothing wins. Also a trap:
+   granting even ±1 extra search bin at low k lets a semitone-flat
+   candidate "find" the true note's partials — measured as the whole
+   triad tracking ~97 cents flat.
+2. **Shaped (lobe-subtracting) spectral cancellation** in place of the
+   flat ×0.12 damp: subtract `peak · Hann-lobe(d)` so a taller neighbour
+   keeps the difference. It genuinely fixed neighbour-fundamental loss —
+   but only for chords whose fundamentals sit closer than the damp
+   window (±2 unpadded bins ≈ ±23 Hz), which is *already below the
+   resolution line by construction*. In scope it changed nothing, and it
+   opened a cascade: skirt-harvester ghosts 75 cents off real notes
+   (outside the 70-cent dedup), 2/3-subharmonics surviving on one
+   aligned partial, and interference-hump phantoms between overlapping
+   lobes whose comb subtraction then erased BOTH real notes beside them.
+   Each needed its own guard; the guards destabilised low chords further.
+   Reverted whole.
+
+### 11d. The resolution honesty line (write this into any consumer UI)
+
+A fundamental pair is resolvable only if it is separated by more than
+the analysis window's main-lobe width: **~23 Hz at 48 kHz / win 4096**
+(scale accordingly). D2-F#2 (19 Hz apart) is NOT resolvable — the two
+lobes overlap and, with certain phases, coherently sum into a genuine
+peak *between* the notes that no pick logic can reject, because it is
+physically there. Practical reading for guitar: close intervals (thirds
+and closer) are honest from ~C3 up; below that, only wide voicings
+(fourths/fifths/octaves). This is a window-length fact, not an
+implementation defect; the only lever is a longer window (more latency)
+or a multi-resolution front end (survey §3.3).
+
+### 11e. Recommended Treebrain-side, from the survey (not engine work)
+
+In order of value for Conductree/Treebrain's own ears:
+1. **PESTO** for the mono tracker (survey §2.5): 130k params, streaming
+   VQT, < 10 ms, continuous pitch — the modern replacement for the
+   FFT-correlation detector treeductor described. Check its repo licence
+   before shipping.
+2. **Online NMF with a native 22-EDO dictionary** (survey §3.1/§7.2):
+   no training infrastructure, one-frame latency, and the only approach
+   whose *output space* is natively 22-EDO. The engine's sample packs
+   are per-pitch recordings — usable as a starting dictionary — and a
+   soundcheck "learn my guitar" capture is the right upgrade. If built,
+   its activations also make the octave-veto oracle the survey
+   recommends for the hybrid.
+3. **The causality audit** (survey §5.1): before trusting any "online"
+   model, hunt centred windows, SE/attention global pooling, and
+   lookahead smoothing. The Mobile-AMT 10-second SE-layer incident is
+   the cautionary tale.
+4. **Instantaneous-frequency refinement** (survey §3.3) if Treebrain
+   builds its own spectral front end: phase advance between hops gives
+   ~cent accuracy on flagged bins for pennies — cheaper than our
+   zero-padding route, needs per-bin phase memory.
+5. The neural path (causalised Basic-Pitch on the Hu et al. 2025
+   baseline, fine-tuned on 22-EDO renders) is the long game; nothing in
+   this engine blocks or duplicates it, and `polyDetected` gives an
+   instant A/B reference against a proven classical tracker.
+
+## 12. Appendix — the mono detector's portable rules
 
 From the earlier detection exchange, restated with exact constants so
 this file is self-contained:

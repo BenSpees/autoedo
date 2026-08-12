@@ -367,6 +367,20 @@ typedef struct
     _Static_assert (AE_POLY_MAX_NOTES <= AE_HARM_VOICES + 1,
                     "chord sampler note k lives on sample row k");
     int      poly_fill;     /* samples since the tracker last ran */
+    int      poly_burst;    /* onset burst countdown: tracker runs at
+                               DOUBLE rate for ~150 ms after an onset,
+                               so fresh chords confirm a frame sooner */
+    int      poly_restrike; /* re-strum window countdown (samples): an
+                               onset landed; a still-tracked note whose
+                               raw salience rises past the ONSET-TIME
+                               baseline inside this window was re-plucked
+                               -- strike it again (a re-strum is not
+                               silent). The jump takes several tracker
+                               runs to show (the Hann window centre-
+                               weights old audio), hence a window with a
+                               frozen baseline, not a one-run check. */
+    double   poly_base_raw[AE_POLY_MAX_NOTES]; /* baseline at the onset */
+    bool     poly_refired[AE_POLY_MAX_NOTES];  /* one shot per row/onset */
     int      poly_prev_id[AE_POLY_MAX_NOTES];
     int      poly_cap;      /* polyNotes: strike at most this many */
     _Atomic int poly_active_out; /* live note count, for the panel */

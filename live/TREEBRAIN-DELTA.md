@@ -815,9 +815,22 @@ as in 3c.
 
 Honest limits, for the tooltip: octave doublings merge (a power chord's
 octave reads as one note — the fifth still sounds); dense voicings
-beyond ~4 distinct pitch classes may drop the weakest note; and a fresh
-chord's sample onset trails the strings by ~90 ms on top of block
-latency, which the `sampleMix` layering hides well.
+beyond ~4 distinct pitch classes may drop the weakest note; close
+intervals (thirds) are honest from ~C3 up, below that only wide
+voicings resolve (a window-resolution fact — port doc §11d); and a
+fresh chord's sample onset trails the strings, which the `sampleMix`
+layering hides well.
+
+**Onset behaviour (research batch 2026-08, automatic — no new keys):**
+an onset doubles the tracker rate for 150 ms, so a fresh chord's first
+sample lands ~21 ms after the pluck (was ~32 ms — both measured,
+asserted in the suite); **re-strums retrigger** — an onset on a
+still-ringing chord strikes fresh samples for the notes whose own level
+jumped, with old rings decaying under `leadReleaseMs` (fast strumming
+under a still-loud ring deliberately does NOT retrigger — the pad
+sustains, the pedal behaviour); and an early tracker guess corrected
+within ~120 ms crossfades out in 6 ms instead of ringing at a wrong
+degree. Nothing to build UI for; worth a line in the POLY tooltip.
 
 Verified end-to-end in the suite: a C3–E3–G3 chord with strong 2nd/3rd
 harmonics against a pure-sine test bank comes back as all three tones

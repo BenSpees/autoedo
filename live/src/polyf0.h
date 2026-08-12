@@ -27,6 +27,10 @@ typedef struct
 {
     double hz;      /* tracked fundamental (frame-smoothed) */
     double level;   /* salience-derived level, 0..1-ish (relative) */
+    double raw;     /* UN-normalised salience: absolute-ish energy, so a
+                       consumer can see one note's own level jump between
+                       frames (a re-pluck) where the relative `level`
+                       cannot -- a new loud note renormalises everyone */
     int    id;      /* stable across the note's life; slots reusable */
     bool   active;
 } AePolyNote;

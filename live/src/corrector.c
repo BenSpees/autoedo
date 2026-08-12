@@ -580,8 +580,14 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
         ae_polyf0_prepare (&p->polyf0, p->fs, min_hz,
                            max_hz < 1200.0 ? max_hz : 1200.0);
         for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
-            p->poly_prev_id[k] = -1;
-        p->poly_fill = 0;
+        {
+            p->poly_prev_id[k]  = -1;
+            p->poly_base_raw[k] = 0.0;
+            p->poly_refired[k]  = false;
+        }
+        p->poly_fill     = 0;
+        p->poly_burst    = 0;
+        p->poly_restrike = 0;
         if (p->poly_cap <= 0 || p->poly_cap > AE_POLY_MAX_NOTES)
             p->poly_cap = AE_POLY_MAX_NOTES;
     }
@@ -2648,9 +2654,36 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
 
        Feed it the freshest full window, once per quarter window: multi-f0
        wants overlap, and the strike machinery wants note edges no later
-       than the tracker can honestly know them. */
+       than the tracker can honestly know them. An ONSET doubles the rate
+       for 150 ms (onset-first staging: the event is known in
+       milliseconds, so spend the frames where the notes are changing)
+       and arms the re-strum check below. */
+    if (p->onset_pulse)
+    {
+        p->poly_burst = (int) (0.150 * p->fs);
+        if (chord_sampler)
+        {
+            /* Arm the re-strum window: freeze each row's raw salience as
+               the pre-pluck baseline. The window spans the analysis
+               window's fill time, so the jump has time to show. Only
+               rows ALREADY SOUNDING at the onset take part -- a row that
+               births during the window is a new note and the birth
+               strike owns it (with a zero baseline it would otherwise
+               restrike immediately: a double strike on every attack). */
+            p->poly_restrike = (int) (0.200 * p->fs);
+            for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+            {
+                p->poly_base_raw[k] = p->polyf0.notes[k].raw;
+                p->poly_refired[k]  = ! p->polyf0.notes[k].active;
+            }
+        }
+    }
     p->poly_fill += num_samples;
-    const int hop = p->polyf0.win_size / 4;
+    const int hop = p->polyf0.win_size / (p->poly_burst > 0 ? 8 : 4);
+    if (p->poly_burst > 0)
+        p->poly_burst -= num_samples;
+    if (p->poly_restrike > 0)
+        p->poly_restrike -= num_samples;
     if (p->poly_fill >= hop
         && p->in_write >= (long long) p->polyf0.win_size)
     {
@@ -2702,9 +2735,42 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                                        p->edo, ref, period);
             if (on && note->id != p->poly_prev_id[k])
             {
-                /* birth: a new note on this row strikes fresh */
+                /* birth: a new note on this row strikes fresh -- and
+                   owns the row for this onset (no restrike on top) */
                 sample_strike (p, k, out_hz, vel * note->level);
+                /* A superseded note that only sounded a moment is a
+                   CORRECTION (the onset burst's early birth settling on
+                   its true pitch), not a note the player meant to let
+                   ring: crossfade it out in 6 ms instead of letting a
+                   wrong degree ring through the release. Mature notes
+                   keep their let-ring. Age in output samples = pos/rate. */
+                for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                    if (p->smp[k][sl].rec != NULL && p->smp[k][sl].releasing
+                        && p->smp[k][sl].rate > 0.0
+                        && p->smp[k][sl].pos
+                               < 0.12 * p->fs * p->smp[k][sl].rate)
+                    {
+                        p->smp[k][sl].releasing = false;
+                        p->smp[k][sl].retiring  = true;
+                    }
                 p->poly_prev_id[k] = note->id;
+                p->poly_refired[k] = true;
+            }
+            else if (on && p->poly_restrike > 0 && ! p->poly_refired[k]
+                     && note->raw > 1.3 * p->poly_base_raw[k])
+            {
+                /* re-pluck: the note never died (same id), but an onset
+                   landed and THIS note's own salience rose past its
+                   pre-pluck baseline -- the player hit the string again.
+                   Without this a re-strum of a ringing chord is silent.
+                   The raw (un-normalised) salience is the tell; the
+                   relative level cannot be, because a new loud note
+                   renormalises everyone. 1.3x: a slow strum's ring has
+                   decayed enough to clear it; fast strumming under a
+                   still-loud ring deliberately does NOT re-fire -- the
+                   pad sustains, which is the pedal behaviour. */
+                sample_strike (p, k, out_hz, vel * note->level);
+                p->poly_refired[k] = true;
             }
             else if (on)
                 sample_repitch (p, k, out_hz);
@@ -2713,10 +2779,20 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                 /* death: the row's slots decay under the release
                    ceiling (leadReleaseMs), exactly like a superseded
                    let-ring note -- "cutting off when notes stop" at
-                   the pace the player chose */
+                   the pace the player chose. A note that only sounded
+                   a moment before dying was the onset burst's early
+                   guess, not a note: 6 ms crossfade, same rule as the
+                   birth correction above. */
                 for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
                     if (p->smp[k][sl].rec != NULL)
-                        p->smp[k][sl].releasing = true;
+                    {
+                        if (p->smp[k][sl].rate > 0.0
+                            && p->smp[k][sl].pos
+                                   < 0.12 * p->fs * p->smp[k][sl].rate)
+                            p->smp[k][sl].retiring = true;
+                        else
+                            p->smp[k][sl].releasing = true;
+                    }
                 p->poly_prev_id[k] = -1;
             }
         }
