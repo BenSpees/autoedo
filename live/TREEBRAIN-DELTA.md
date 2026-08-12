@@ -805,8 +805,13 @@ held" meter next to the POLY toggle; it is also the honest diagnostic for
 (instrument picker, `sampleMix`, velocity, ring) — in 3c's original spec
 it was listed with the greyed-out detection-dependent controls, and that
 list is now wrong for the sample source specifically (synth stays
-greyed). Add a `polyNotes` stepper (1–6) beside the instrument picker,
-and the `polyNotesActive` meter. Latency note stays as in 3c.
+greyed). The **SCALE mask un-greys too**: the chord sampler snaps every
+tracked note to the enabled-degree grid (and `polyDetected.cents` in
+§3c-iii is measured against it), so mask edits are live and meaningful
+in poly — they just don't affect the fixed-ratio *shifted* audio, only
+the tracker-driven paths. Add a `polyNotes` stepper (1–6) beside the
+instrument picker, and the `polyNotesActive` meter. Latency note stays
+as in 3c.
 
 Honest limits, for the tooltip: octave doublings merge (a power chord's
 octave reads as one note — the fifth still sounds); dense voicings

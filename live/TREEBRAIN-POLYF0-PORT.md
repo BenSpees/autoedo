@@ -228,7 +228,50 @@ failure during development):
    "notes" for a triad.
 6. Floor 4096 on the window (§2).
 
-## 10. Appendix — the mono detector's portable rules
+## 10. UI needs — the whole poly surface in Treebrain, one checklist
+
+Full specs live in `TREEBRAIN-DELTA.md` (§3c the POLY toggle, §3c-ii the
+chord sampler, §3c-iii the `polyDetected` consumers); this checklist is
+here so the port doc does not travel without the UI story.
+
+**Controls (config keys):**
+- MONO/POLY toggle beside the RANGE control — restart-scoped; show the
+  latency swing prominently (re-read `processLatencyMs` after toggling
+  and re-feed any latency compensation). [§3c]
+- `polyNotes` stepper (1–6) beside the instrument picker. [§3c-ii]
+- Greyed in POLY: AMOUNT and the correction cluster (retune, tolerance,
+  stickiness), `harmLock`, MIDI mode, HOLD, sustain, the **synth**
+  source, Attack Sound, `expression`, and the pitch half of FOLLOW
+  (envelope half stays live). [§3c]
+- Live in POLY — two corrections to §3c's original grey list:
+  the **sample** source cluster (instrument picker, `sampleMix`,
+  `sampleVelocity`, `sampleVelRefDb`, `sampleRing`) [§3c-ii], and the
+  **SCALE mask** — it governs the chord sampler's note snapping and
+  `polyDetected`'s `cents`, so editing it in poly is meaningful (it does
+  not affect the fixed-ratio *shifted* audio, only the tracker-driven
+  paths). [§3c-iii]
+- Also live, unchanged: `leadShiftSteps`, formant controls, IR points,
+  tilt, harmony voice cluster, the record send, `leadReleaseMs`.
+
+**Readouts:**
+- `polyNotesActive` meter (what the sampler is sounding, capped by
+  `polyNotes`).
+- `polyDetected` consumers, in build order: chord display, polyphonic
+  tuner (`cents` per note), chord trace keyed by `id`, host-side
+  triggering (births/deaths = id set changes). [§3c-iii]
+- `detectedHz`/`targetHz` read 0 in poly and the mono pitch trace goes
+  quiet — render as "poly mode", not as a fault. [§3c]
+
+**Feature-detect:** `polyNotes` in the config echo (config chain, §0 of
+the delta); `polyDetected` by presence in status.
+
+**If Treebrain runs its own port** (this document's subject): drive the
+latency-sensitive widgets — tuner needles, onset flashes — from the
+native tracker, and keep the engine's `polyDetected` as the agreement
+check; where the two disagree beyond a poll tick, badge it as a
+diagnostic rather than silently preferring either.
+
+## 11. Appendix — the mono detector's portable rules
 
 From the earlier detection exchange, restated with exact constants so
 this file is self-contained:
