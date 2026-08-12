@@ -264,6 +264,10 @@ typedef struct
     int    sample_clipped;  /* recordings peaking at full scale: a decode
                                fault, not a mix decision */
     int    poly_notes_live; /* POLY chord sampler: notes sounding right now */
+#define AE_POLY_STATUS_MAX 6
+    uint64_t poly_note[AE_POLY_STATUS_MAX]; /* the detection itself, one
+                               packed word per tracker slot (0 = empty);
+                               decode with the ae_poly_note_* helpers */
     float  lead_makeup;     /* the lead shifter's level-match gain, linear */
     float  out_peak;        /* decaying peak of the summed output BEFORE the
                                soft clip, linear: > ~0.79 means the clip is

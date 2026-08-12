@@ -1334,6 +1334,75 @@ static void test_polyf0_tracker (void)
     free (frame);
 }
 
+/* The detection EXPORT: in poly mode the tracker's chord is published
+   per-note (packed words -> status polyDetected) whether or not a sample
+   bank is striking -- that is what lets a host use the detection for its
+   own purposes. No bank is loaded here on purpose: the reverted behaviour
+   ran the tracker only for the chord sampler, and this test fails against
+   it. */
+static void test_poly_detect_export (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                          AE_SHIFT_QUALITY_BALANCED
+                          | AE_SHIFT_QUALITY_POLY_FLAG);
+    ae_corrector_set_edo (p, 12);
+
+    const double notes[3] = { 130.81, 164.81, 196.0 }; /* C3 E3 G3 */
+    const int    degs[3]  = { 36, 40, 43 };            /* re engine C0 */
+    const int total = 512 * 190; /* ~2 s */
+    float *buf = calloc ((size_t) total, sizeof (float));
+    double ph[3] = { 0.0, 0.3, 0.7 };
+    for (int i = 0; i < total; ++i)
+    {
+        double v = 0.0;
+        for (int k = 0; k < 3; ++k)
+        {
+            ph[k] += 2.0 * M_PI * notes[k] / 48000.0;
+            v += sin (ph[k]) + 0.30 * sin (2.0 * ph[k]);
+        }
+        buf[i] = (float) (0.1 * v);
+    }
+    for (int off = 0; off < total; off += 512)
+        ae_corrector_process (p, buf + off, NULL, NULL, 512);
+
+    int published = 0, ids[AE_POLY_MAX_NOTES];
+    bool found[3] = { false, false, false };
+    for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+    {
+        const uint64_t w = ae_corrector_poly_note (p, k);
+        if (ae_poly_note_hz (w) <= 0.0f)
+            continue;
+        ids[published++] = ae_poly_note_id (w);
+        CHECK (ae_poly_note_level (w) > 0.0,
+               "poly export: a published note carries a level");
+        for (int m = 0; m < 3; ++m)
+            if (fabs (1200.0 * log2 ((double) ae_poly_note_hz (w)
+                                     / notes[m])) < 20.0)
+            {
+                found[m] = true;
+                CHECK (ae_poly_note_deg (w) == degs[m],
+                       "poly export: hz %.1f snaps to degree %d (got %d)",
+                       (double) ae_poly_note_hz (w), degs[m],
+                       ae_poly_note_deg (w));
+                CHECK (ae_follow_encode_midi (degs[m], 12) == 12 + degs[m],
+                       "poly export: the FOLLOW note encoding holds in "
+                       "12-EDO (deg %d)", degs[m]);
+            }
+    }
+    CHECK (published == 3 && found[0] && found[1] && found[2],
+           "poly export: the chord is published WITHOUT a bank "
+           "(%d notes, %d%d%d)", published, found[0], found[1], found[2]);
+    CHECK (ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2],
+           "poly export: note ids are distinct");
+    CHECK (ae_corrector_poly_active (p) == 3,
+           "poly export: the count matches the list (got %d)",
+           ae_corrector_poly_active (p));
+
+    ae_corrector_free (p);
+    free (p); free (buf);
+}
+
 static void write_wav_pcm (const char *path, const float *pcm, int n);
 
 /* POLY + leadSource "sample": the MEL9 move. Play a chord, hear the loaded
@@ -3863,6 +3932,7 @@ int main (void)
     test_attack_sound();
     test_poly_mode();
     test_polyf0_tracker();
+    test_poly_detect_export();
     test_chord_sampler();
     test_follow_link();
     test_detection_lock_time();

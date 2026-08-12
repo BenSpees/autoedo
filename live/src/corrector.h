@@ -370,6 +370,10 @@ typedef struct
     int      poly_prev_id[AE_POLY_MAX_NOTES];
     int      poly_cap;      /* polyNotes: strike at most this many */
     _Atomic int poly_active_out; /* live note count, for the panel */
+    /* The detection itself, exported: one packed word per tracker slot
+       (ae_poly_note_pack), torn-free per note, refreshed every tracker
+       run. The host reads a chord, not just a count. */
+    _Atomic uint64_t poly_note_out[AE_POLY_MAX_NOTES];
 
     /* FOLLOW (receiver side) --------------------------------------------- */
     double        follow_amt;      /* followEnv: 0 = pitch only (default),
@@ -699,6 +703,43 @@ static inline float ae_corrector_sample_vel (const AeCorrector *p)
 static inline int ae_corrector_poly_active (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->poly_active_out,
+                                 memory_order_relaxed);
+}
+
+/* Poly detection export: one tracked note in one 64-bit word, so a note is
+   always internally consistent however the reader's thread is scheduled.
+   Layout: bits 0-31 the raw tracked hz (float bits, 0 = empty slot),
+   32-43 the EDO-snapped absolute engine degree (12 bits), 44-51 the
+   relative level in 1/255ths (loudest note of the frame ~ 1.0), 52-63 the
+   tracker's stable note id (low 12 bits -- an id survives the note's whole
+   life, so a reader can tell re-struck from continuing). */
+static inline uint64_t ae_poly_note_pack (float hz, int deg, double level,
+                                          int id)
+{
+    union { float f; uint32_t u; } h = { .f = hz };
+    if (deg < 0)        deg = 0;
+    if (deg > 4095)     deg = 4095;
+    int lv = (int) (level * 255.0 + 0.5);
+    if (lv < 0)         lv = 0;
+    if (lv > 255)       lv = 255;
+    return (uint64_t) h.u
+         | ((uint64_t) deg << 32)
+         | ((uint64_t) lv  << 44)
+         | ((uint64_t) (id & 0xFFF) << 52);
+}
+
+static inline float ae_poly_note_hz (uint64_t w)
+{
+    union { uint32_t u; float f; } h = { .u = (uint32_t) w };
+    return h.f;
+}
+static inline int    ae_poly_note_deg   (uint64_t w) { return (int) ((w >> 32) & 0xFFF); }
+static inline double ae_poly_note_level (uint64_t w) { return (double) ((w >> 44) & 0xFF) / 255.0; }
+static inline int    ae_poly_note_id    (uint64_t w) { return (int) ((w >> 52) & 0xFFF); }
+
+static inline uint64_t ae_corrector_poly_note (const AeCorrector *p, int k)
+{
+    return atomic_load_explicit (&((AeCorrector *) p)->poly_note_out[k],
                                  memory_order_relaxed);
 }
 

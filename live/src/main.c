@@ -1207,6 +1207,43 @@ static void status_refresh (App *app)
                                   i ? "," : "", app->sample_insts[i]);
     snprintf (insts + in_, sizeof (insts) - in_, "]");
 
+    /* Poly detection export: the tracker's live chord, one object per
+       note. `note` is the same MIDI-style encoding the FOLLOW link uses
+       (60 = engine degree 4*edo, one per degree, equave-folded), `hz` the
+       raw tracked pitch, `cents` its offset from the snapped degree (a
+       polyphonic tuner for free), `level` relative 0..1 (loudest ~ 1),
+       `id` stable across the note's life so a reader can tell re-struck
+       from continuing. Empty array outside poly mode. */
+    _Static_assert (AE_POLY_STATUS_MAX == AE_POLY_MAX_NOTES,
+                    "status export mirrors the tracker slot for slot");
+    char polyd[AE_POLY_STATUS_MAX * 72 + 4];
+    size_t pd = 0;
+    pd += (size_t) snprintf (polyd + pd, sizeof (polyd) - pd, "[");
+    {
+        const AeLiveParams *lp = &app->engine_cfg.params;
+        const double period = lp->period_cents > 0.0 ? lp->period_cents
+                                                     : 1200.0;
+        int pcount = 0;
+        for (int k = 0; k < AE_POLY_STATUS_MAX && pd < sizeof (polyd) - 76; ++k)
+        {
+            const uint64_t w = st.poly_note[k];
+            const double hz = (double) ae_poly_note_hz (w);
+            if (hz <= 0.0)
+                continue;
+            const int deg = ae_poly_note_deg (w);
+            const double snap_hz = ae_degree_hz (deg, lp->edo, lp->ref_hz,
+                                                 period);
+            pd += (size_t) snprintf (polyd + pd, sizeof (polyd) - pd,
+                     "%s{\"note\":%d,\"hz\":%.2f,\"cents\":%.1f,"
+                     "\"level\":%.2f,\"id\":%d}",
+                     pcount++ ? "," : "",
+                     ae_follow_encode_midi (deg, lp->edo), hz,
+                     snap_hz > 0.0 ? 1200.0 * log2 (hz / snap_hz) : 0.0,
+                     ae_poly_note_level (w), ae_poly_note_id (w));
+        }
+    }
+    snprintf (polyd + pd, sizeof (polyd) - pd, "]");
+
     /* Patch names, so UIs build their picker from the engine's own table. */
     char patches[256];
     size_t pn = 0;
@@ -1229,7 +1266,7 @@ static void status_refresh (App *app)
         "\"synthPatches\":%s,\"irError\":\"%s\",\"sendError\":\"%s\",\"sampleError\":\"%s\","
         "\"followError\":\"%s\",\"followNote\":%d,\"followLevelIn\":%.2f,"
         "\"sampleVelLast\":%.3f,\"sampleVelRefDb\":%.1f,\"sampleZones\":%d,\"sampleFiles\":%d,"
-        "\"polyNotesActive\":%d,"
+        "\"polyNotesActive\":%d,\"polyDetected\":%s,"
         "\"sampleInstruments\":%s,"
         "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,\"sampleClipped\":%d,"
         "\"stepCents\":%.4f,\"config\":%s}",
@@ -1251,7 +1288,7 @@ static void status_refresh (App *app)
         (double) st.sample_vel,
         st.sample_vel_ref > 1e-6f ? 20.0 * log10 ((double) st.sample_vel_ref) : -120.0,
         st.sample_zones, st.sample_files,
-        st.poly_notes_live, insts,
+        st.poly_notes_live, polyd, insts,
         (double) st.sample_norm_db, st.sample_octave, st.sample_clipped,
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0

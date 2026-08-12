@@ -586,6 +586,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
             p->poly_cap = AE_POLY_MAX_NOTES;
     }
     atomic_store_explicit (&p->poly_active_out, 0, memory_order_relaxed);
+    for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+        atomic_store_explicit (&p->poly_note_out[k], 0, memory_order_relaxed);
 
     ae_corrector_free_shifters (p);
     p->shifter = ae_shifter_create (p->fs, p->block_samples);
@@ -2636,71 +2638,91 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
         && atomic_load_explicit (&p->smp_live, memory_order_acquire) >= 0;
     double g_shift_lead = 1.0, g_smp_lead = 0.0;
     if (chord_sampler)
-    {
         sample_layer_gains (p->smp_mix, &g_shift_lead, &g_smp_lead);
 
-        /* Feed the tracker the freshest full window, once per ~half
-           window: multi-f0 wants overlap, and the strike machinery wants
-           note edges no later than the tracker can honestly know them. */
-        p->poly_fill += num_samples;
-        const int hop = p->polyf0.win_size / 4;
-        if (p->poly_fill >= hop
-            && p->in_write >= (long long) p->polyf0.win_size)
-        {
-            p->poly_fill = 0;
-            const long long start = p->in_write - p->polyf0.win_size;
-            for (int i = 0; i < p->polyf0.win_size; ++i)
-                p->frame[i] = p->in_buf[(start + i) & p->buf_mask];
-            ae_polyf0_process (&p->polyf0, p->frame);
+    /* The tracker runs whenever poly mode does -- not only for the chord
+       sampler. The detection is EXPORTED (poly_note_out / status
+       polyDetected): a host can read the chord for its own purposes --
+       chord display, a polyphonic tuner, driving its own instruments --
+       whether or not a bank is striking here.
 
-            const double ref = p->ref_hz > 0.0 ? p->ref_hz
-                                               : AE_REFERENCE_C0_HZ;
-            const double vel = p->smp_vel_fixed >= 0.0
-                ? p->smp_vel_fixed
-                : vel_from_peak (p, p->atk_fast * AE_SQRT2);
-            int active = 0;
-            for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+       Feed it the freshest full window, once per quarter window: multi-f0
+       wants overlap, and the strike machinery wants note edges no later
+       than the tracker can honestly know them. */
+    p->poly_fill += num_samples;
+    const int hop = p->polyf0.win_size / 4;
+    if (p->poly_fill >= hop
+        && p->in_write >= (long long) p->polyf0.win_size)
+    {
+        p->poly_fill = 0;
+        const long long start = p->in_write - p->polyf0.win_size;
+        for (int i = 0; i < p->polyf0.win_size; ++i)
+            p->frame[i] = p->in_buf[(start + i) & p->buf_mask];
+        ae_polyf0_process (&p->polyf0, p->frame);
+
+        const double ref = p->ref_hz > 0.0 ? p->ref_hz
+                                           : AE_REFERENCE_C0_HZ;
+        const double vel = p->smp_vel_fixed >= 0.0
+            ? p->smp_vel_fixed
+            : vel_from_peak (p, p->atk_fast * AE_SQRT2);
+        int active = 0;
+        for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+        {
+            const AePolyNote *note = &p->polyf0.notes[k];
+            /* Export every tracked note; polyNotes caps the SAMPLER. */
+            long deg = 0;
+            if (note->active)
             {
-                const AePolyNote *note = &p->polyf0.notes[k];
-                const bool on = note->active && k < p->poly_cap;
-                if (on)
-                    ++active;
-                double out_hz = 0.0;
-                if (on)
-                {
-                    /* snap to the enabled-degree grid, then apply the
-                       static lead transpose -- the corrective Mellotron */
-                    const AeTuningResult q = ae_quantize_to_edo_scale_ex (
-                        note->hz, p->edo, p->enabled_deg, ref, period);
-                    out_hz = ae_degree_hz ((long) q.degree + p->lead_shift,
-                                           p->edo, ref, period);
-                }
-                if (on && note->id != p->poly_prev_id[k])
-                {
-                    /* birth: a new note on this row strikes fresh */
-                    sample_strike (p, k, out_hz, vel * note->level);
-                    p->poly_prev_id[k] = note->id;
-                }
-                else if (on)
-                    sample_repitch (p, k, out_hz);
-                else if (p->poly_prev_id[k] != -1)
-                {
-                    /* death: the row's slots decay under the release
-                       ceiling (leadReleaseMs), exactly like a superseded
-                       let-ring note -- "cutting off when notes stop" at
-                       the pace the player chose */
-                    for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
-                        if (p->smp[k][sl].rec != NULL)
-                            p->smp[k][sl].releasing = true;
-                    p->poly_prev_id[k] = -1;
-                }
+                const AeTuningResult q = ae_quantize_to_edo_scale_ex (
+                    note->hz, p->edo, p->enabled_deg, ref, period);
+                deg = q.degree;
             }
-            atomic_store_explicit (&p->poly_active_out, active,
-                                   memory_order_relaxed);
+            atomic_store_explicit (&p->poly_note_out[k],
+                    note->active ? ae_poly_note_pack ((float) note->hz,
+                                                      (int) deg,
+                                                      note->level, note->id)
+                                 : 0,
+                    memory_order_relaxed);
+
+            const bool on = note->active && k < p->poly_cap;
+            if (on)
+                ++active;
+            if (! chord_sampler)
+            {
+                /* No bank striking: keep the row's history clean so a
+                   mid-chord source flip strikes what is still sounding. */
+                p->poly_prev_id[k] = -1;
+                continue;
+            }
+            double out_hz = 0.0;
+            if (on)
+                /* the snapped degree plus the static lead transpose --
+                   the corrective Mellotron */
+                out_hz = ae_degree_hz (deg + p->lead_shift,
+                                       p->edo, ref, period);
+            if (on && note->id != p->poly_prev_id[k])
+            {
+                /* birth: a new note on this row strikes fresh */
+                sample_strike (p, k, out_hz, vel * note->level);
+                p->poly_prev_id[k] = note->id;
+            }
+            else if (on)
+                sample_repitch (p, k, out_hz);
+            else if (p->poly_prev_id[k] != -1)
+            {
+                /* death: the row's slots decay under the release
+                   ceiling (leadReleaseMs), exactly like a superseded
+                   let-ring note -- "cutting off when notes stop" at
+                   the pace the player chose */
+                for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                    if (p->smp[k][sl].rec != NULL)
+                        p->smp[k][sl].releasing = true;
+                p->poly_prev_id[k] = -1;
+            }
         }
+        atomic_store_explicit (&p->poly_active_out, active,
+                               memory_order_relaxed);
     }
-    else
-        atomic_store_explicit (&p->poly_active_out, 0, memory_order_relaxed);
 
     set_shift (p->shifter, lead_st, 220.0, p->formant_hold, p->formant_st);
     if (! chord_sampler || p->smp_mix < 1.0)

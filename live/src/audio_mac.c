@@ -626,6 +626,8 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->sample_vel      = ae_corrector_sample_vel (&e->corrector);
     out->sample_vel_ref  = ae_corrector_sample_vel_ref (&e->corrector);
     out->poly_notes_live = ae_corrector_poly_active (&e->corrector);
+    for (int k = 0; k < AE_POLY_STATUS_MAX; ++k)
+        out->poly_note[k] = ae_corrector_poly_note (&e->corrector, k);
     {
         const int lv = atomic_load_explicit (&e->corrector.smp_live, memory_order_relaxed);
         out->sample_zones = lv >= 0 ? e->corrector.smp_bank[lv].n_zones : 0;

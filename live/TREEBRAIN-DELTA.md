@@ -823,6 +823,69 @@ test fails against the reverted integration. Tracker-only test: the
 triad is exactly three notes within 20 cents, no ghosts, and silence
 kills all of them. Live-verified against the shipped v2.1 packs.
 
+### 3c-iii. The poly detection, exported — build your own things on it
+
+The multi-f0 tracker is not the chord sampler's private property. In
+poly mode it runs **whether or not a bank is striking**, and status
+exports its live chord as `polyDetected` — so Treebrain can use the
+detection for anything:
+
+```json
+"polyDetected": [
+  {"note": 48, "hz": 130.9, "cents": -3.2, "level": 1.0,  "id": 17},
+  {"note": 52, "hz": 165.1, "cents":  2.8, "level": 0.84, "id": 18},
+  {"note": 55, "hz": 196.4, "cents":  3.5, "level": 0.71, "id": 19}
+]
+```
+
+Field contract:
+- **`note`** — the FOLLOW link's MIDI-style encoding (§3: 60 = engine
+  degree `4×edo`, one per degree, equave-folded to 0–127). The decoder
+  you already wrote for `followNote` decodes this.
+- **`hz`** — raw tracked pitch, before EDO snapping.
+- **`cents`** — offset from the snapped enabled-degree pitch (the scale
+  mask is honoured, so this is "how far from the note the chart allows").
+- **`level`** — relative 0..1, loudest note ≈ 1. Deliberately **not**
+  absolute velocity (the FOLLOW decision about gain consistency applies
+  here too); treat it as balance-within-the-chord.
+- **`id`** — stable for the note's life. Same `id` across two polls =
+  the same sounding note; a new `id` at the same pitch = re-struck.
+
+Timing contract: the tracker updates every ~21 ms at 48 kHz; status
+ticks at ~10 Hz, so sub-100 ms notes can slip between polls, and note
+birth trails the string by ~60–90 ms (window + confirmation — the same
+honesty as §3c-ii). This is a **display/logic feed, not an audio-rate
+event stream**; anything that must be sample-accurate belongs engine-side
+(as the chord sampler is).
+
+Feature-detect: `polyDetected` is a **status** key, present (possibly
+`[]`) on every build that has it — probe status once, not the config
+chain. It landed after `polyNotes`; the config chain (§0) is unchanged.
+
+**UI spec — things this feeds, in the order they're worth building:**
+1. **Chord display**: decode `note` per entry, name the chord in the
+   current EDO's terms; sort by `level` for voicing order. Put it beside
+   the POLY toggle where `polyNotesActive` already sits (the count is
+   now just `polyDetected.length` for the uncapped view).
+2. **Polyphonic tuner**: one needle/bar per entry driven by `cents` —
+   the guitarist tunes all six strings in one strum, against the actual
+   22-EDO grid rather than 12-TET. Colour by |cents| like the mono tuner.
+3. **Chord trace**: a piano-roll strip of `note` over time, keyed by
+   `id` so held notes draw as bars, not dots. `traceSeq` stitching is
+   not needed — `id` does that job here.
+4. **Triggering Treebrain's own instruments/visuals**: births = ids that
+   appeared since the last poll, deaths = ids that vanished. Debounce by
+   one poll if driving anything audible, and remember the ~10 Hz floor —
+   for note-onset-critical uses, raise the status poll rate on the POLY
+   panel only.
+
+Verified: the export is asserted in the suite without any bank loaded
+(three notes, exact degrees, distinct ids, FOLLOW encoding round-trip;
+the test fails against the reverted "tracker only runs for the chord
+sampler" gating), and live over HTTP: the stub's A3 tone reads
+`{"note":57,"hz":221.2,"cents":9.7,"level":1.0,"id":1}` in poly and
+`[]` in mono.
+
 ## 4. Field-fix batch — read this first if the guitar was bassy
 
 - **`midiOctaves`** — `"nearest"` (new default) | `"held"`, live. MIDI

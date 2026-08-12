@@ -307,11 +307,40 @@ recognises), `sampleVelLast` (the level the voices were last struck with — a
 strike level you cannot see is one you cannot tune), `sampleVelRefDb` (the
 reference that level is relative TO; a relative map is unreadable from
 outside without it — 0.55 says nothing until you know what it is 0.55 of), `sampleZones` /
-`sampleFiles` (what actually loaded), `polyNotesActive` (chord sampler:
-notes the multi-f0 tracker currently holds alive — 0 whenever the chord
-sampler is not engaged), and `sampleError` (the last failed
+`sampleFiles` (what actually loaded), `polyNotesActive` (notes the chord
+sampler is sounding, i.e. capped by `polyNotes` — 0 outside poly mode),
+`polyDetected` (the poly detection itself, exported — see below), and
+`sampleError` (the last failed
 load; a failure leaves the **running bank playing** rather than going
 silent, so a bad path during a set is a message, not a hole).
+
+**`polyDetected` — the poly detection, exported.** In poly mode the
+multi-f0 tracker runs whether or not a bank is striking, and status
+carries its live chord as an array (empty outside poly mode, or when
+nothing sounds):
+
+```json
+"polyDetected": [
+  {"note": 48, "hz": 130.9, "cents": -3.2, "level": 1.0, "id": 17},
+  {"note": 52, "hz": 165.1, "cents":  2.8, "level": 0.84, "id": 18}
+]
+```
+
+- `note` — the same MIDI-style encoding the FOLLOW link uses (60 = engine
+  degree `4×edo`, one step per degree, equave-folded to 0–127), so a
+  consumer that already reads `followNote` reads this for free.
+- `hz` — the raw tracked pitch, pre-snap.
+- `cents` — offset from the snapped enabled-degree pitch: a **polyphonic
+  tuner** with no further math.
+- `level` — relative 0..1, loudest note of the frame ≈ 1. Deliberately
+  not absolute velocity.
+- `id` — stable for the note's whole life, so a poller can tell a
+  re-struck note from a continuing one across status ticks.
+
+The tracker updates every quarter analysis window (~21 ms at 48 kHz);
+status ticks at ~10 Hz, so very short notes can be born and die between
+polls — `id` is what keeps the stitching honest. `polyNotes` caps the
+**sampler**, not this list: all tracked notes are exported.
 
 **What is genuinely different here, and where a straight port of a browser
 sampler goes wrong.** A ghost is continuous; a sample is struck. So a
