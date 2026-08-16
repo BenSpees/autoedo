@@ -222,7 +222,11 @@ struct AeAudioEngine
     double out_rate;
     int    out_channels;
     int    buffer_frames;
-    int    latency_frames;
+    int    latency_frames;        /* the ENGINE's own path (what the
+                                     record send is aligned by) */
+    int    device_latency_frames; /* hardware overhead outside that path:
+                                     input collection cycle + both sides'
+                                     device/stream/safety latencies */
 
     char in_name[AE_NAME_MAX];
     char out_name[AE_NAME_MAX];
@@ -484,6 +488,60 @@ static void set_device_buffer_size (AudioDeviceID dev, int frames)
     AudioObjectSetPropertyData (dev, &a, 0, NULL, sizeof (v), &v); /* best-effort */
 }
 
+/* What the hardware actually GRANTED -- the set above is best-effort,
+   and a device already open elsewhere keeps its owner's size. Latency
+   arithmetic must follow what the device does, not what we asked for:
+   using the requested size when the grant differed understated the
+   stated latency silently. */
+static int get_device_buffer_size (AudioDeviceID dev, int fallback)
+{
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyBufferFrameSize,
+                                     kAudioObjectPropertyScopeGlobal,
+                                     kAudioObjectPropertyElementMain };
+    UInt32 v = 0, sz = sizeof (v);
+    if (AudioObjectGetPropertyData (dev, &a, 0, NULL, &sz, &v) == noErr && v > 0)
+        return (int) v;
+    return fallback;
+}
+
+/* One side's hardware latency, in that device's own sample frames:
+   device latency + safety offset + the first stream's latency -- the
+   converters and USB transport live in these numbers, and CoreAudio
+   only tells you if you ask. Best-effort: a property the device does
+   not publish counts as zero, so the figure can only be honest-or-low,
+   never invented. */
+static int device_side_latency (AudioDeviceID dev, bool is_input)
+{
+    const AudioObjectPropertyScope scope =
+        is_input ? kAudioObjectPropertyScopeInput
+                 : kAudioObjectPropertyScopeOutput;
+    int total = 0;
+    UInt32 v = 0, sz = sizeof (v);
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyLatency, scope,
+                                     kAudioObjectPropertyElementMain };
+    if (AudioObjectGetPropertyData (dev, &a, 0, NULL, &sz, &v) == noErr)
+        total += (int) v;
+    a.mSelector = kAudioDevicePropertySafetyOffset;
+    v = 0; sz = sizeof (v);
+    if (AudioObjectGetPropertyData (dev, &a, 0, NULL, &sz, &v) == noErr)
+        total += (int) v;
+    a.mSelector = kAudioDevicePropertyStreams;
+    AudioStreamID streams[8];
+    sz = sizeof (streams);
+    if (AudioObjectGetPropertyData (dev, &a, 0, NULL, &sz, streams) == noErr
+        && sz >= sizeof (AudioStreamID))
+    {
+        AudioObjectPropertyAddress sa = { kAudioStreamPropertyLatency,
+                                          kAudioObjectPropertyScopeGlobal,
+                                          kAudioObjectPropertyElementMain };
+        v = 0; sz = sizeof (v);
+        if (AudioObjectGetPropertyData (streams[0], &sa, 0, NULL, &sz, &v)
+                == noErr)
+            total += (int) v;
+    }
+    return total;
+}
+
 static OSStatus make_hal_unit (AudioUnit *out_unit)
 {
     AudioComponentDescription desc = { kAudioUnitType_Output, kAudioUnitSubType_HALOutput,
@@ -617,6 +675,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->input_rate      = e->in_rate;
     out->output_rate     = e->out_rate;
     out->latency_samples = e->latency_frames;
+    out->device_latency_samples = e->device_latency_frames;
     out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
     out->target_hz       = ae_corrector_target_hz (&e->corrector);
     out->shift_st        = ae_corrector_shift_st (&e->corrector);
@@ -732,6 +791,9 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
 
     set_device_buffer_size (in_dev,  e->buffer_frames);
     set_device_buffer_size (out_dev, e->buffer_frames);
+    /* every latency figure below follows the GRANTED sizes */
+    const int buf_in  = get_device_buffer_size (in_dev,  e->buffer_frames);
+    const int buf_out = get_device_buffer_size (out_dev, e->buffer_frames);
 
     /* Buffers. */
     if (ae_ring_init (&e->ring, 1 << 16) != 0)
@@ -759,16 +821,30 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     ae_audio_engine_set_params (e, &cfg->params);
 
     /* ~20 ms input-side cushion (or 3 hardware blocks, whichever is more)
-       before playback starts, so device clock jitter can't underrun us. */
+       before playback starts, so device clock jitter can't underrun us.
+       The block floor uses the GRANTED input buffer -- it is already in
+       input-rate frames, and it is the cycle the jitter actually rides. */
     uint64_t cushion = (uint64_t) (e->in_rate * 0.020);
-    const uint64_t three_blocks = (uint64_t) (3.0 * e->buffer_frames * e->in_rate / e->out_rate);
+    const uint64_t three_blocks = (uint64_t) (3 * buf_in);
     if (cushion < three_blocks)
         cushion = three_blocks;
     e->prefill_target = cushion;
 
     e->latency_frames = ae_corrector_latency (&e->corrector)
                       + (int) ((double) cushion * e->out_rate / e->in_rate)
-                      + e->buffer_frames;
+                      + buf_out;
+
+    /* Hardware overhead OUTSIDE the engine's path, reported separately
+       (deviceLatencyMs): the input side's collection cycle -- capture
+       arrives one input buffer late, a cost the formula above never
+       carried -- plus both sides' device/stream/safety latencies.
+       processLatencyMs keeps meaning the engine's own path, which is
+       what the record send is aligned by; the panel's honest
+       mic-to-speaker figure is the SUM (totalLatencyMs). */
+    e->device_latency_frames =
+        (int) ((double) (buf_in + device_side_latency (in_dev, true))
+               * e->out_rate / e->in_rate)
+        + device_side_latency (out_dev, false);
 
     OSStatus st;
     const UInt32 on = 1, off = 0, max_slice = MAX_FRAMES;

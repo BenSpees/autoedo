@@ -704,12 +704,29 @@ a vocoder.
    double-counting. `"lead"` is pre-lead-IR; noted so the recorded stem's
    space differs from the PA's if a lead IR is loaded.
 2. **Latency is reported.** `processLatencyMs` in status (alias of the
-   long-standing `latencyMs`, added under the name you probe for):
-   input-to-output at current settings, algorithmic plus buffering. It
-   moves with `quality`, devices and `bufferFrames` — re-read from the echo
-   after any restart-scoped write. **Shown, not applied** on this rig, per
-   your call: one trim per device would drag the dry rows, so it is a
-   readout beside the by-ear trim rather than an input to it.
+   long-standing `latencyMs`, added under the name you probe for): the
+   **engine's own path** at current settings, algorithmic plus the
+   engine's buffering. It moves with `quality`, devices and
+   `bufferFrames` — re-read from the echo after any restart-scoped
+   write. **Shown, not applied** on this rig, per your call: one trim
+   per device would drag the dry rows, so it is a readout beside the
+   by-ear trim rather than an input to it.
+
+   **New (latency-honesty batch): `totalLatencyMs` + `deviceLatencyMs`.**
+   The old figure never counted hardware overhead — the input side's
+   collection cycle plus both sides' device/stream/safety-offset
+   latencies (converters included), typically 10–20 ms on a USB
+   interface — which is why the rig *felt* later than the display. The
+   engine now queries the hardware (and reads back the buffer size the
+   device actually **granted** rather than trusting the request) and
+   reports `deviceLatencyMs` (the hardware part, best-effort:
+   honest-or-low, never invented) and `totalLatencyMs`
+   (= `latencyMs` + `deviceLatencyMs`, the honest mic-to-speaker
+   number). **UI rule: display `totalLatencyMs` on the panel; keep
+   aligning recordings by `processLatencyMs`** — the send taps inside
+   the engine, so hardware overhead genuinely does not apply to the
+   stem, and moving `processLatencyMs` would have silently skewed your
+   §3b alignment. Feature-detect: `totalLatencyMs` in status.
 3. **No cable**: option (a) as you preferred — aim `sendChannel` at a spare
    output pair and let a loopback-capable interface close it internally.
    The UDP/shared-memory tap was considered and deliberately not built

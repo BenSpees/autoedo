@@ -245,7 +245,15 @@ typedef struct
     bool   running;
     double input_rate;
     double output_rate;
-    int    latency_samples; /* total corrector + buffering latency, output frames */
+    int    latency_samples; /* total corrector + buffering latency, output frames
+                               -- the ENGINE's own path: the record send is
+                               aligned by this, so it must not absorb device
+                               overhead */
+    int    device_latency_samples; /* hardware overhead OUTSIDE that path
+                               (capture cycle, device/stream/safety latencies,
+                               converters), output frames; 0 where the backend
+                               has no hardware. Honest mic-to-speaker =
+                               latency_samples + this */
     float  detected_hz;     /* live read-out from the corrector */
     float  target_hz;
     float  shift_st;        /* the lead's current shift, semitones: a panel

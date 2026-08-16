@@ -179,6 +179,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->input_rate      = STUB_RATE;
     out->output_rate     = STUB_RATE;
     out->latency_samples = ae_corrector_latency (&e->corrector);
+    out->device_latency_samples = 0;
     out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
     out->target_hz       = ae_corrector_target_hz (&e->corrector);
     out->shift_st        = ae_corrector_shift_st (&e->corrector);

@@ -328,7 +328,11 @@ struct AeAudioEngine
 
     double in_rate, out_rate;
     int    buffer_frames;
-    int    latency_frames;
+    int    latency_frames;        /* the ENGINE's own path (what the
+                                     record send is aligned by) */
+    int    device_latency_frames; /* hardware overhead outside that path:
+                                     capture period + both clients'
+                                     reported stream latencies */
 
     char in_name[AE_NAME_MAX];
     char out_name[AE_NAME_MAX];
@@ -747,6 +751,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     out->input_rate      = e->in_rate;
     out->output_rate     = e->out_rate;
     out->latency_samples = e->latency_frames;
+    out->device_latency_samples = e->device_latency_frames;
     out->detected_hz     = ae_corrector_detected_hz (&e->corrector);
     out->target_hz       = ae_corrector_target_hz (&e->corrector);
     out->shift_st        = ae_corrector_shift_st (&e->corrector);
@@ -985,6 +990,26 @@ AeAudioEngine *ae_audio_engine_start (const AeEngineConfig *cfg, char *err, size
     e->latency_frames = ae_corrector_latency (&e->corrector)
                       + (int) ((double) cushion * e->out_rate / e->in_rate)
                       + e->buffer_frames;
+
+    /* Hardware overhead OUTSIDE the engine's path, reported separately
+       (deviceLatencyMs): WASAPI's own stream latencies on both clients,
+       plus the shared-mode capture period -- packets arrive one period
+       late, a cost the formula above never carried. Best-effort: a
+       query that fails contributes zero, so the figure is honest-or-
+       low, never invented. processLatencyMs keeps meaning the engine's
+       own path, which is what the record send is aligned by. */
+    {
+        REFERENCE_TIME in_lat = 0, out_lat = 0, period = 0, dummy = 0;
+        if (FAILED (IAudioClient_GetStreamLatency (e->in_ac, &in_lat)))
+            in_lat = 0;
+        if (FAILED (IAudioClient_GetStreamLatency (e->out_ac, &out_lat)))
+            out_lat = 0;
+        if (FAILED (IAudioClient_GetDevicePeriod (e->in_ac, &period, &dummy)))
+            period = 0;
+        e->device_latency_frames =
+            (int) (((double) in_lat + (double) period) * 1.0e-7 * e->out_rate)
+            + (int) ((double) out_lat * 1.0e-7 * e->out_rate);
+    }
 
     if (pthread_create (&e->in_thread, NULL, capture_thread, e) != 0)
     {

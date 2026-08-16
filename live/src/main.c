@@ -1157,6 +1157,13 @@ static void status_refresh (App *app)
 
     const double lat_ms = st.output_rate > 0.0
                             ? 1000.0 * st.latency_samples / st.output_rate : 0.0;
+    /* Device overhead rides OUTSIDE processLatencyMs: that key is what
+       the record send is aligned by (an in-engine tap, no hardware in
+       its path), so it must not absorb hardware numbers. The panel's
+       honest mic-to-speaker figure is totalLatencyMs. */
+    const double dev_ms = st.output_rate > 0.0
+                            ? 1000.0 * st.device_latency_samples / st.output_rate
+                            : 0.0;
 
     /* live ghost degrees: JSON null when a voice is silent */
     char hdeg[128];
@@ -1257,6 +1264,7 @@ static void status_refresh (App *app)
         "{\"running\":%s,\"engineBuild\":\"%s\",\"error\":\"%s\","
         "\"inputRate\":%.6g,\"outputRate\":%.6g,"
         "\"latencySamples\":%d,\"latencyMs\":%.1f,\"processLatencyMs\":%.1f,"
+        "\"deviceLatencyMs\":%.1f,\"totalLatencyMs\":%.1f,"
         "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"shiftStMin\":%.2f,\"shiftStMax\":%.2f,"
         "\"leadMakeupDb\":%.2f,\"outPeakDb\":%.1f,\"voiced\":%s,"
         "\"traceSeq\":%u,\"trace\":%s,"
@@ -1273,6 +1281,7 @@ static void status_refresh (App *app)
         st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
         st.latency_samples, lat_ms, lat_ms,
+        dev_ms, lat_ms + dev_ms,
         (double) st.detected_hz, (double) st.target_hz, (double) st.shift_st,
         (double) st.shift_st_min, (double) st.shift_st_max,
         st.lead_makeup > 1e-6f ? 20.0 * log10 ((double) st.lead_makeup) : -120.0,

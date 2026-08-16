@@ -482,13 +482,30 @@ changes when the send is configured.
 | `sendGainDb` | float −60…+12 | live | trim on the send only; record level and stage level are independent |
 | `sendOn` | bool | live | **the safety.** Mute the send (click-free, ~10 ms smoothed) without touching routing. Defaults **off** and is deliberately **not restored at launch as on** — assert it from the controller at song load, and drop it on panic, exactly like the `harmOn` guards |
 
-Status: `sendError` (above) and `processLatencyMs` — the engine's whole
-input-to-output latency at current settings, algorithmic plus buffering
+Status: `sendError` (above) and `processLatencyMs` — the **engine's own
+path** at current settings, algorithmic plus the engine's buffering
 (an alias of `latencyMs`, present so send-aware controllers can probe it
 by name). It changes with `quality`, devices and `bufferFrames`; re-read
 it from the echo after any restart-scoped write. Use it to align a
 recorded return against a dry track captured at the interface: the two
-then stay phase-sane instead of combing.
+then stay phase-sane instead of combing. The send taps **inside** the
+engine, so hardware overhead genuinely does not apply to it — which is
+also why `processLatencyMs` must never absorb device numbers.
+
+**`totalLatencyMs` and `deviceLatencyMs`** (status): the honest
+**mic-to-speaker** figure, and the hardware part of it.
+`deviceLatencyMs` is everything outside the engine's own path: the input
+side's collection cycle (capture arrives one hardware buffer late), plus
+both sides' device, stream and safety-offset latencies as the hardware
+reports them (the converters live in these numbers). The engine also now
+reads back the buffer size the device actually **granted** — the request
+is best-effort, and a device already open elsewhere keeps its owner's
+size — and runs all latency arithmetic on the granted values.
+`totalLatencyMs = latencyMs + deviceLatencyMs`. Queries are best-effort:
+a property a device does not publish counts as zero, so the figure is
+honest-or-low, never invented. **Display `totalLatencyMs` on a panel;
+keep aligning recordings by `processLatencyMs`.** On the stub backend
+`deviceLatencyMs` is 0 and the two figures agree.
 
 Loopback-capable interfaces close the circuit internally: aim
 `sendChannel` at a spare output pair and record its loopback input — no
