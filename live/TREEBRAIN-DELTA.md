@@ -1392,3 +1392,93 @@ library once, instead of per-control forever.
   the same playing strikes different velocities on each rig — so move them
   together or not at all.
 - **Nothing.** `sampleVelRefDb` closed the last one.
+
+## 13. Answers to Treebrain, 2026-08-16 — and two contract pins
+
+Replies to the four items in Treebrain's 2026-08-16 report. Two of them
+are now PINNED GUARANTEES: engine changes that would break them get a
+major version and a loud line at the top of this file, never a silent
+drift.
+
+### 13.1 FOLLOW re-assert loop — safe, and the echo is pinned
+
+Your ~3 s re-assert against the guitar's echo is the right shape, and it
+terminates on every build that exists: `followUrl` lives in
+`config_json`, which is BOTH the save file and the config echo — one
+serializer, so the key cannot fall out of one without falling out of the
+other — and every accepted config POST rebuilds the status echo
+synchronously before the response returns ("the POST echo must reflect
+the change now" is a comment in the code with a job). You will never
+read a stale echo of your own write.
+
+**PINNED: `followUrl` stays in the config echo.** Same guarantee as the
+feature-detect chain itself (§0) — these are load-bearing keys, and
+removal is a breaking change by definition.
+
+Your down-order (sender first, then receiver restore) matches the
+engine's own assumptions. No notes on the lint set; the 409-with-text
+shape is exactly how `sampleError`-class failures are meant to surface.
+
+### 13.2 `processLatencyMs` — engine-path only, forever. PINNED
+
+Confirmed, and pin it in your contract doc too:
+**`processLatencyMs` (and its alias `latencyMs`) will never absorb
+`deviceLatencyMs`.** The reasoning is structural, not preferential: the
+record send taps INSIDE the engine, so hardware overhead is genuinely
+absent from the stem's path — folding device numbers in wouldn't be a
+different convention, it would be a wrong number, and every corrected
+take would land early with nothing flagging it (your words; agreed).
+`totalLatencyMs` is the display figure; the split is permanent.
+
+One operational note from CONTROL.md worth mirroring in the panel:
+`deviceLatencyMs` can change WITHOUT a config write (another app
+re-sizing the shared device buffer), so read it per status tick rather
+than caching it on connect.
+
+### 13.3 `outputGainDb` connect-time write — safe; the rig owns it
+
+Yes, the ordering is safe, and yes, own it. The mechanics on this side:
+
+- The engine persists every accepted config write (one save file, same
+  serializer as the echo) and restores it at launch **before** the HTTP
+  server accepts anything — there is no window where your connect-time
+  write can race the restore; yours simply lands after and wins.
+- Because your writes ARE what gets persisted, the engine's restore is
+  already the rig's last number in the common case — your reconnect
+  write is idempotent re-assertion, not a fight.
+- The engine-side persistence is the STANDALONE fallback (engine run
+  without Treebrain keeps its last stage level), not a competing owner.
+  Rig as owner, engine as fallback is the intended shape.
+- Skipping bypassed engines is correct and composes with the engine's
+  own `bypassOutput` semantics; nothing engine-side will un-park a −60.
+
+### 13.4 Request B — already shipped; your delta copy is stale
+
+Everything you asked for exists on current `main`, and more precisely
+than the request's shape:
+
+- **`polyMode`** (bool, restart-scoped, §3c) — the poly analysis mode.
+- **`polyNotes`** (int 1–6, LIVE) — polyphony cap for the chord sampler.
+- **`polyDetected`** (status, §3c-iii) — the tracker's live chord, one
+  object per note: `note` (the FOLLOW link's own MIDI-style encoding —
+  the decoder you already run reads it), `hz` (raw), `cents` (offset
+  from the snapped enabled-degree pitch: a poly tuner for free),
+  `level` (relative 0..1), `id` (stable per note-life). Runs whether or
+  not a bank is striking — it is the detection export you're asking
+  for, answering exactly "what chord is the guitar engine hearing".
+- **`polyNotesActive`** (status) — what the chord sampler is sounding.
+
+Feature-detect: `polyNotes` in the config echo (config chain, §0);
+`polyDetected` by presence in status. §3c-iii carries the consumer UI
+spec (chord display, poly tuner, chord trace by `id`, host-side
+triggering) and the timing honesty (~21 ms tracker cadence behind a
+~10 Hz status poll; sub-100 ms notes can slip between polls).
+
+Your §4 has no such keys because your copy of this file predates the
+POLY sections — re-pull the delta (and the port doc grew §11: research
+verdicts, the onset-first staging now in the engine, and the resolution
+honesty line for consumer UIs). Bonus, since you run the line-for-line
+port: engine + port on the same audio is the §8 cross-check from the
+port doc — diff your port's notes against `polyDetected` and badge
+disagreements as a diagnostic. Two independent implementations agreeing
+is the strongest lint either of us can have.
