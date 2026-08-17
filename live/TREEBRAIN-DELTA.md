@@ -1599,3 +1599,35 @@ connect-time send now round-trips.
 - **`engineBuild` launchers** (FYI 3): the stale-process trap now has
   three layers — your launcher restart, the §13.5 build-skew badge, and
   the human. Good.
+
+## 16. THE PIN: root is scale, reference is tuning (2026-08-17)
+
+The last and deepest of the field batch. The engine anchored degree 0 on
+`rootNote` — so a chart setting root D silently transposed the WHOLE
+grid: every correction target, every sample strike, every FOLLOW degree.
+In 22-EDO that displaced C by −18.6 cents, and the player's ref-265
+workaround was the compensation (it brought C back to within 3.5 cents,
+which is why it "sounded dead on").
+
+**Fixed and pinned: degree 0 sits on `refNote` (default C) at
+`refNoteHz`, never on the root.** `rootNote` varies per song and touches
+nothing but scale semantics; `rootCents` is now inert in tuning math
+(grid trims belong to `refNoteHz`). Verified: `anchorHz` holds 261.626
+through rootNote 0 → 2 → 9 with rootCents 30.
+
+Treebrain consequences:
+- Your "the grid hangs off the ROOT, not off A" badge is now obsolete in
+  its warning role — after this build the grid hangs off the REFERENCE,
+  which is what your rig (and the player) always meant. Keep the
+  `anchorHz` vs `refNoteHz` disagreement badge: it is the residue
+  detector either way.
+- The FOLLOW grid lint can drop `rootNote` from the must-agree set: the
+  degree transport needs `edo`, `refNote`/`refNoteHz` and
+  `stretchCents` agreement only. Two instances on different song roots
+  are now the SAME grid.
+- Scale masks are unaffected: the engine never rotated them by root —
+  the rig computes and sends absolute degree masks, and that division of
+  labour stands.
+- Have the player reset `refNoteHz` to 261.6256 and re-press your two
+  badge buttons; with root-as-scale pinned, C = 261.63 should finally
+  measure dead-on against the online piano, samples included.

@@ -318,14 +318,22 @@ static void config_defaults (App *app)
 }
 
 /* Derive the engine-facing reference/period/detection-range values from the
-   UI-facing fields. Degree 0 sits on the root note in octave 0 (e.g. root C
-   at A4 = 440 gives the classic 16.3516 Hz C0 anchor). */
+   UI-facing fields.
+
+   Degree 0 sits on the REFERENCE note in octave 0 (refNote C at A4 = 440
+   gives the classic 16.3516 Hz C0 anchor) -- NEVER on the root. The
+   semantic pin, from the field: rootNote names the SCALE's tonic and
+   varies per song; the reference names the TUNING and never moves. This
+   used to anchor on root_note, which silently transposed the whole grid
+   with the song's key -- in 22-EDO a root of D displaced C by -18.6
+   cents, every degree and every sample with it, and the player ended up
+   compensating with a false reference. rootNote/rootCents remain parsed
+   and echoed for the rig's scale logic; the grid ignores them. */
 static void config_sync (App *app)
 {
     AeEngineConfig *c = &app->engine_cfg;
     c->params.ref_hz = app->ref_a4
-                     * pow (2.0, ((double) app->root_note - 9.0) / 12.0) / 16.0
-                     * pow (2.0, app->root_cents / 1200.0);
+                     * pow (2.0, ((double) app->ref_note - 9.0) / 12.0) / 16.0;
     c->params.period_cents = 1200.0 + app->stretch_cents;
     /* the CURRENT instrument's sampleGainDb trim rides into params */
     c->params.sample_trim_db = 0.0;

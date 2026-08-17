@@ -172,8 +172,8 @@ actually changes — batch them.
 | Key | Type / range | Applies | Meaning |
 |---|---|---|---|
 | `edo` | int 10–72 | live | divisions of the equave. The degree mask and harmony intervals are *not* rescaled for you — see notes below |
-| `rootNote` | int 0–11 (0 = C) | live | root pitch class; degree 0 sits on the root |
-| `rootCents` | float −50…50 | live | root fine offset |
+| `rootNote` | int 0–11 (0 = C) | live | **the SCALE's tonic — display and scale semantics only. It never moves the grid.** Varies per song; the tuning does not. (It used to anchor the grid — see the pin below) |
+| `rootCents` | float −50…50 | live | root fine annotation, echoed for the rig's scale logic; **inert in the engine's tuning math**. Grid-level trims belong to `refNoteHz` |
 | `refA4` | float 400–480 | live | reference A4 in Hz |
 | `stretchCents` | float −30…30 | live | octave stretch: period = 1200 + this |
 
@@ -182,13 +182,24 @@ Derived values your UI will need (identical to the engine's math):
 ```
 period    = 1200 + stretchCents                    (cents)
 step      = period / edo                           (cents)
-refHz     = refA4 · 2^((rootNote − 9)/12) / 16 · 2^(rootCents/1200)
-freq(j)   = refHz · 2^(j · period / (1200 · edo))  (degree j, signed, re root octave 0)
+refHz     = refA4 · 2^((refNote − 9)/12) / 16
+freq(j)   = refHz · 2^(j · period / (1200 · edo))  (degree j, signed, re reference octave 0)
 degree(f) = round(edo · 1200 · log2(f / refHz) / period)
 ```
 
+**THE PIN (2026-08-17): root is scale, reference is tuning.** Degree 0
+sits on the **reference note** (`refNote`, default C) — never on the
+root. `rootNote` names the song's tonic and changes per chart;
+`refNote`/`refNoteHz` name the pitch standard and never move mid-set. The
+engine used to anchor degree 0 on the root, which silently transposed the
+whole grid — samples, targets, everything — with the song's key: in
+22-EDO a root of D displaced C by −18.6 cents, and the field damage was a
+rig that "only sounded right" with a false reference dialled in. Check
+`status.anchorHz`: it now equals the reference in octave 4 regardless of
+root.
+
 **Read this before touching `refA4`.** The EDO grid is built off **degree
-0**, which `rootNote` places. With `rootNote` = C, **C is the anchor and is
+0**, which `refNote` places. With `refNote` = C, **C is the anchor and is
 the same frequency in every EDO** — 12, 22, 31, all of them — and the degree
 you would *call* A falls wherever that EDO puts it. In 22-EDO that is 433.12
 or 446.99 Hz. Never 440.
@@ -203,9 +214,9 @@ which degree a note snaps to, so the damage is a wrong note, not just a
 detune.
 
 Set `refNote` + `refNoteHz` instead and the trap does not exist. A
-C-anchored rig at concert pitch is `{"rootNote": 0, "refNote": 0,
-"refNoteHz": 261.6256}` — which is what a default install already computes,
-so if that is your standard there is nothing to change.
+concert-pitch rig is `{"refNote": 0, "refNoteHz": 261.6256}` — what a
+default install already computes — and `rootNote` is then free to follow
+the song without consequence to the tuning.
 
 | `leadShiftSteps` | int −72…+72 | live | **static transpose of the corrected lead, in EDO steps, applied after the snap.** The detector still hears and classifies the real note — tolerance, stickiness and retune all run against what was played; the shift only moves what comes out. Whole steps, so `±edo` is an exact equave and keeps the pitch class: the degree mask never notices. **Locked ghosts stack their intervals on the shifted lead** (and the mask walk happens up there), so the harmony stays a scale interval from the note the audience hears. The published `targetHz` and pitch trace show the shifted target. Effective total shift (correction + transpose) is safety-clamped at ±36 semitones in the audio path. Pairs with `detectMinHz`: on a guitar channel, raise the detection floor off the low strings to kill octave-down locks, then `+edo` here for an octave-up lead — instead of asking the detector to work down where the subharmonics live |
 
