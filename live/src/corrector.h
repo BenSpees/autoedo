@@ -358,6 +358,21 @@ typedef struct
        the strike MEASUREMENT only (never the audio). Primitive default 0;
        the config layer defaults the rig to +3. */
     double smp_tilt;
+    /* The consolidated SAMPLE section (field: one set of volume controls
+       for every sample voice, lead and ghosts alike):
+       - smp_level: sampleLevelDb as linear -- a master over every sample
+         voice, applied at render, BEFORE the mix with the dry.
+       - smp_tone_db: sampleToneDb -- the same one-pole tilt EQ the harmony
+         bus wears (render_tilt), on the sample voices only. One filter
+         state per voice row (+1: the lead/chord row).
+       - smp_dry_g: the smoothed DRY side of sampleMix. The dry here is
+         the LATENCY-FREE input block -- only the hardware buffer between
+         the hands and the ear, never the detector's pipeline. */
+    double smp_level;
+    double smp_tone_db;
+    double smp_tone_db_cur, smp_tone_g_lo, smp_tone_g_hi;
+    double smp_tone_lp[AE_HARM_VOICES + 1];
+    double smp_dry_g;
     /* The velocity REFERENCE: "how hard this player plays when playing
        hard". A rolling peak that decays over ~20 s, so the map follows the
        rig's actual headroom instead of assuming the signal reaches full
@@ -717,6 +732,12 @@ void ae_corrector_set_sample_match (AeCorrector *p, double m);
 
 /* strikeTilt in dB/octave (see smp_tilt). Live; any thread. */
 void ae_corrector_set_strike_tilt (AeCorrector *p, double db_oct);
+
+/* sampleLevelDb as LINEAR gain (see smp_level). Live; any thread. */
+void ae_corrector_set_sample_level (AeCorrector *p, double lin);
+
+/* sampleToneDb tilt in dB (see smp_tone_db). Live; any thread. */
+void ae_corrector_set_sample_tone (AeCorrector *p, double db);
 
 /* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
    between blocks. */

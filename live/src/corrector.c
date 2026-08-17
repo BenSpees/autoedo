@@ -762,6 +762,11 @@ void ae_corrector_reset (AeCorrector *p)
                                consumer of this struct is never surprised */
     p->smp_tilt   = 0.0;    /* same split: the rig's +3 dB/oct lives in
                                config_defaults */
+    p->smp_level  = 1.0;
+    p->smp_tone_db = 0.0;
+    p->smp_tone_db_cur = 1e9; /* force a gain rebuild on first use */
+    memset (p->smp_tone_lp, 0, sizeof (p->smp_tone_lp));
+    p->smp_dry_g  = 0.0;
     /* Start at the floor, so the reference is OBSERVED rather than assumed.
        Seeding it with a plausible "playing hard" level instead sounds
        reasonable and is not: the seed then outranks the player for as long
@@ -1086,6 +1091,16 @@ void ae_corrector_set_sample_match (AeCorrector *p, double m)
 void ae_corrector_set_strike_tilt (AeCorrector *p, double db_oct)
 {
     p->smp_tilt = db_oct < -6.0 ? -6.0 : (db_oct > 6.0 ? 6.0 : db_oct);
+}
+
+void ae_corrector_set_sample_level (AeCorrector *p, double lin)
+{
+    p->smp_level = lin < 0.0 ? 0.0 : (lin > 16.0 ? 16.0 : lin);
+}
+
+void ae_corrector_set_sample_tone (AeCorrector *p, double db)
+{
+    p->smp_tone_db = db < -12.0 ? -12.0 : (db > 12.0 ? 12.0 : db);
 }
 
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin)
@@ -2711,12 +2726,36 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
    centre with an equal-power taper either side, rather than the textbook
    crossfade that would drop both to 0.707 in the middle. One number means
    the same thing here as in the rig's other layers. */
-static void sample_layer_gains (double mix, double *g_shift, double *g_smp)
+/* The sample mix's two sides on the shared taper (0.5 = both at full,
+   never a crossfade). The first side is the DRY guitar now -- the
+   latency-free input block, mixed at delivery -- not the shifted path it
+   used to be: the player's hands must never wait on the detector. */
+static void sample_layer_gains (double mix, double *g_dry, double *g_smp)
 {
     const double a = mix <= 0.5 ? 1.0 : 2.0 * (1.0 - mix);
     const double b = mix >= 0.5 ? 1.0 : 2.0 * mix;
-    *g_shift = sin (a * (AE_PI / 2.0));
-    *g_smp   = sin (b * (AE_PI / 2.0));
+    *g_dry = sin (a * (AE_PI / 2.0));
+    *g_smp = sin (b * (AE_PI / 2.0));
+}
+
+/* sampleToneDb: the harmony bus's tilt (render_tilt), cloned onto the
+   sample voices only -- one state per voice row, `s` = AE_HARM_VOICES for
+   the lead/chord row. Neutral costs one compare. */
+static double sample_tone_tick (AeCorrector *p, int s, double x)
+{
+    if (p->smp_tone_db == 0.0)
+        return x;
+    if (p->smp_tone_db != p->smp_tone_db_cur)
+    {
+        const double half = p->smp_tone_db * 0.5;
+        p->smp_tone_g_hi = pow (10.0, half / 20.0);
+        p->smp_tone_g_lo = pow (10.0, -half / 20.0);
+        p->smp_tone_db_cur = p->smp_tone_db;
+    }
+    double lp = p->smp_tone_lp[s];
+    lp += p->tilt_a * (x - lp);
+    p->smp_tone_lp[s] = lp;
+    return p->smp_tone_g_lo * lp + p->smp_tone_g_hi * (x - lp);
 }
 
 /* 4c. Sample harmony. A ghost is continuous; a sample is struck -- so a
@@ -2733,8 +2772,10 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
 
     double atk_a, rel_a;
     harm_env_coeffs (p, &atk_a, &rel_a);
-    double g_shift, g_smp;
-    sample_layer_gains (p->smp_mix, &g_shift, &g_smp);
+    double g_dry_unused, g_smp;
+    sample_layer_gains (p->smp_mix, &g_dry_unused, &g_smp);
+    (void) g_dry_unused; /* the dry side is mixed once, at lead delivery */
+    const double g_v = g_smp * p->smp_level;
 
     /* The strike level. Measuring takes the body window and the strike
        cannot wait for it, so a struck voice takes the fast follower's
@@ -2802,8 +2843,9 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         for (int i = 0; i < num_samples; ++i)
         {
             env += (want - env) * a;
-            const double x = sample_mix_slots (p, v, fade_step, rel_a);
-            const double sv = x * env * g_smp;
+            const double x =
+                sample_tone_tick (p, v, sample_mix_slots (p, v, fade_step, rel_a));
+            const double sv = x * env * g_v;
             harm_l[i] += (float) (gl * sv);
             harm_r[i] += (float) (gr * sv);
         }
@@ -2888,9 +2930,12 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     const bool chord_sampler =
         p->lead_source == AE_HARM_SRC_SAMPLE
         && atomic_load_explicit (&p->smp_live, memory_order_acquire) >= 0;
-    double g_shift_lead = 1.0, g_smp_lead = 0.0;
-    if (chord_sampler)
-        sample_layer_gains (p->smp_mix, &g_shift_lead, &g_smp_lead);
+    /* The dry side follows the CONFIG intent, not the bank: a sample lead
+       whose library failed to load must still pass the instrument through
+       at the mix's dry gain, or a bad path silences the player. */
+    double g_dry_lead = 0.0, g_smp_lead = 0.0;
+    if (p->lead_source == AE_HARM_SRC_SAMPLE)
+        sample_layer_gains (p->smp_mix, &g_dry_lead, &g_smp_lead);
 
     /* The tracker runs whenever poly mode does -- not only for the chord
        sampler. The detection is EXPORTED (poly_note_out / status
@@ -3049,7 +3094,10 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     }
 
     set_shift (p->shifter, lead_st, 220.0, p->formant_hold, p->formant_st);
-    if (! chord_sampler || p->smp_mix < 1.0)
+    /* The chord sampler no longer layers the SHIFTED chord under itself:
+       the mix's other side is the latency-free dry (below), which covers
+       the onset better than a delayed shift ever did. */
+    if (! chord_sampler)
         ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
     else
         memset (p->wet_buf, 0, (size_t) num_samples * sizeof (float));
@@ -3063,8 +3111,8 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
             double x = 0.0;
             for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
                 x += sample_mix_slots (p, k, fade_step, l_rel_a);
-            p->wet_buf[i] = (float) (p->wet_buf[i] * g_shift_lead
-                                     + x * g_smp_lead);
+            x = sample_tone_tick (p, AE_HARM_VOICES, x);
+            p->wet_buf[i] = (float) (x * g_smp_lead * p->smp_level);
         }
     }
 
@@ -3090,7 +3138,16 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
         const double wet_only = v_gain * l_env * f_g * p->wet_buf[i];
         if (wet_out != NULL)
             wet_out[i] = (float) wet_only;
-        mono[i] = (float) (wet_only + (1.0 - v_gain) * dry);
+        /* The sample mix's dry side: the CURRENT input block, latency-free
+           -- the hands wait on the hardware buffer and nothing else. It
+           replaces the latency-matched unvoiced fallback for a sample
+           lead (both at once would double the instrument). */
+        p->smp_dry_g += (g_dry_lead - p->smp_dry_g) * gain_alpha;
+        mono[i] = (float) (wet_only
+                           + (p->lead_source == AE_HARM_SRC_SAMPLE
+                                  ? 0.0
+                                  : (1.0 - v_gain) * dry)
+                           + p->smp_dry_g * p->in_block[i]);
     }
     p->v_gain = v_gain; p->lead_env = l_env; p->follow_gain_cur = f_g;
 
@@ -3303,8 +3360,20 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         /* The LEAD's ceiling is its own release, not the harmony's. */
         const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
         const double l_rel = 1.0 - exp (-1.0 / (lr * 0.001 * p->fs));
+        /* The consolidated sample section: the mix's sample side and the
+           engine-wide sample level, applied at render so a fader move
+           reaches notes already ringing; tone on the summed row. The dry
+           side is mixed at delivery (section 3), latency-free. */
+        double g_dry_l, g_smp_l;
+        sample_layer_gains (p->smp_mix, &g_dry_l, &g_smp_l);
+        (void) g_dry_l;
+        const double g_l = g_smp_l * p->smp_level;
         for (int i = 0; i < num_samples; ++i)
-            p->wet_buf[i] = (float) sample_mix_slots (p, L, fade_step, l_rel);
+        {
+            double x = sample_mix_slots (p, L, fade_step, l_rel);
+            x = sample_tone_tick (p, AE_HARM_VOICES, x);
+            p->wet_buf[i] = (float) (x * g_l);
+        }
     }
     else if (lead_synth)
     {
@@ -3379,6 +3448,18 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     const double f_a   = 1.0 - exp (-1.0 / (0.010 * p->fs));
     double f_g = p->follow_gain_cur;
 
+    /* The sample mix's DRY side (a sample lead only): the CURRENT input
+       block at the taper's dry gain -- the hands wait on the hardware
+       buffer and nothing else, never on the detector's pipeline. By
+       config INTENT, not bank state: a library that failed to load must
+       not silence the player. */
+    double g_dry_lead = 0.0;
+    if (lead_sample)
+    {
+        double g_smp_unused;
+        sample_layer_gains (p->smp_mix, &g_dry_lead, &g_smp_unused);
+        (void) g_smp_unused;
+    }
     for (int i = 0; i < num_samples; ++i)
     {
         const double target = p->voiced ? 1.0 : 0.0;
@@ -3393,7 +3474,9 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const double wet_only = wet_g * p->wet_buf[i];
         if (wet_out != NULL)
             wet_out[i] = (float) wet_only;
-        mono[i] = (float) (wet_only + (1.0 - v_gain) * dry);
+        p->smp_dry_g += (g_dry_lead - p->smp_dry_g) * gain_alpha;
+        mono[i] = (float) (wet_only + (1.0 - v_gain) * dry
+                           + p->smp_dry_g * p->in_block[i]);
     }
     p->v_gain = v_gain;
     p->lead_env = l_env;
@@ -3427,9 +3510,9 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             any_synth = true;
         else if (src == AE_HARM_SRC_SAMPLE)
         {
-            /* A sample voice still drives its shifter whenever the blend
-               asks for any of it -- "sample" is a LAYER, not a swap. */
-            if (p->smp_mix < 1.0) any_shift = true;
+            /* A sample voice is a sample voice: the mix's other side is
+               the latency-free dry at delivery, not a shifted copy, so
+               the shifter stays parked. */
         }
         else
             any_shift = true;

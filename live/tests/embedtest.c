@@ -190,21 +190,41 @@ int main (void)
     }
     ae_embed_config (inst, "{\"leadOn\":true}");
 
-    /* leadSoundGainDb touches only a synth/sample lead sound: with the
-       lead source at "voice" (the default), even -60 must not move the
-       instrument's level on the PA feed. */
-    ae_embed_config (inst, "{\"leadSoundGainDb\":-60}");
-    for (int b2 = 0; b2 < 10; ++b2)
+    /* The consolidated sample section. No bank is loaded here, so a
+       "sample" lead has nothing to sound -- but the mix's DRY side is the
+       LATENCY-FREE input and must carry the instrument at 50% (a library
+       that fails to load must never silence the player), and at 100% the
+       samples stand alone (none loaded = honest silence). */
+    ae_embed_config (inst,
+        "{\"leadSource\":\"sample\",\"sampleMix\":0.5}");
+    for (int b2 = 0; b2 < 40; ++b2)
     {
         tone_block (in, BLOCK, 35.0, &phase);
         ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
     }
     CHECK (peak (out_l, BLOCK) > 0.05f,
-           "leadSoundGainDb is inert for a voice lead");
+           "sample lead at 50% mix: the dry side carries the instrument");
+    ae_embed_config (inst, "{\"sampleMix\":1}");
+    for (int b2 = 0; b2 < 40; ++b2)
+    {
+        tone_block (in, BLOCK, 35.0, &phase);
+        ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+    }
+    CHECK (peak (out_l, BLOCK) < 1e-3f,
+           "sample lead at 100% mix: samples alone (none loaded = silence)");
     ae_embed_status (inst, status, sizeof (status));
-    CHECK (strstr (status, "\"leadSoundGainDb\":-60") != NULL,
-           "config echo: leadSoundGainDb");
-    ae_embed_config (inst, "{\"leadSoundGainDb\":0}");
+    CHECK (strstr (status, "\"sampleLevelDb\":0") != NULL,
+           "config echo: sampleLevelDb");
+    CHECK (strstr (status, "\"sampleToneDb\":0") != NULL,
+           "config echo: sampleToneDb");
+    ae_embed_config (inst, "{\"sampleLevelDb\":-6,\"sampleToneDb\":4}");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"sampleLevelDb\":-6") != NULL
+           && strstr (status, "\"sampleToneDb\":4") != NULL,
+           "config echo: sample section follows writes");
+    ae_embed_config (inst,
+        "{\"leadSource\":\"voice\",\"sampleMix\":1,"
+        "\"sampleLevelDb\":0,\"sampleToneDb\":0}");
 
     /* A restart-scoped key rebuilds the engine under the host's feet; the
        next process call must survive it (silence or audio, never a crash),

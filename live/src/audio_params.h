@@ -80,7 +80,8 @@ typedef struct
     _Atomic double   harm_detune_cents[AE_HARM_VOICES];
     _Atomic double   harm_glide_ms;
     _Atomic double   lead_gain_lin;
-    _Atomic double   lead_sound_gain_lin;
+    _Atomic double   sample_level_lin;
+    _Atomic double   sample_tone_db;
     _Atomic int      send_content;
     _Atomic double   send_gain_lin;
     _Atomic bool     send_on;
@@ -232,8 +233,10 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->harm_glide_ms, p->harm_glide_ms, memory_order_relaxed);
     atomic_store_explicit (&a->lead_gain_lin,
                            pow (10.0, p->lead_gain_db / 20.0), memory_order_relaxed);
-    atomic_store_explicit (&a->lead_sound_gain_lin,
-                           pow (10.0, p->lead_sound_gain_db / 20.0),
+    atomic_store_explicit (&a->sample_level_lin,
+                           pow (10.0, p->sample_level_db / 20.0),
+                           memory_order_relaxed);
+    atomic_store_explicit (&a->sample_tone_db, p->sample_tone_db,
                            memory_order_relaxed);
     atomic_store_explicit (&a->send_content, p->send_content, memory_order_relaxed);
     atomic_store_explicit (&a->send_gain_lin,
@@ -367,6 +370,10 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->sample_match, memory_order_relaxed));
     ae_corrector_set_strike_tilt (ps,
                           atomic_load_explicit (&a->sample_tilt, memory_order_relaxed));
+    ae_corrector_set_sample_level (ps,
+                          atomic_load_explicit (&a->sample_level_lin, memory_order_relaxed));
+    ae_corrector_set_sample_tone (ps,
+                          atomic_load_explicit (&a->sample_tone_db, memory_order_relaxed));
     ae_corrector_set_poly_notes (ps,
                           atomic_load_explicit (&a->poly_notes, memory_order_relaxed));
     ae_corrector_set_gate (ps,
@@ -423,18 +430,7 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
     mix->lead_on     = atomic_load_explicit (&a->lead_on, memory_order_relaxed);
     mix->harm_on     = atomic_load_explicit (&a->harm_on, memory_order_relaxed);
     mix->drone_on    = atomic_load_explicit (&a->drone_on, memory_order_relaxed);
-    /* The synth/sample lead sound's own trim rides INTO the lead fader
-       here, where the source is known: unity for a voice lead, so dialing
-       a sample sound in never moves the instrument's own level. leadGainDb
-       stays the whole-lead fader (the ghost-as-control recipes need it). */
-    {
-        const int lsrc = atomic_load_explicit (&a->lead_source, memory_order_relaxed);
-        const double snd = lsrc == 0 ? 1.0
-            : atomic_load_explicit (&a->lead_sound_gain_lin, memory_order_relaxed);
-        mix->lead_gain = (float) (atomic_load_explicit (&a->lead_gain_lin,
-                                                        memory_order_relaxed)
-                                  * snd);
-    }
+    mix->lead_gain   = (float) atomic_load_explicit (&a->lead_gain_lin, memory_order_relaxed);
     mix->master_gain = (float) atomic_load_explicit (&a->gain_lin, memory_order_relaxed);
     mix->send_content = atomic_load_explicit (&a->send_content, memory_order_relaxed);
     mix->send_gain    = (float) atomic_load_explicit (&a->send_gain_lin, memory_order_relaxed);

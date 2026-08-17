@@ -70,14 +70,6 @@ typedef struct
     double   lead_gain_db;    /* -60..+12: the lead's own fader, after the
                                  wet/dry mix, before the output sum. The
                                  ghosts never pass through it */
-    double   lead_sound_gain_db; /* -60..+12: the SYNTH/SAMPLE lead sound's
-                                 own trim -- inert (unity) when leadSource
-                                 is "voice", so dialing a sample in never
-                                 moves the instrument's own level. The
-                                 panel's fader; leadGainDb stays the whole-
-                                 lead fader the ghost-as-control recipes
-                                 ride (a voice lead muted at -60 with a
-                                 unison ghost still tracking it) */
 
     /* The record send: a separate output channel for the recorder, so the
        stem on disk and the level on stage are independent. Content/gain/
@@ -165,6 +157,14 @@ typedef struct
                                         strings; +3 (default) discounts each
                                         octave below the pivot by 3 dB and
                                         credits each octave above */
+    double   sample_level_db;        /* sampleLevelDb -60..+12: master over
+                                        EVERY sample voice, lead and ghosts
+                                        alike, applied at render BEFORE the
+                                        mix with the dry. The consolidated
+                                        sample fader */
+    double   sample_tone_db;         /* sampleToneDb -12..+12: tilt EQ on
+                                        the sample voices only, same law as
+                                        harmTiltDb */
     double   gate_db;                /* noise/trigger gate in dBFS (RMS):
                                         the voicing gate, onset floors and
                                         envelope gate all scale from it.

@@ -245,7 +245,6 @@ static void config_defaults (App *app)
     /* follow link defaults live on App, not AeEngineConfig: set at startup */
     c->params.lead_on         = true;
     c->params.lead_gain_db    = 0.0;
-    c->params.lead_sound_gain_db = 0.0; /* the synth/sample sound's own trim */
     c->params.lead_shift_steps = 0;
     c->params.output_gain_db  = 0.0;
 
@@ -287,6 +286,8 @@ static void config_defaults (App *app)
     c->params.sample_ring     = true; /* let-ring: struck notes finish */
     c->params.sample_match    = 1.0;  /* source parity is the starting point */
     c->params.sample_tilt     = 3.0;  /* discount the low strings' raw RMS */
+    c->params.sample_level_db = 0.0;  /* the consolidated sample fader */
+    c->params.sample_tone_db  = 0.0;  /* sample tilt EQ, neutral */
     c->params.sample_vel_ref  = -1.0; /* observe the reference, "auto" */
     c->params.poly_notes      = 6;    /* chord sampler polyphony cap */
     c->params.gate_db         = 0.0;  /* 0 = the built-in -56 dBFS floor */
@@ -397,7 +398,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
               "\"bypass\":%s,\"bypassOutput\":\"%s\",\"leadOn\":%s,\"leadGainDb\":%.4g,"
-              "\"leadSoundGainDb\":%.4g,\"leadShiftSteps\":%d,"
+              "\"leadShiftSteps\":%d,"
               "\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
@@ -412,7 +413,6 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.bypass_mute ? "mute" : "dry",
               c->params.lead_on ? "true" : "false",
               c->params.lead_gain_db,
-              c->params.lead_sound_gain_db,
               c->params.lead_shift_steps,
               c->params.output_gain_db, c->buffer_frames, c->input_channel,
               c->output_channel);
@@ -506,6 +506,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
               "\"sampleMatch\":%.4g,\"strikeTilt\":%.4g,"
+              "\"sampleLevelDb\":%.4g,\"sampleToneDb\":%.4g,"
               "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
               "\"polyMode\":%s,\"polyNotes\":%d,\"gateDb\":%.4g,"
               "\"sampleVelRefDb\":%s,"
@@ -529,6 +530,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.sample_mix, c->params.sample_velocity,
               c->params.sample_ring ? "true" : "false",
               c->params.sample_match, c->params.sample_tilt,
+              c->params.sample_level_db, c->params.sample_tone_db,
               c->follow_url, app->follow_hold ? "true" : "false",
               c->params.follow_env,
               c->poly_mode ? "true" : "false",
@@ -790,11 +792,6 @@ static bool config_apply_json (App *app, const char *json)
     /* Harmony. */
     if (ae_json_get_number (json, "leadGainDb", &num))
         c->params.lead_gain_db = num_clamp (num, -60.0, 12.0);
-    /* The SYNTH/SAMPLE lead sound's own trim: inert (unity) when the lead
-       source is "voice", so dialing a sample sound in never moves the
-       instrument's own level. leadGainDb stays the whole-lead fader. */
-    if (ae_json_get_number (json, "leadSoundGainDb", &num))
-        c->params.lead_sound_gain_db = num_clamp (num, -60.0, 12.0);
     if (ae_json_get_number (json, "leadShiftSteps", &num))
         c->params.lead_shift_steps = (int) num_clamp (num, -72.0, 72.0);
     if (ae_json_get_bool (json, "harmOn", &b))
@@ -858,6 +855,12 @@ static bool config_apply_json (App *app, const char *json)
        around A3 -- the equal-loudness correction for matching raw RMS. */
     if (ae_json_get_number (json, "strikeTilt", &num))
         c->params.sample_tilt = num_clamp (num, -6.0, 6.0);
+    /* The consolidated sample section: one fader over every sample voice
+       (lead and ghosts alike, pre-mix), and a tilt EQ on the samples only. */
+    if (ae_json_get_number (json, "sampleLevelDb", &num))
+        c->params.sample_level_db = num_clamp (num, -60.0, 12.0);
+    if (ae_json_get_number (json, "sampleToneDb", &num))
+        c->params.sample_tone_db = num_clamp (num, -12.0, 12.0);
     /* FOLLOW link. followUrl aims THIS instance's corrected degree and
        envelope at another instance ("" = off); followHold keeps the last
        note held through this instance's silence; followEnv is the
