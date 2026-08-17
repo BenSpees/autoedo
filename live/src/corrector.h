@@ -425,6 +425,10 @@ typedef struct
                                     AE_GATE_RMS. Scales the voicing gate,
                                     the onset floors and the envelope gate
                                     together -- one knob, one meaning */
+    double smp_trim;             /* sampleGainDb: the current instrument's
+                                    trim, LINEAR; applied at strike so a
+                                    ringing note keeps the trim it was
+                                    struck with (like the bank's norm) */
     long long smp_lead_deg;      /* lead sampler: last degree struck/heard */
     bool   smp_lead_deg_valid;
     int    smp_guard;            /* samples until another lead strike may
@@ -672,6 +676,12 @@ void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin);
 static inline void ae_corrector_set_gate (AeCorrector *p, double rms)
 {
     p->gate_rms = rms > 0.0 && rms < 0.5 ? rms : 0.0;
+}
+
+/* sampleGainDb of the loaded instrument, linear. Audio thread. */
+static inline void ae_corrector_set_sample_trim (AeCorrector *p, double lin)
+{
+    p->smp_trim = lin > 0.0 && lin < 32.0 ? lin : 1.0;
 }
 
 /* POLY sample mode: cap the chord sampler's polyphony (1..6, live;

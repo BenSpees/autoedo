@@ -16,6 +16,11 @@ bool ae_json_get_bool   (const char *json, const char *key, bool *out);
    to cap-1 bytes). */
 bool ae_json_get_string (const char *json, const char *key, char *out, size_t cap);
 
+/* Copies the RAW text of an object (or array) value, braces included --
+   for keys whose value is structured (e.g. sampleGainDb's id->dB map).
+   False if absent, not an object/array, or larger than cap. */
+bool ae_json_get_object (const char *json, const char *key, char *out, size_t cap);
+
 /* Reads an array of numbers/booleans as 0/1 flags into out (up to max
    entries). Returns the element count, or -1 if key is missing / not an
    array. */

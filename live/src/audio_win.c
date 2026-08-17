@@ -328,6 +328,7 @@ struct AeAudioEngine
 
     double in_rate, out_rate;
     int    buffer_frames;
+    AeTapRing tap;                /* local audio tap (see audio.h) */
     int    latency_frames;        /* the ENGINE's own path (what the
                                      record send is aligned by) */
     int    device_latency_frames; /* hardware overhead outside that path:
@@ -552,6 +553,20 @@ static void render_block (AeAudioEngine *e, BYTE *out, UINT32 n)
    : (bypass ? byp_g * e->dry[i] \
              : lg * src[i] + 0.5f * (e->harm_l[i] + e->harm_r[i])) * gain)
 
+    if (atomic_load_explicit (&e->tap.on, memory_order_relaxed))
+    {
+        const int tc = atomic_load_explicit (&e->tap.content,
+                                             memory_order_relaxed);
+        for (UINT32 i = 0; i < n; ++i)
+        {
+            const float hm   = 0.5f * (e->harm_l[i] + e->harm_r[i]);
+            const float full = (bypass ? byp_g * e->dry[i]
+                                       : lg * src[i] + hm) * gain;
+            ae_tap_push (&e->tap, ae_tap_value (tc, wet ? wet[i] : 0.0f,
+                                                hm, full));
+        }
+    }
+
     if (e->out_fmt.is_float)
     {
         float *d = (float *) out;
@@ -669,6 +684,22 @@ static void engine_teardown (AeAudioEngine *e)
     free (e->harm_r);
     ae_corrector_free (&e->corrector);
     free (e);
+}
+
+void ae_audio_engine_set_tap (AeAudioEngine *e, bool on, int content)
+{
+    if (e == NULL)
+        return;
+    atomic_store_explicit (&e->tap.content, content, memory_order_relaxed);
+    atomic_store_explicit (&e->tap.on, on, memory_order_relaxed);
+}
+
+int ae_audio_engine_tap_read (AeAudioEngine *e, float *out, int max_samples,
+                              long long *first_sample)
+{
+    if (e == NULL)
+        return 0;
+    return ae_tap_ring_read (&e->tap, out, max_samples, first_sample);
 }
 
 void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)

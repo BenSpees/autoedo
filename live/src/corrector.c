@@ -1201,14 +1201,15 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
                 p->smp[v][k].releasing = true;
     p->smp_cur[v] = nxt;
 
+    const double trim = p->smp_trim > 0.0 ? p->smp_trim : 1.0;
     const double rec_hz = 440.0 * pow (2.0, (rec->midi - 69) / 12.0);
     p->smp[v][nxt].rec  = rec;
     p->smp[v][nxt].pos  = 0.0;
     /* Fractional and UNQUANTISED -- that is what lands a 22-EDO degree
        exactly off a 12-per-octave map. */
     p->smp[v][nxt].rate = hz / rec_hz;
-    p->smp[v][nxt].gain   = vel;
-    p->smp[v][nxt].gain_t = vel;
+    p->smp[v][nxt].gain   = vel * trim;
+    p->smp[v][nxt].gain_t = vel * trim;
     /* The bank's measured level travels with the strike, so a slot still
        ringing from the previous instrument keeps ITS normalisation. */
     p->smp[v][nxt].norm   = bank->norm;

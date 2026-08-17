@@ -55,6 +55,7 @@ struct AeAudioEngine
     double  wobble_phase;
 
     AeAtomicParams params;
+    AeTapRing      tap;
 };
 
 static void *stub_thread (void *arg)
@@ -82,13 +83,42 @@ static void *stub_thread (void *arg)
         AeMixParams mix;
         float harm_l[STUB_BLOCK], harm_r[STUB_BLOCK];
         ae_atomic_params_apply (&e->params, &e->corrector, 0, 0, &mix);
-        (void) mix; /* the stub discards its output */
         ae_corrector_process (&e->corrector, block, harm_l, harm_r, STUB_BLOCK);
+        if (atomic_load_explicit (&e->tap.on, memory_order_relaxed))
+        {
+            const int   content = atomic_load_explicit (&e->tap.content,
+                                                        memory_order_relaxed);
+            const float *wet = ae_corrector_lead_wet (&e->corrector);
+            for (int i = 0; i < STUB_BLOCK; ++i)
+            {
+                const float hm = 0.5f * (harm_l[i] + harm_r[i]);
+                ae_tap_push (&e->tap, ae_tap_value (content,
+                                                    wet ? wet[i] : 0.0f, hm,
+                                                    block[i] + hm));
+            }
+        }
+        (void) mix; /* the stub has no device to mix for */
 
         struct timespec ts = { 0, (long) (1e9 * STUB_BLOCK / STUB_RATE) };
         nanosleep (&ts, NULL);
     }
     return NULL;
+}
+
+void ae_audio_engine_set_tap (AeAudioEngine *e, bool on, int content)
+{
+    if (e == NULL)
+        return;
+    atomic_store_explicit (&e->tap.content, content, memory_order_relaxed);
+    atomic_store_explicit (&e->tap.on, on, memory_order_relaxed);
+}
+
+int ae_audio_engine_tap_read (AeAudioEngine *e, float *out, int max_samples,
+                              long long *first_sample)
+{
+    if (e == NULL)
+        return 0;
+    return ae_tap_ring_read (&e->tap, out, max_samples, first_sample);
 }
 
 void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)

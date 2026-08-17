@@ -1557,3 +1557,45 @@ so status now carries the readout that settles it in one glance:
   `targetHz` (status) and `polyDetected[].hz` next to note names -- the
   user asked for exactly this while diagnosing, and cents-only displays
   hide reference-level mistakes that raw Hz makes obvious.
+
+## 15. Answers to Treebrain, 2026-08-17 (second batch): both asks landed
+
+### 15.1 Ask B — the local audio tap: `tapUrl` + `tapContent`
+
+Loopback **UDP**, as the cheaper of your two transports. Keys, live:
+`tapUrl` (`host:port`, `""` = off — followUrl's grammar) and
+`tapContent` (`full`/`wet`/`lead`/`harm`, default `wet` — the send's
+vocabulary, as asked). Float32 mono at the engine rate; fixed blocks of
+≤256 samples; every packet carries a **u64 monotonic first-sample
+counter** from engine start, gapless in normal operation, so the reader
+aligns and detects drops without a handshake. Align by
+`processLatencyMs`, which stays engine-path-only by the §13.2 pin —
+the tap taps inside the engine, so no interface overhead applies.
+
+Packet, little-endian: `"AETP"` (4) · version=1 (1) · content (1) ·
+u16 N (2) · u32 rate (4) · u64 first_sample (8) · N × float32.
+Verified live: 40/40 packets, zero counter gaps, correct rate; the
+engine-level ring is asserted gapless in the suite. Feature-detect:
+`tapUrl` in the config echo (chain: after `gateDb`).
+
+### 15.2 Ask A — `sampleGainDb`: landed as specified
+
+`{"piano": -3.5, "vibraphone": 2.0}`, ±24 dB, live, keyed by the ids
+`sampleInstrument` accepts; absent id = 0 dB. One semantic choice to
+know: a write REPLACES the stored table (your dialog asserts the whole
+balance, which is the right shape), unknown ids are kept for
+instruments that load later, and the trim applies **at strike** — a
+ringing note keeps the trim it was struck with, exactly like the
+bank's own normalisation. Echoed as the object in force, so your
+connect-time send now round-trips.
+
+### 15.3 The FYIs
+
+- **Per-rate `samplePath`** (FYI 1): understood, no change needed here;
+  the §2.6 refusal keeping its meaning is the point.
+- **`outputGainDb` as a rig-asserted sum** (FYI 2): keep asserting on
+  reconnect — that ordering is exactly what §13.3 promised is safe, and
+  the standalone-fallback split stands.
+- **`engineBuild` launchers** (FYI 3): the stale-process trap now has
+  three layers — your launcher restart, the §13.5 build-skew badge, and
+  the human. Good.

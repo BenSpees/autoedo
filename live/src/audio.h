@@ -150,6 +150,9 @@ typedef struct
                                         the voicing gate, onset floors and
                                         envelope gate all scale from it.
                                         0 = the built-in default (-56) */
+    double   sample_trim_db;         /* sampleGainDb: the CURRENT
+                                        instrument's per-id trim, derived
+                                        at config time; applied at strike */
     int      poly_notes;             /* POLY chord sampler: strike at most
                                         this many simultaneous notes (1..6).
                                         Live; only meaningful with polyMode
@@ -311,6 +314,17 @@ void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p);
 
 /* Snapshot current status (callable from any thread while running). */
 void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out);
+
+/* Local audio tap (loopback publish of the processed output): the audio
+   thread pushes the selected stem (AE_SEND_* content values, `wet` being
+   the loops' one) into an in-engine ring; the control thread drains it
+   with tap_read and forwards it over loopback UDP. first_sample is a
+   MONOTONIC output-sample counter from engine start, so a reader aligns
+   instead of guessing; an overrun drops the oldest audio but never bends
+   the counter. */
+void ae_audio_engine_set_tap  (AeAudioEngine *e, bool on, int content);
+int  ae_audio_engine_tap_read (AeAudioEngine *e, float *out, int max_samples,
+                               long long *first_sample);
 
 /* Set "virtual" held MIDI notes (bitsets, note 0..127). These merge (OR)
    with hardware MIDI input — used by the /api/midi endpoint and tests. */

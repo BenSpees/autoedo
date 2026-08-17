@@ -261,3 +261,20 @@ char *ae_json_escape_append (char *dst, size_t cap, const char *src)
     dst[n] = '\0';
     return dst;
 }
+
+bool ae_json_get_object (const char *json, const char *key, char *out, size_t cap)
+{
+    const char *v = find_key (json, key);
+    if (v == NULL)
+        return false;
+    v = skip_ws (v);
+    if (*v != '{' && *v != '[')
+        return false;
+    const char *end = skip_value (v);
+    const size_t len = (size_t) (end - v);
+    if (len + 1 > cap)
+        return false;
+    memcpy (out, v, len);
+    out[len] = '\0';
+    return true;
+}

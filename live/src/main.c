@@ -33,9 +33,16 @@
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #define ae_udp_close closesocket
   static void ae_sleep_ms (int ms) { Sleep ((DWORD) ms); }
 #else
+  #include <arpa/inet.h>
+  #include <netinet/in.h>
+  #include <sys/socket.h>
   #include <unistd.h>
+  #define ae_udp_close close
   static void ae_sleep_ms (int ms) { usleep ((useconds_t) ms * 1000); }
 #endif
 
@@ -116,10 +123,20 @@ typedef struct
                                       pin this instance's pitch or leave it
                                       cut: stale link returns to neutral. */
     pthread_t       follow_thread;
+    pthread_t       tap_thread;
+    bool            tap_thread_up;
+    char            tap_url[128];      /* "" = tap off */
+    int             tap_content;       /* AE_SEND_* (default WET) */
     bool            follow_thread_up;
     _Atomic bool    follow_quit;
     char            sample_err[256];
     char            sample_insts[AE_SMP_MAX_INSTRUMENTS][32];
+    /* sampleGainDb: per-instrument dB trims, stored as given (ids the
+       rig may load later included) and echoed verbatim. The trim of the
+       CURRENT instrument is derived into params at config_sync. */
+    char   sample_trim_id[128][32];
+    double sample_trim_db[128];
+    int    sample_trim_n;
     int             sample_inst_n;
     char            sample_hash[80];
     bool            sample_dirty;  /* the bank needs a (re)load */
@@ -259,6 +276,8 @@ static void config_defaults (App *app)
     c->params.sample_vel_ref  = -1.0; /* observe the reference, "auto" */
     c->params.poly_notes      = 6;    /* chord sampler polyphony cap */
     c->params.gate_db         = 0.0;  /* 0 = the built-in -56 dBFS floor */
+    app->tap_url[0]  = '\0';
+    app->tap_content = AE_SEND_WET;
     c->sample_root[0] = c->sample_manifest[0] = '\0';
     snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
     c->sample_octave = AE_SMP_OCTAVE_AUTO;
@@ -308,6 +327,14 @@ static void config_sync (App *app)
                      * pow (2.0, ((double) app->root_note - 9.0) / 12.0) / 16.0
                      * pow (2.0, app->root_cents / 1200.0);
     c->params.period_cents = 1200.0 + app->stretch_cents;
+    /* the CURRENT instrument's sampleGainDb trim rides into params */
+    c->params.sample_trim_db = 0.0;
+    for (int i = 0; i < app->sample_trim_n; ++i)
+        if (strcmp (app->sample_trim_id[i], c->sample_instrument) == 0)
+        {
+            c->params.sample_trim_db = app->sample_trim_db[i];
+            break;
+        }
     range_lookup (app->range_name, &c->det_min_hz, &c->det_max_hz);
     /* An explicit window wins over the preset. A named voice type is a fine
        default, but nothing beats telling the detector the actual bottom of
@@ -370,7 +397,30 @@ static void config_json (const App *app, char *out, size_t cap)
     ae_json_escape_append (out, cap, c->output_uid);
     strncat (out, "\",\"label\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, app->label);
-    strncat (out, "\",\"samplePath\":\"", cap - strlen (out) - 1);
+    {
+        char trims[2048];
+        size_t tn = 0;
+        tn += (size_t) snprintf (trims + tn, sizeof (trims) - tn,
+                                 "\",\"sampleGainDb\":{");
+        for (int i = 0; i < app->sample_trim_n && tn < sizeof (trims) - 48; ++i)
+            tn += (size_t) snprintf (trims + tn, sizeof (trims) - tn,
+                                     "%s\"%s\":%.4g", i ? "," : "",
+                                     app->sample_trim_id[i],
+                                     app->sample_trim_db[i]);
+        snprintf (trims + tn, sizeof (trims) - tn, "}");
+        strncat (out, trims, cap - strlen (out) - 1);
+    }
+    {
+        char tapj[192];
+        snprintf (tapj, sizeof (tapj),
+                  ",\"tapUrl\":\"%s\",\"tapContent\":\"%s\"",
+                  app->tap_url,
+                  (const char *[]){ "full", "wet", "lead", "harm" }
+                      [app->tap_content >= 0 && app->tap_content <= 3
+                           ? app->tap_content : 1]);
+        strncat (out, tapj, cap - strlen (out) - 1);
+    }
+    strncat (out, ",\"samplePath\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->sample_root);
     strncat (out, "\",\"sampleManifest\":\"", cap - strlen (out) - 1);
     ae_json_escape_append (out, cap, c->sample_manifest);
@@ -633,6 +683,66 @@ static bool config_apply_json (App *app, const char *json)
         c->params.poly_notes = (int) num_clamp (num, 1.0, 6.0);
     if (ae_json_get_number (json, "gateDb", &num))
         c->params.gate_db = num == 0.0 ? 0.0 : num_clamp (num, -80.0, -30.0);
+    if (ae_json_get_string (json, "tapUrl", str2, sizeof (str2)))
+    {
+        /* same grammar as followUrl: host:port or "" = off. The tap is
+           loopback UDP fire-and-forget; a malformed target is refused
+           rather than silently never arriving. */
+        if (str2[0] == '\0')
+            app->tap_url[0] = '\0';
+        else
+        {
+            const char *cp = strrchr (str2, ':');
+            const char *h  = strncmp (str2, "http://", 7) == 0 ? str2 + 7 : str2;
+            if (cp != NULL && cp > h && atoi (cp + 1) > 0
+                && strlen (h) < sizeof (app->tap_url))
+                snprintf (app->tap_url, sizeof (app->tap_url), "%s", h);
+        }
+    }
+    if (ae_json_get_string (json, "tapContent", str, sizeof (str)))
+    {
+        if      (strcmp (str, "full") == 0) app->tap_content = AE_SEND_FULL;
+        else if (strcmp (str, "wet")  == 0) app->tap_content = AE_SEND_WET;
+        else if (strcmp (str, "lead") == 0) app->tap_content = AE_SEND_LEAD;
+        else if (strcmp (str, "harm") == 0) app->tap_content = AE_SEND_HARM;
+    }
+    {
+        /* sampleGainDb: {"piano":-3.5,...} -- per-instrument trims in dB,
+           replacing the whole stored table when present (the rig asserts
+           its complete balance, not deltas). Unknown ids are KEPT: a trim
+           for an instrument that loads later must not be forgotten. */
+        char obj[2048];
+        if (ae_json_get_object (json, "sampleGainDb", obj, sizeof (obj)))
+        {
+            app->sample_trim_n = 0;
+            const char *q = obj;
+            while (*q && *q != '{') ++q;
+            if (*q) ++q;
+            while (*q && app->sample_trim_n < 128)
+            {
+                while (*q == ' ' || *q == ',' || *q == '\n' || *q == '\r'
+                       || *q == '\t') ++q;
+                if (*q != '"') break;
+                ++q;
+                char id[32]; size_t idn = 0;
+                while (*q && *q != '"' && idn + 1 < sizeof (id))
+                    id[idn++] = *q++;
+                id[idn] = '\0';
+                while (*q && *q != '"') ++q;
+                if (*q) ++q;
+                while (*q == ' ' || *q == ':') ++q;
+                char *endp = NULL;
+                const double db = strtod (q, &endp);
+                if (endp == q) break;
+                q = endp;
+                snprintf (app->sample_trim_id[app->sample_trim_n],
+                          sizeof (app->sample_trim_id[0]), "%s", id);
+                app->sample_trim_db[app->sample_trim_n] =
+                    num_clamp (db, -24.0, 24.0);
+                ++app->sample_trim_n;
+            }
+        }
+    }
     if (ae_json_get_string (json, "quality", str, sizeof (str)))
     {
         if (quality_lookup (str) != quality_lookup (app->quality_name))
@@ -1408,6 +1518,9 @@ static void api_config_post (App *app, const char *body, AeHttpResponse *resp)
         samples_reload_locked (app);
     }
 
+    if (app->engine != NULL)
+        ae_audio_engine_set_tap (app->engine, app->tap_url[0] != '\0',
+                                 app->tap_content);
     config_save (app);
     pthread_mutex_unlock (&app->lock);
 
@@ -1521,6 +1634,98 @@ static void handle_request (void *user, const char *method, const char *path,
    entirely outside the audio thread. The receiver needs nothing new:
    midiMode:true + midiOctaves:"nearest" is the whole contract, and the
    engine that plays the note stays in charge of its own register. */
+/* The tap sender: drains the engine's tap ring and fires loopback UDP
+   packets at tapUrl. Packet layout, little-endian, one per block:
+     bytes 0-3   magic "AETP"
+     byte  4     version (1)
+     byte  5     content (AE_SEND_*: 0 full, 1 wet, 2 lead, 3 harm)
+     bytes 6-7   u16 sample count N
+     bytes 8-11  u32 sample rate
+     bytes 12-19 u64 first-sample counter (monotonic from engine start)
+     bytes 20-   N float32 samples
+   Fire-and-forget on loopback; the counter lets the reader align and
+   detect any drop without a handshake. */
+#define AE_TAP_PKT_SAMPLES 256
+static void *tap_thread_fn (void *arg)
+{
+    App *app = arg;
+    int  sock = -1;
+    char cur_url[128] = "";
+    struct sockaddr_in addr;
+    memset (&addr, 0, sizeof (addr));
+
+    while (! atomic_load_explicit (&app->follow_quit, memory_order_relaxed))
+    {
+        char url[128];
+        pthread_mutex_lock (&app->lock);
+        snprintf (url, sizeof (url), "%s", app->tap_url);
+        AeAudioEngine *eng = app->engine;
+        const int content = app->tap_content;
+        double rate = 0.0;
+        if (eng != NULL)
+        {
+            AeEngineStatus st;
+            /* out rate is stable per engine run; cheap enough to reread */
+            ae_audio_engine_get_status (eng, &st);
+            rate = st.output_rate;
+        }
+        pthread_mutex_unlock (&app->lock);
+
+        if (url[0] == '\0' || eng == NULL)
+        {
+            if (sock >= 0) { ae_udp_close (sock); sock = -1; cur_url[0] = '\0'; }
+            ae_engine_sleep_ms (50);
+            continue;
+        }
+        if (strcmp (url, cur_url) != 0)
+        {
+            if (sock >= 0) { ae_udp_close (sock); sock = -1; }
+            char host[128];
+            snprintf (host, sizeof (host), "%s", url);
+            char *cp = strrchr (host, ':');
+            int port = 0;
+            if (cp != NULL) { *cp = '\0'; port = atoi (cp + 1); }
+            memset (&addr, 0, sizeof (addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port   = htons ((unsigned short) port);
+            if (inet_pton (AF_INET, host[0] ? host : "127.0.0.1",
+                           &addr.sin_addr) != 1)
+                inet_pton (AF_INET, "127.0.0.1", &addr.sin_addr);
+            sock = (int) socket (AF_INET, SOCK_DGRAM, 0);
+            snprintf (cur_url, sizeof (cur_url), "%s", url);
+        }
+        if (sock < 0)
+        {
+            ae_engine_sleep_ms (50);
+            continue;
+        }
+
+        unsigned char pkt[20 + AE_TAP_PKT_SAMPLES * 4];
+        float smp[AE_TAP_PKT_SAMPLES];
+        long long first = 0;
+        const int n = ae_audio_engine_tap_read (eng, smp,
+                                                AE_TAP_PKT_SAMPLES, &first);
+        if (n <= 0)
+        {
+            ae_engine_sleep_ms (2);
+            continue;
+        }
+        pkt[0]='A'; pkt[1]='E'; pkt[2]='T'; pkt[3]='P';
+        pkt[4]=1;   pkt[5]=(unsigned char) content;
+        pkt[6]=(unsigned char)(n & 0xFF); pkt[7]=(unsigned char)(n >> 8);
+        const unsigned r32 = (unsigned) (rate + 0.5);
+        memcpy (pkt + 8,  &r32,   4);
+        unsigned long long f64 = (unsigned long long) first;
+        memcpy (pkt + 12, &f64,   8);
+        memcpy (pkt + 20, smp, (size_t) n * 4);
+        sendto (sock, (const char *) pkt, 20 + n * 4, 0,
+                (struct sockaddr *) &addr, sizeof (addr));
+    }
+    if (sock >= 0)
+        ae_udp_close (sock);
+    return NULL;
+}
+
 static void *follow_thread_fn (void *arg)
 {
     App *app = arg;
@@ -1662,6 +1867,11 @@ int main (int argc, char **argv)
     atomic_store_explicit (&app.follow_quit, false, memory_order_relaxed);
     app.follow_thread_up =
         pthread_create (&app.follow_thread, NULL, follow_thread_fn, &app) == 0;
+    app.tap_thread_up =
+        pthread_create (&app.tap_thread, NULL, tap_thread_fn, &app) == 0;
+    if (app.engine != NULL)
+        ae_audio_engine_set_tap (app.engine, app.tap_url[0] != '\0',
+                                 app.tap_content);
 
     status_refresh (&app); /* the cache must exist before the first GET */
 

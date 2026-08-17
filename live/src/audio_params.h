@@ -92,6 +92,7 @@ typedef struct
     _Atomic bool     sample_ring;
     _Atomic int      poly_notes;
     _Atomic double   gate_rms;
+    _Atomic double   sample_trim_lin;
     _Atomic int      attack_sound;
     _Atomic double   attack_gain_lin;
     _Atomic bool     harm_sustain;
@@ -121,6 +122,56 @@ typedef struct
     _Atomic double   ir_harm_gain_db;
     _Atomic bool     ir_harm_on;
 } AeAtomicParams;
+
+/* Local audio tap ring: SPSC -- the audio thread is the only writer, the
+   control thread's sender the only reader. Fixed power-of-two capacity;
+   the write counter is TOTAL samples ever written, which doubles as the
+   alignment counter the tap packets carry. */
+#define AE_TAP_RING (1 << 15)
+typedef struct
+{
+    float buf[AE_TAP_RING];
+    _Atomic long long w;   /* total samples written (monotonic) */
+    long long r;           /* reader-owned cursor */
+    _Atomic bool on;
+    _Atomic int  content;  /* AE_SEND_* */
+} AeTapRing;
+
+static inline void ae_tap_push (AeTapRing *t, float v)
+{
+    const long long w = atomic_load_explicit (&t->w, memory_order_relaxed);
+    t->buf[w & (AE_TAP_RING - 1)] = v;
+    atomic_store_explicit (&t->w, w + 1, memory_order_release);
+}
+
+static inline int ae_tap_ring_read (AeTapRing *t, float *out, int max,
+                                    long long *first)
+{
+    const long long w = atomic_load_explicit (&t->w, memory_order_acquire);
+    long long r = t->r;
+    if (w - r > AE_TAP_RING)
+        r = w - AE_TAP_RING; /* overrun: drop oldest, keep the counter true */
+    int n = (int) (w - r);
+    if (n > max)
+        n = max;
+    for (int i = 0; i < n; ++i)
+        out[i] = t->buf[(r + i) & (AE_TAP_RING - 1)];
+    *first = r;
+    t->r = r + n;
+    return n;
+}
+
+/* One tap sample from the stems every backend already has in hand. */
+static inline float ae_tap_value (int content, float wet, float hm, float full)
+{
+    switch (content)
+    {
+        case AE_SEND_WET:  return wet + hm;
+        case AE_SEND_LEAD: return wet;
+        case AE_SEND_HARM: return hm;
+        default:           return full;
+    }
+}
 
 /* The FOLLOW note as held-set bits, for status readouts: the panel's
    "following note X" lamp reads the same truth the corrector plays. */
@@ -192,6 +243,9 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->gate_rms,
                            p->gate_db < 0.0 ? pow (10.0, p->gate_db / 20.0)
                                             : 0.0,
+                           memory_order_relaxed);
+    atomic_store_explicit (&a->sample_trim_lin,
+                           pow (10.0, p->sample_trim_db / 20.0),
                            memory_order_relaxed);
     atomic_store_explicit (&a->sample_vel_ref,  p->sample_vel_ref,  memory_order_relaxed);
     atomic_store_explicit (&a->attack_sound, p->attack_sound, memory_order_relaxed);
@@ -305,6 +359,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->poly_notes, memory_order_relaxed));
     ae_corrector_set_gate (ps,
                           atomic_load_explicit (&a->gate_rms, memory_order_relaxed));
+    ae_corrector_set_sample_trim (ps,
+                          atomic_load_explicit (&a->sample_trim_lin, memory_order_relaxed));
     ae_corrector_set_attack (ps,
                           atomic_load_explicit (&a->attack_sound, memory_order_relaxed),
                           atomic_load_explicit (&a->attack_gain_lin, memory_order_relaxed));

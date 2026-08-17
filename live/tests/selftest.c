@@ -2146,6 +2146,46 @@ static double engine_settled_hz (int input_channel)
     return hz;
 }
 
+/* The local audio tap: the stub engine's processed output arrives through
+   ae_audio_engine_tap_read with a monotonic, gapless sample counter and
+   real signal in it -- the contract the UDP tap packets forward. */
+static void test_audio_tap (void)
+{
+    AeEngineConfig cfg;
+    memset (&cfg, 0, sizeof (cfg));
+    cfg.buffer_frames     = 256;
+    cfg.params.edo        = 12;
+    cfg.params.amount     = 0.0;
+    cfg.params.lead_on    = true;
+    cfg.params.degrees_lo = ~0ull;
+    cfg.params.degrees_hi = 0xffull;
+
+    char err[256] = "";
+    AeAudioEngine *e = ae_audio_engine_start (&cfg, err, sizeof (err));
+    CHECK (e != NULL, "tap: engine starts (%s)", err);
+    if (e == NULL)
+        return;
+    ae_audio_engine_set_tap (e, true, AE_SEND_WET);
+    st_sleep_ms (300);
+
+    float buf[4096];
+    long long f1 = 0, f2 = 0;
+    int n1 = ae_audio_engine_tap_read (e, buf, 4096, &f1);
+    double energy = 0.0;
+    for (int i = 0; i < n1; ++i)
+        energy += (double) buf[i] * buf[i];
+    st_sleep_ms (60);
+    int n2 = ae_audio_engine_tap_read (e, buf, 4096, &f2);
+
+    CHECK (n1 > 1000, "tap: audio arrives (%d samples in 300 ms)", n1);
+    CHECK (energy > 1e-3, "tap: the wet stem carries signal (%.3g)", energy);
+    CHECK (n2 > 0 && f2 == f1 + n1,
+           "tap: the sample counter is gapless across reads "
+           "(%lld + %d -> %lld)", f1, n1, f2);
+
+    ae_audio_engine_stop (e);
+}
+
 static void test_engine_channels (void)
 {
     /* Default channel handling: the stub tone is A3 (220 Hz ± 35-cent wobble). */
@@ -4427,6 +4467,7 @@ int main (void)
     test_harmony_formant_preservation();
     test_midi_harmony();
     test_json();
+    test_audio_tap();
     test_engine_channels();
     test_96k();
     test_soft_clip();

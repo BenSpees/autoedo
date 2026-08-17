@@ -222,6 +222,7 @@ struct AeAudioEngine
     double out_rate;
     int    out_channels;
     int    buffer_frames;
+    AeTapRing tap;                /* local audio tap (see audio.h) */
     int    latency_frames;        /* the ENGINE's own path (what the
                                      record send is aligned by) */
     int    device_latency_frames; /* hardware overhead outside that path:
@@ -431,6 +432,21 @@ static OSStatus render_cb (void *ref, AudioUnitRenderActionFlags *flags,
     const float *wet = ae_corrector_lead_wet (&e->corrector);
     const float  send_target = mix.send_on ? mix.send_gain : 0.0f;
 
+    if (atomic_load_explicit (&e->tap.on, memory_order_relaxed))
+    {
+        const int content = atomic_load_explicit (&e->tap.content,
+                                                  memory_order_relaxed);
+        for (UInt32 i = 0; i < n_frames && i < n; ++i)
+        {
+            const float hm   = 0.5f * (e->harm_l[i] + e->harm_r[i]);
+            const float full = (bypass ? byp_g * e->dry[i]
+                                       : (lead ? lead_g * src[i] : 0.0f) + hm)
+                             * gain;
+            ae_tap_push (&e->tap, ae_tap_value (content,
+                                                wet ? wet[i] : 0.0f, hm, full));
+        }
+    }
+
     for (UInt32 b = 0; b < io->mNumberBuffers; ++b)
     {
         float *dst = io->mBuffers[b].mData;
@@ -593,6 +609,22 @@ static void engine_teardown (AeAudioEngine *e)
     free (e->harm_r);
     ae_corrector_free (&e->corrector);
     free (e);
+}
+
+void ae_audio_engine_set_tap (AeAudioEngine *e, bool on, int content)
+{
+    if (e == NULL)
+        return;
+    atomic_store_explicit (&e->tap.content, content, memory_order_relaxed);
+    atomic_store_explicit (&e->tap.on, on, memory_order_relaxed);
+}
+
+int ae_audio_engine_tap_read (AeAudioEngine *e, float *out, int max_samples,
+                              long long *first_sample)
+{
+    if (e == NULL)
+        return 0;
+    return ae_tap_ring_read (&e->tap, out, max_samples, first_sample);
 }
 
 void ae_audio_engine_set_params (AeAudioEngine *e, const AeLiveParams *p)

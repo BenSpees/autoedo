@@ -830,3 +830,38 @@ Shared-device fine print:
 - The processed outputs of both instances mix at the output device —
   give each its own `outputChannel` when they should stay on separate
   jacks instead.
+
+## The local audio tap (`tapUrl`, `tapContent`)
+
+The engine's processed output, published over **loopback UDP** — no cable,
+no spare device channel, no relaunch. `tapUrl` (`host:port`, live, `""` =
+off) aims it; `tapContent` picks the stem with the record send's own
+vocabulary (`full` / `wet` / `lead` / `harm`; default `wet`). Align by
+`processLatencyMs`, exactly like the record send — the tap sits inside
+the engine, so device overhead does not apply.
+
+Packet layout (little-endian, one per block, ≤256 samples):
+
+| bytes | field |
+|---|---|
+| 0–3 | magic `AETP` |
+| 4 | version (1) |
+| 5 | content (0 full, 1 wet, 2 lead, 3 harm) |
+| 6–7 | u16 sample count N |
+| 8–11 | u32 sample rate |
+| 12–19 | u64 first-sample counter |
+| 20– | N × float32 samples |
+
+The counter is **monotonic from engine start** and gapless in normal
+operation: a reader aligns by it and detects drops without a handshake.
+Fire-and-forget: no acks, no retransmit — it is loopback.
+
+## Per-instrument level trims (`sampleGainDb`)
+
+`{"piano": -3.5, "vibraphone": 2.0}` — dB trims keyed by the ids
+`sampleInstrument` accepts, ±24 dB, live. A write replaces the whole
+stored table (assert the complete balance, not deltas); ids for
+instruments not currently present are kept, so a trim outlives an
+instrument swap. Applied **at strike**, like the bank's own
+normalisation — a ringing note keeps the trim it was struck with.
+Echoed as the object in force.
