@@ -409,6 +409,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
     mix->bypass      = atomic_load_explicit (&a->bypass, memory_order_relaxed);
     mix->bypass_mute = atomic_load_explicit (&a->bypass_mute, memory_order_relaxed);
     mix->lead_on     = atomic_load_explicit (&a->lead_on, memory_order_relaxed);
+    mix->harm_on     = atomic_load_explicit (&a->harm_on, memory_order_relaxed);
+    mix->drone_on    = atomic_load_explicit (&a->drone_on, memory_order_relaxed);
     mix->lead_gain   = (float) atomic_load_explicit (&a->lead_gain_lin, memory_order_relaxed);
     mix->master_gain = (float) atomic_load_explicit (&a->gain_lin, memory_order_relaxed);
     mix->send_content = atomic_load_explicit (&a->send_content, memory_order_relaxed);

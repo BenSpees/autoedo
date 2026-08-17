@@ -132,20 +132,49 @@ int main (void)
 
     /* Bypass: the PA feed goes dry; bypassOutput:"mute" silences the PA
        feed but must NEVER silence the chain feed (the host looper's
-       source). */
+       source). The chain's source flip crossfades (~10 ms), so run the
+       fade out before comparing. */
     ae_embed_config (inst, "{\"bypass\":true}");
-    tone_block (in, BLOCK, 35.0, &phase);
-    ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+    for (int b = 0; b < 40; ++b) /* ~0.2 s: the crossfade is long gone */
+    {
+        tone_block (in, BLOCK, 35.0, &phase);
+        ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+    }
     CHECK (peak (out_l, BLOCK) > 0.05f, "bypass dry reaches the PA feed");
-    CHECK (memcmp (chain, in, sizeof (chain)) == 0,
-           "bypass chain feed is the dry input");
+    {
+        float dmax = 0.0f;
+        for (int i = 0; i < BLOCK; ++i)
+            if (fabsf (chain[i] - in[i]) > dmax)
+                dmax = fabsf (chain[i] - in[i]);
+        CHECK (dmax < 1e-3f, "bypass chain feed is the dry input");
+    }
     ae_embed_config (inst, "{\"bypassOutput\":\"mute\"}");
     tone_block (in, BLOCK, 35.0, &phase);
     ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
     CHECK (peak (out_l, BLOCK) == 0.0f, "bypass mute silences the PA feed");
-    CHECK (memcmp (chain, in, sizeof (chain)) == 0,
-           "bypass mute keeps the chain feed dry");
+    CHECK (peak (chain, BLOCK) > 0.05f, "bypass mute keeps the chain feed dry");
     ae_embed_config (inst, "{\"bypass\":false,\"bypassOutput\":\"dry\"}");
+
+    /* Every voice off -- lead muted, harmony off, no drone: the engine's
+       mix is deliberate silence, and the chain must carry the DRY input
+       instead (field: loops recorded silence through a lead-muted engine,
+       and 'my dry guitar is no longer going into the loops'). The PA feed
+       honestly goes quiet; the chain must not. */
+    ae_embed_config (inst, "{\"leadOn\":false,\"harmOn\":false,\"droneOn\":false}");
+    for (int b = 0; b < 40; ++b)
+    {
+        tone_block (in, BLOCK, 35.0, &phase);
+        ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+    }
+    CHECK (peak (out_l, BLOCK) < 1e-3f, "all voices off: PA feed is quiet");
+    {
+        float dmax = 0.0f;
+        for (int i = 0; i < BLOCK; ++i)
+            if (fabsf (chain[i] - in[i]) > dmax)
+                dmax = fabsf (chain[i] - in[i]);
+        CHECK (dmax < 1e-3f, "all voices off: chain feed is the dry input");
+    }
+    ae_embed_config (inst, "{\"leadOn\":true}");
 
     /* A restart-scoped key rebuilds the engine under the host's feet; the
        next process call must survive it (silence or audio, never a crash),

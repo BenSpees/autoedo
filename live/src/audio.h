@@ -192,6 +192,9 @@ typedef struct
     bool  bypass;
     bool  bypass_mute;
     bool  lead_on;
+    bool  harm_on;  /* the ghost bus is enabled (embed chain-feed decision) */
+    bool  drone_on; /* ...and the drone (gated by harm_on in the corrector,
+                       carried separately so the decision reads plainly) */
     float lead_gain;
     float master_gain;
     int   send_content; /* AE_SEND_* */
@@ -378,11 +381,14 @@ bool ae_audio_backend_embedded (void);
    Host audio thread: run `n` mono input frames through the engine.
    out_l/out_r get the live PA feed (what the standalone engine's output
    jack carries -- bypassOutput semantics included). `chain` gets the feed
-   for the host's own downstream chain (looper / FX / spaces): the same
-   live mono mix, except that bypass ALWAYS passes the dry input through
-   at unity -- bypassOutput:"mute" governs the PA jack, never the chain,
-   because a bypassed corrector must not silence the looper's source.
-   Any of the three outputs may be NULL. Returns frames written. */
+   for the host's own downstream chain (looper / FX / spaces): the live
+   mono mix while any voice sounds, and the DRY input at unity under
+   bypass OR with every voice off (lead muted, harmony off, no drone) --
+   an engine mixing deliberate silence must not silence the looper's
+   source, and bypassOutput:"mute" governs the PA jack, never the chain.
+   The source flip is crossfaded (~10 ms) so a voice switch never bakes a
+   step into a recording loop. Any of the three outputs may be NULL.
+   Returns frames written. */
 int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
                              float *out_r, float *chain, int n);
 

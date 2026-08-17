@@ -58,6 +58,11 @@ struct AeAudioEngine
 
     _Atomic float out_peak; /* decaying pre-clip peak of the summed output */
 
+    /* Chain-feed source crossfade (see ae_embed_engine_process): 1 = the
+       engine's mix, 0 = the dry input. Smoothed so the flip of a voice
+       switch never bakes a step into a recording loop. */
+    float chain_mix;
+
     AeAtomicParams params;
     AeTapRing      tap;
 };
@@ -87,6 +92,18 @@ int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
         const float *src   = bypass ? e->dry : e->proc;
         const float  byp_g = ae_bypass_gain (&mix);
         const float *wet   = ae_corrector_lead_wet (&e->corrector);
+
+        /* The chain must NEVER lose the instrument. Bypass passes the dry
+           through (below); so does an engine that is active but whose
+           voices are ALL off -- lead muted, harmony off, no drone -- since
+           its mix is deliberate silence, and a looper recording deliberate
+           silence is the field failure ("degrade broken": takes recorded
+           through a muted engine transcribe to nothing and never damage).
+           Crossfaded (~10 ms at 48 k) so flipping a voice switch never
+           bakes a step into a recording loop. */
+        const bool chain_wet = ! bypass
+            && (mix.lead_on || mix.harm_on || mix.drone_on);
+        const float chain_target = chain_wet ? 1.0f : 0.0f;
 
         const bool tap_on = atomic_load_explicit (&e->tap.on,
                                                   memory_order_relaxed);
@@ -118,11 +135,16 @@ int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
                 if (out_l != NULL) out_l[done + i] = ae_soft_clip (sl * gain);
                 if (out_r != NULL) out_r[done + i] = ae_soft_clip (sr * gain);
             }
-            /* The chain feed (see audio.h): bypass passes the DRY through
-               at unity whatever bypassOutput says -- the host's looper and
-               FX must never lose their source to a PA-side mute. */
+            /* The chain feed (see audio.h): the engine's mix while any
+               voice sounds, the DRY input at unity under bypass or with
+               every voice off -- whatever bypassOutput says, the host's
+               looper and FX must never lose their source. */
             if (chain != NULL)
-                chain[done + i] = bypass ? e->dry[i] : ae_soft_clip (full);
+            {
+                e->chain_mix += (chain_target - e->chain_mix) * 0.002f;
+                chain[done + i] = e->chain_mix * ae_soft_clip (full)
+                                + (1.0f - e->chain_mix) * e->dry[i];
+            }
         }
         done += m;
     }

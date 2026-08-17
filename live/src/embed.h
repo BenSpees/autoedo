@@ -55,9 +55,12 @@ void ae_embed_destroy (AeEmbed *inst);
                   jack carried), bypassOutput semantics included; route it
                   per ae_embed_output_channel().
      chain        the feed for the host's own downstream chain (looper /
-                  FX / spaces): the live mono mix, except bypass ALWAYS
-                  passes the dry input at unity -- a PA-side mute must
-                  never silence the looper's source.
+                  FX / spaces): the live mono mix while any voice sounds,
+                  the dry input at unity under bypass or with every voice
+                  off (lead muted, harmony off, no drone) -- neither a
+                  PA-side mute nor an engine mixing deliberate silence may
+                  silence the looper's source. Crossfaded (~10 ms) at the
+                  flip.
    Any output may be NULL. While no engine runs (failed start, mid-restart)
    the outputs go silent and `chain` carries the dry input, so the host's
    chain never loses its instrument. Returns n. */
