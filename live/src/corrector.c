@@ -754,6 +754,12 @@ void ae_corrector_reset (AeCorrector *p)
     p->smp_gain_a = 1.0 - exp (-1.0 / (0.015 * p->fs));
     p->onset_pulse = false;
     p->vel_win = 0; p->vel_peak = 0.0;
+    p->vel_sq = 0.0; p->vel_n = 0;
+    p->vel_ema_db = -999.0; /* no verdict yet */
+    p->smp_match  = 0.0;    /* the PRIMITIVE keeps the map's semantics; the
+                               rig-level default of 1 (parity) is the config
+                               layer's (config_defaults), so a direct
+                               consumer of this struct is never surprised */
     /* Start at the floor, so the reference is OBSERVED rather than assumed.
        Seeding it with a plausible "playing hard" level instead sounds
        reasonable and is not: the seed then outranks the player for as long
@@ -1070,6 +1076,11 @@ void ae_corrector_set_follow (AeCorrector *p, double amt)
    linear peak; negative means observe. Applied on the next block, so a
    host may re-assert it per phrase without clicking anything: the
    reference scales velocities, it is not in the audio path. */
+void ae_corrector_set_sample_match (AeCorrector *p, double m)
+{
+    p->smp_match = m < 0.0 ? 0.0 : (m > 1.0 ? 1.0 : m);
+}
+
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin)
 {
     p->vel_ref_fixed = ref_lin < 0.0 ? -1.0 : (ref_lin > 1.0 ? 1.0 : ref_lin);
@@ -1148,6 +1159,54 @@ static double vel_from_peak (const AeCorrector *p, double peak)
     double t = 1.0 + below / AE_VEL_WINDOW_DB;
     t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
     return AE_VEL_FLOOR + (1.0 - AE_VEL_FLOOR) * t;
+}
+
+/* Strike-to-strike smoothing: pull a measured level to within
+   AE_VEL_CLAMP_DB of the running average of recent verdicts. The first
+   note (no history) is taken as played. */
+static double vel_clamp_level (const AeCorrector *p, double level)
+{
+    if (level <= 1e-9 || p->vel_ema_db < -900.0)
+        return level;
+    double db = 20.0 * log10 (level);
+    if (db > p->vel_ema_db + AE_VEL_CLAMP_DB)
+        db = p->vel_ema_db + AE_VEL_CLAMP_DB;
+    else if (db < p->vel_ema_db - AE_VEL_CLAMP_DB)
+        db = p->vel_ema_db - AE_VEL_CLAMP_DB;
+    return pow (10.0, db / 20.0);
+}
+
+/* The smoothed body-level estimate available RIGHT NOW -- what a strike
+   uses before the verdict window has closed (the fast follower's reading,
+   tamed by the same clamp the verdict wears, so the estimate and the
+   verdict cannot be a leap apart). Peak-equivalent units throughout. */
+static double body_level_now (const AeCorrector *p)
+{
+    return vel_clamp_level (p, p->atk_fast * AE_SQRT2);
+}
+
+/* The strike gain before the per-instrument trim, from a measured body
+   level: the relative velocity map (0.2..1 against the rolling reference)
+   crossfaded in the dB domain toward SOURCE PARITY -- the gain that puts
+   the sample's body (bank-normalised to AE_SMP_BODY_RMS) at the level the
+   note was actually played. sampleMatch picks the blend; a host-pinned
+   sampleVelocity bypasses parity entirely, because a pinned strike level
+   is a pinned strike level. Parity is clamped to -34..+12 dB so a noise
+   floor can never be renormalised into fortissimo. */
+static double strike_gain (const AeCorrector *p, double level)
+{
+    const double vel = p->smp_vel_fixed >= 0.0 ? p->smp_vel_fixed
+                                               : vel_from_peak (p, level);
+    const double m = p->smp_match;
+    if (m <= 0.0 || p->smp_vel_fixed >= 0.0)
+        return vel;
+    double parity = (level > 1e-9 ? level / AE_SQRT2 : 0.0) / AE_SMP_BODY_RMS;
+    if (parity < 0.02) parity = 0.02;
+    if (parity > 4.0)  parity = 4.0;
+    if (m >= 1.0)
+        return parity;
+    return pow (10.0, ((1.0 - m) * log10 (vel > 1e-9 ? vel : 1e-9)
+                       + m * log10 (parity)));
 }
 
 /* Strike one voice: pick the recording, set the read cursor and the
@@ -1495,8 +1554,10 @@ static void detect_onset (AeCorrector *p, int num_samples)
         p->detector.last_best_tau = 0;
         p->atk_armed   = false;
         p->atk_refract = (int) (0.060 * p->fs);
-        p->vel_win     = (int) (0.030 * p->fs);
+        p->vel_win     = (int) (AE_VEL_BODY_S * p->fs);
         p->vel_peak    = 0.0;
+        p->vel_sq      = 0.0;
+        p->vel_n       = 0;
         /* ...and arm the ATTACK HOLD on the quantizer (see run_detection):
            a plucked string starts sharp, and the snap must not believe
            the first hops of the transient over the note that was already
@@ -1513,18 +1574,38 @@ static void detect_onset (AeCorrector *p, int num_samples)
     if (p->vel_win > 0)
     {
         if (peak > p->vel_peak) p->vel_peak = peak;
+        p->vel_sq += sum;
+        p->vel_n  += num_samples;
         p->vel_win -= num_samples;
         if (p->vel_win <= 0)
         {
-            const double vel = vel_from_peak (p, p->vel_peak);
+            /* The verdict: the BODY's RMS as a peak-equivalent (x sqrt2),
+               not the pick's instantaneous peak -- and clamped against the
+               running average of recent verdicts before anything reads it,
+               so one odd measurement is a nudge, never a leap (field:
+               "very touchy... too many very loud or very quiet notes").
+               The clamped value then FEEDS the average, which lets a real
+               dynamic change walk the window where it wants in a few
+               notes. */
+            const double raw = (p->vel_n > 0
+                                    ? sqrt (p->vel_sq / (double) p->vel_n)
+                                    : 0.0) * AE_SQRT2;
+            const double lvl = vel_clamp_level (p, raw);
+            /* The clamped verdict becomes the anchor for the next one, so
+               the rule is simply "a verdict moves at most AE_VEL_CLAMP_DB
+               per note": one odd measurement is tamed, a deliberate
+               dynamic change walks the whole way in two or three notes. */
+            if (lvl > 1e-9)
+                p->vel_ema_db = 20.0 * log10 (lvl);
+            const double vel = vel_from_peak (p, lvl);
             /* A measured onset is the only thing that RAISES an OBSERVED
                reference, and it does so after being mapped -- so the
                hardest note in the last ~20 s reads 1.0 and sets the bar for
                the rest. A supplied one is never raised; the max() inside
                the map still keeps a louder-than-reference note at unity
                rather than above it. */
-            if (p->vel_ref_fixed < 0.0 && p->vel_peak > p->vel_ref)
-                p->vel_ref = p->vel_peak;
+            if (p->vel_ref_fixed < 0.0 && lvl > p->vel_ref)
+                p->vel_ref = lvl;
             atomic_store_explicit (&p->smp_vel_out, (float) vel, memory_order_relaxed);
             /* Refine the strike this window was measuring -- the LEVEL of
                the note now sounding, not the next one's. Only the level:
@@ -1532,10 +1613,16 @@ static void detect_onset (AeCorrector *p, int num_samples)
                committed at the strike, so a note whose estimate landed the
                wrong side of the soft threshold keeps that timbre. It is
                the one thing measuring cannot fix without delaying the
-               strike, which is the latency the feature exists to hide. */
+               strike, which is the latency the feature exists to hide.
+               The refinement rides the same map-vs-parity blend the strike
+               used, and keeps the per-instrument trim it used to drop. */
             if (p->smp_vel_fixed < 0.0)
+            {
+                const double g = strike_gain (p, lvl)
+                               * (p->smp_trim > 0.0 ? p->smp_trim : 1.0);
                 for (int v = 0; v <= AE_HARM_VOICES; ++v)
-                    p->smp[v][p->smp_cur[v]].gain_t = vel;
+                    p->smp[v][p->smp_cur[v]].gain_t = g;
+            }
         }
     }
 }
@@ -2627,15 +2714,14 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
     double g_shift, g_smp;
     sample_layer_gains (p->smp_mix, &g_shift, &g_smp);
 
-    /* The strike level. Measuring takes 30 ms and the strike cannot wait
-       for it, so a struck voice takes the fast follower's reading NOW and
-       the window's verdict corrects it 30 ms later (see detect_onset).
-       Reading smp_vel_out here instead would strike every note at the
-       PREVIOUS note's level, which is exactly wrong the moment the
-       dynamics change. */
-    const double vel = p->smp_vel_fixed >= 0.0
-        ? p->smp_vel_fixed
-        : vel_from_peak (p, p->atk_fast * AE_SQRT2); /* RMS -> peak estimate */
+    /* The strike level. Measuring takes the body window and the strike
+       cannot wait for it, so a struck voice takes the fast follower's
+       reading NOW -- tamed by the same strike-to-strike clamp the verdict
+       wears -- and the window's verdict corrects it when it closes (see
+       detect_onset). Reading smp_vel_out here instead would strike every
+       note at the PREVIOUS note's level, which is exactly wrong the moment
+       the dynamics change. */
+    const double vel = strike_gain (p, body_level_now (p));
     const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
     const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
 
@@ -2832,9 +2918,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
 
         const double ref = p->ref_hz > 0.0 ? p->ref_hz
                                            : AE_REFERENCE_C0_HZ;
-        const double vel = p->smp_vel_fixed >= 0.0
-            ? p->smp_vel_fixed
-            : vel_from_peak (p, p->atk_fast * AE_SQRT2);
+        const double vel = strike_gain (p, body_level_now (p));
         int active = 0;
         for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
         {
@@ -3127,8 +3211,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
            discipline as a sample ghost, aimed at the corrected target. */
         const double hz =
             (double) atomic_load_explicit (&p->target_hz_out, memory_order_relaxed);
-        const double vel = p->smp_vel_fixed >= 0.0 ? p->smp_vel_fixed
-            : vel_from_peak (p, p->atk_fast * AE_SQRT2);
+        const double vel = strike_gain (p, body_level_now (p));
         const int L = AE_HARM_VOICES;
         if (p->smp_guard > 0)
             p->smp_guard -= num_samples;

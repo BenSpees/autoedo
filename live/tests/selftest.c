@@ -3717,10 +3717,16 @@ static void test_velocity_relative (void)
         ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
 
         /* Pass 0 plays only the hard note, so the reference is set by that
-           note itself. Pass 1 plays hard, then the same soft note after a
-           gap long enough to read as a fresh onset. */
+           note itself. Pass 1 plays hard, then the same soft note TWICE
+           after gaps long enough to read as fresh onsets: the strike-to-
+           strike smoothing moves a verdict at most AE_VEL_CLAMP_DB per
+           note, so the first soft note is pulled toward the hard one and
+           the SECOND lands where the map puts it -- a deliberate dynamic
+           change walks the whole way in two notes, while a single odd
+           measurement (the touchiness this exists to tame) never leaps. */
         const int gap = 36864, note = 36864;
-        const int total = pass == 0 ? gap + note : gap + note + gap + note;
+        const int total = pass == 0 ? gap + note
+                                    : gap + note + gap + note + gap + note;
         float *in = calloc ((size_t) total, sizeof (float));
         float *hl = calloc ((size_t) total, sizeof (float));
         float *hr = calloc ((size_t) total, sizeof (float));
@@ -3728,15 +3734,17 @@ static void test_velocity_relative (void)
         for (int i = 0; i < total; ++i)
         {
             const bool n1 = i >= gap && i < gap + note;
-            const bool n2 = i >= gap + note + gap;
-            if (! n1 && ! n2) continue;
+            const bool n2 = i >= gap + note + gap
+                            && i < gap + note + gap + note;
+            const bool n3 = i >= gap + note + gap + note + gap;
+            if (! n1 && ! n2 && ! n3) continue;
             ph += 2.0 * M_PI * 220.0 / 48000.0;
             /* sin + 0.3*sin(2x) peaks at ~1.13x the amplitude; scale so the
                PEAK is what the comment claims. */
             const double amp = (n1 ? hard : soft) / 1.13;
             in[i] = (float) (amp * (sin (ph) + 0.3 * sin (2.0 * ph)));
         }
-        const int probe = pass == 0 ? gap : gap + note + gap;
+        const int probe = pass == 0 ? gap : gap + note + gap + note + gap;
         for (int off = 0; off < total; off += 512)
         {
             const int n = total - off < 512 ? total - off : 512;
@@ -3752,9 +3760,13 @@ static void test_velocity_relative (void)
            "velocity map: hard playing at -16.5 dBFS strikes at the top "
            "(%.3f; the absolute map scored this 0.59 because it measured "
            "the headroom, not the playing)", got[0]);
-    /* 12 dB below the reference is half of a 24 dB window: 0.2 + 0.8*0.5. */
+    /* 12 dB below the reference is half of a 24 dB window: 0.2 + 0.8*0.5.
+       Probed on the SECOND soft note: the first is pulled up by the
+       strike-to-strike clamp (by design), the second has walked the whole
+       12 dB and lands where the map says. */
     CHECK (got[1] > 0.50 && got[1] < 0.70,
-           "velocity map: 12 dB down lands mid-window (%.3f, want ~0.60)",
+           "velocity map: 12 dB down lands mid-window by the second soft "
+           "note (%.3f, want ~0.60)",
            got[1]);
     CHECK (got[1] > AE_VEL_FLOOR - 1e-9,
            "velocity map: a confirmed note never strikes below the floor "
@@ -3855,6 +3867,58 @@ static void test_velocity_ref_supplied (void)
     CHECK (fabs (seen[1] - refs[1]) < 1e-4,
            "a supplied reference is not decayed either (%.4f vs %.4f)",
            seen[1], refs[1]);
+
+    /* sampleMatch 1 (SOURCE PARITY): the reference stops mattering -- the
+       strike gain is the played body RMS against the bank normalisation
+       target, so the sample lands at the level the note was actually
+       played. Same signal, the reference that scored ~0.60 above, and the
+       expected gain is pure arithmetic on the input. */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        if (! ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)))
+        { CHECK (false, "parity: bank load (%s)", err); free (p); return; }
+        AeHarmVoice voices[AE_HARM_VOICES];
+        memset (voices, 0, sizeof (voices));
+        for (int v = 0; v < AE_HARM_VOICES; ++v) voices[v].gain = 1.0;
+        voices[0].interval = 7;
+        ae_corrector_set_harmony (p, true, 0, voices);
+        ae_corrector_set_sample (p, 1.0, -1.0, false);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
+        ae_corrector_set_vel_ref (p, refs[1]); /* would score ~0.60 on the map */
+        ae_corrector_set_sample_match (p, 1.0);
+
+        const int gap = 36864, note = 36864, total = gap + note;
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0, sq = 0.0;
+        for (int i = gap; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            in[i] = (float) ((hard / 1.13) * (sin (ph) + 0.3 * sin (2.0 * ph)));
+            sq += (double) in[i] * in[i];
+        }
+        const double body_rms = sqrt (sq / note);
+        double got_g = -1.0;
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+            if (off >= gap + 9600 && off < gap + 12000)
+                got_g = p->smp[0][p->smp_cur[0]].gain;
+        }
+        const double want = body_rms / AE_SMP_BODY_RMS;
+        CHECK (got_g > 0.8 * want && got_g < 1.25 * want,
+               "source parity strikes at played-body / bank-norm "
+               "(%.3f, want ~%.3f) with the reference ignored", got_g, want);
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
 
     /* Negative hands the reference back to observation. */
     {

@@ -146,6 +146,11 @@ typedef struct
     bool     sample_ring;            /* let-ring: a struck voice finishes on
                                         its own decay THROUGH the next
                                         strike. false = damp on repitch */
+    double   sample_match;           /* sampleMatch 0..1: strike level source.
+                                        0 = the relative velocity map alone,
+                                        1 (default) = SOURCE PARITY -- the
+                                        sample's body lands at the level the
+                                        note was actually played */
     double   gate_db;                /* noise/trigger gate in dBFS (RMS):
                                         the voicing gate, onset floors and
                                         envelope gate all scale from it.

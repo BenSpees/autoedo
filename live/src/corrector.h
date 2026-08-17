@@ -73,6 +73,22 @@
 /* The reference never decays below this (-40 dBFS), so a silent rig maps
    its own noise floor to the velocity floor instead of to fortissimo. */
 #define AE_VEL_REF_MIN  0.01
+/* The verdict window measures the note's BODY, not the pick: 120 ms of
+   RMS. The old 30 ms instantaneous peak was the highest-variance statistic
+   a transient has -- two "identical" picks differ by several dB at the
+   peak -- and every dB of measurement noise became note-to-note loudness
+   jitter (field: "very touchy... too many very loud or very quiet
+   notes"). */
+#define AE_VEL_BODY_S    0.120
+/* Strike-to-strike smoothing: a verdict may land at most this far from
+   the running average of recent verdicts. 6 dB is a clear deliberate
+   accent; anything past it is a measurement artefact being tamed. */
+#define AE_VEL_CLAMP_DB  6.0
+/* The sample banks are normalised to this body RMS at load (sampler.c) --
+   which is what makes SOURCE PARITY one division: a strike gain of
+   source_body / this puts the sample's body at the level the note was
+   actually played. */
+#define AE_SMP_BODY_RMS  0.0794328 /* 10^(-22/20) */
 
 #define AE_SYNTH_PARTIALS 6
 
@@ -317,6 +333,20 @@ typedef struct
     bool   onset_pulse;
     int    vel_win;      /* samples left in the velocity measuring window */
     double vel_peak;     /* running peak inside it */
+    double vel_sq;       /* sum of squares inside it (the body RMS) */
+    long   vel_n;        /* ...over this many samples */
+    /* Strike-to-strike smoothing: the running average of measured body
+       levels, dB. New verdicts are clamped to +-AE_VEL_CLAMP_DB of it,
+       then folded in -- accents survive, artefacts are tamed. Below
+       -900 = no verdict yet (the first note is taken as played). */
+    double vel_ema_db;
+    /* sampleMatch: 0 = the relative velocity map alone, 1 = SOURCE
+       PARITY (the sample's body lands at the level the note was played,
+       measured against the bank's normalisation), in between a dB-domain
+       crossfade. The primitive defaults to 0 (the map, as always); the
+       CONFIG layer defaults the rig to 1 -- parity is the starting point,
+       the faders are taste. */
+    double smp_match;
     /* The velocity REFERENCE: "how hard this player plays when playing
        hard". A rolling peak that decays over ~20 s, so the map follows the
        rig's actual headroom instead of assuming the signal reaches full
@@ -670,6 +700,9 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
 /* Supply the strike-velocity reference (linear peak) instead of letting
    the engine observe one; negative = observe. See vel_ref_fixed. */
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin);
+
+/* sampleMatch 0..1 (see smp_match). Live; any thread. */
+void ae_corrector_set_sample_match (AeCorrector *p, double m);
 
 /* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
    between blocks. */

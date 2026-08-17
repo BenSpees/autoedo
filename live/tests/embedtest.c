@@ -85,6 +85,13 @@ int main (void)
         "\"outputChannel\":4,\"label\":\"embedtest\"}");
     ae_embed_status (inst, status, sizeof (status));
     CHECK (strstr (status, "\"edo\":22") != NULL, "config echo: edo 22");
+    CHECK (strstr (status, "\"sampleMatch\":1") != NULL,
+           "config echo: sampleMatch defaults to source parity");
+    ae_embed_config (inst, "{\"sampleMatch\":0.4}");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"sampleMatch\":0.4") != NULL,
+           "config echo: sampleMatch follows a write");
+    ae_embed_config (inst, "{\"sampleMatch\":1}");
     CHECK (strstr (status, "\"label\":\"embedtest\"") != NULL,
            "config echo: label");
     CHECK (ae_embed_output_channel (inst) == 4, "output channel routing fact");
