@@ -707,6 +707,10 @@ void ae_corrector_reset (AeCorrector *p)
     p->in_level       = 0.0;
     p->target_j       = 0;
     p->target_valid   = false;
+    p->att_prev_valid = false;
+    p->attack_hold     = 0;
+    p->att_hold_recent = 0;
+    p->att_hold_j      = 0;
     p->prev_pair_valid = false;
     p->prev_det_cents = p->prev_tgt_cents = 0.0;
     p->in_transition  = false;
@@ -1481,7 +1485,16 @@ static void detect_onset (AeCorrector *p, int num_samples)
         p->atk_refract = (int) (0.060 * p->fs);
         p->vel_win     = (int) (0.030 * p->fs);
         p->vel_peak    = 0.0;
+        /* ...and arm the ATTACK HOLD on the quantizer (see run_detection):
+           a plucked string starts sharp, and the snap must not believe
+           the first hops of the transient over the note that was already
+           sounding. */
+        p->attack_hold = (int) (0.080 * p->fs);
     }
+    if (p->attack_hold > 0)
+        p->attack_hold -= num_samples;
+    if (p->att_hold_recent > 0)
+        p->att_hold_recent -= num_samples;
 
     if (p->vel_win > 0)
     {
@@ -1673,8 +1686,13 @@ static void run_detection (AeCorrector *p)
         if (! p->voiced || ! p->primed)
             p->centre_cents = detected_cents;
         else
+            /* Inside the attack window the motion IS the transient
+               settling (vibrato has not started yet): follow at ~40 ms
+               so a sharp attack's centre reaches the true note in a few
+               hops instead of pinning a wrong degree for ~150 ms. */
             p->centre_cents += (detected_cents - p->centre_cents)
-                             * (1.0 - exp (-elapsed / 0.180));
+                             * (1.0 - exp (-elapsed /
+                                    (p->attack_hold > 0 ? 0.040 : 0.180)));
         /* Octave re-vote. A guitar with a dominant second harmonic makes
            YIN vote octave-high at the pluck and re-vote the true octave
            mid-note as the uppers decay -- a near-equave step in ONE 5 ms
@@ -1704,6 +1722,35 @@ static void run_detection (AeCorrector *p)
            guitarist crosses without trying. */
         const double centre_hz = ref * pow (2.0, p->centre_cents / 1200.0);
         const double steps     = ae_steps_from_ref (centre_hz, p->edo, ref, period);
+
+        /* Re-voicing while a note's degree is still remembered IS a
+           re-attack, whatever the energy Schmitt thought -- and it must
+           arm BEFORE the quantizer runs this hop, or the transient snaps
+           first and poisons the remembered degree with its own commit. */
+        if ((! p->voiced || ! p->primed) && p->att_hold_recent > 0)
+            p->attack_hold = (int) (0.080 * p->fs);
+
+        /* Re-plucks the energy onset MISSES (string still ringing, so the
+           fast/slow contrast is small) still announce themselves in
+           pitch: the transient reads sharp. The analysis window smears
+           its rise across 2-3 hops (~13 cents each -- under any safe
+           per-hop threshold), so the comparison runs THREE hops back
+           (~15 ms), where the re-pluck's rise accumulates to +25..40
+           cents while a bend covers a few. Deep fast vibrato can reach
+           the threshold too, and arming on it is harmless: the hold only
+           refuses ADJACENT-degree moves while still within 3/4 step of
+           the current target -- exactly the wobble that should hold. */
+        if (p->att_prev_valid
+            && fabs (detected_cents - p->att_hist[2]) > 18.0)
+            p->attack_hold = (int) (0.080 * p->fs);
+        p->att_hist[2] = p->att_hist[1];
+        p->att_hist[1] = p->att_hist[0];
+        p->att_hist[0] = detected_cents;
+        if (! p->att_prev_valid)
+        {
+            p->att_hist[1] = p->att_hist[2] = detected_cents;
+            p->att_prev_valid = true;
+        }
 
         /* MIDI Harmony override: while notes are held they ARE the target
            set — middle C (60) pivots to degree 4*edo, one EDO step per
@@ -1764,17 +1811,14 @@ static void run_detection (AeCorrector *p)
             cand = t.degree;
         }
 
-        /* Stickiness (hysteresis): stay on the previous target until the
-           detected pitch has travelled past the midpoint toward the new
-           candidate by an extra `stickiness` fraction of the half-gap.
-           Kills degree flicker when the step is smaller than vibrato. */
-        if (p->target_valid && cand != p->target_j && p->stickiness > 0.0)
+        /* Is the previous target still eligible to be held onto? (Shared
+           by stickiness and the attack hold below.) */
+        bool last_ok = false;
+        if (p->target_valid && cand != p->target_j)
         {
-            bool last_ok;
             if (midi_active)
             {
-                last_ok = false; /* the old target must still be held */
-                for (int i = 0; i < held_n; ++i)
+                for (int i = 0; i < held_n; ++i) /* must still be held */
                     if (held_j[i] == p->target_j)
                         last_ok = true;
             }
@@ -1783,10 +1827,56 @@ static void run_detection (AeCorrector *p)
                 const int last_deg = (int) (((p->target_j % p->edo) + p->edo) % p->edo);
                 last_ok = p->enabled_deg[last_deg];
             }
-            if (last_ok
-                && fabs (steps - (double) p->target_j)
-                     < (0.5 + 0.5 * p->stickiness) * fabs ((double) (cand - p->target_j)))
-                cand = p->target_j;
+        }
+
+        /* Stickiness (hysteresis): stay on the previous target until the
+           detected pitch has travelled past the midpoint toward the new
+           candidate by an extra `stickiness` fraction of the half-gap.
+           Kills degree flicker when the step is smaller than vibrato. */
+        if (p->target_valid && cand != p->target_j && p->stickiness > 0.0
+            && last_ok
+            && fabs (steps - (double) p->target_j)
+                 < (0.5 + 0.5 * p->stickiness) * fabs ((double) (cand - p->target_j)))
+            cand = p->target_j;
+
+        /* ATTACK HOLD: a plucked string STARTS SHARP -- tension modulation
+           reads +20..+40 cents on the first hops of every pluck, settling
+           over ~50 ms -- so inside a short window after each onset, a
+           pitch still within 3/4 of a step of the note that was ALREADY
+           SOUNDING is that note RE-PLUCKED, not a new degree: hold. A
+           genuinely different note reads past the threshold even
+           mid-transient (one step is a full 1.0 away) and commits
+           immediately, so real moves pay no latency.
+
+           The reference degree is att_hold_j, remembered for ~150 ms,
+           NOT target_j: a pick transient costs 1-2 unvoiced hops, and
+           the fresh-onset reset wipes target_valid at exactly the moment
+           the hold is needed most (measured: tv 0 on the re-pluck hop,
+           fresh snap into the sharp transient, one step up). Without all
+           of this, repeated plucks of one note flipped the target a step
+           UP at every attack whenever the string sat a few cents sharp
+           of the degree -- in 22-EDO (54.5-cent steps, 27.3 to the
+           boundary) that is much of a real guitar's fretting. */
+        if (p->attack_hold > 0 && p->att_hold_recent > 0)
+        {
+            /* the memory only -- never the degree the attack itself just
+               committed, or a wrong first snap would defend itself */
+            const long long hj = p->att_hold_j;
+            if (cand != hj && fabs (steps - (double) hj) < 0.75)
+            {
+                bool ok = false;
+                if (midi_active)
+                {
+                    for (int i = 0; i < held_n; ++i)
+                        if (held_j[i] == hj)
+                            ok = true;
+                }
+                else
+                    ok = p->enabled_deg[(int) (((hj % p->edo) + p->edo)
+                                               % p->edo)];
+                if (ok)
+                    cand = hj;
+            }
         }
 
         const double target_hz    = ae_degree_hz ((long) cand, p->edo, ref, period);
@@ -1831,6 +1921,16 @@ static void run_detection (AeCorrector *p)
         else
         {
             p->sustain_s += elapsed;
+        }
+        /* The degree that survives a pick's brief unvoiced dip.
+           Refreshed only from STABLE hops: a degree committed inside an
+           attack window is the transient's guess, not a note that was
+           sounding, and must not become the thing the next hold
+           protects. */
+        if (p->attack_hold <= 0)
+        {
+            p->att_hold_j      = p->target_j;
+            p->att_hold_recent = (int) (0.150 * p->fs);
         }
 
         /* Tolerance: dead zone around the target where the pitch is left
@@ -2063,6 +2163,7 @@ harmony_done: ;
         atomic_store_explicit (&p->shift_st_out, 0.0f, memory_order_relaxed);
         p->prev_pair_valid = false;
         p->target_valid    = false;
+        p->att_prev_valid  = false; /* silence breaks the jump comparison */
         p->sustain_s       = 0.0;
         /* Held ghosts keep their gate through the silence -- that is what
            "hold" means. Without the guard the very next unvoiced frame

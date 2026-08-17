@@ -401,6 +401,22 @@ typedef struct
     double atk_gain;             /* linear; its own volume, no envelope */
     double atk_fast, atk_slow;   /* onset follower (block RMS) */
     int    atk_refract;          /* samples until the next hit may fire */
+    int    attack_hold;          /* post-onset window (samples) in which the
+                                    quantizer refuses to move to an ADJACENT
+                                    degree: the pluck transient reads sharp,
+                                    and a re-plucked note is not a new one */
+    double att_hist[3];          /* detected pitch, last three hops: a JUMP
+                                    over ~15 ms also arms the hold, catching
+                                    re-plucks whose energy edge the onset
+                                    Schmitt misses under a still-ringing
+                                    string (the window smears the rise, so
+                                    one-hop deltas are too small to gate) */
+    bool   att_prev_valid;
+    long long att_hold_j;        /* the degree that survives a pick's brief
+                                    unvoiced dip: the fresh-onset reset wipes
+                                    target_valid exactly when the hold needs
+                                    it, so the hold keeps its own memory */
+    int    att_hold_recent;      /* ...valid for this many more samples */
     bool   atk_armed;            /* Schmitt: a hit fires once per onset EDGE;
                                     re-arms only when the fast/slow ratio
                                     collapses (note settled or ended), so a

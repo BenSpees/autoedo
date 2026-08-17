@@ -1793,6 +1793,100 @@ static void test_onset_clears_continuity (void)
     free (p); free (in);
 }
 
+/* A plucked string STARTS SHARP (+20..40 cents, settling over ~50 ms) --
+   and in 22-EDO the boundary is only 27.3 cents away, so with a few
+   cents of ordinary intonation offset every RE-PLUCK of the same note
+   flipped the target one step up (field report: "repeated notes of the
+   same pitch trigger the next highest edostep"). The attack hold keeps
+   the note that was already sounding through its own transient, via a
+   remembered degree that survives the 1-2 unvoiced hops a pick costs. */
+static void test_attack_hold (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 22);
+    ae_corrector_set_retune_ms (p, 20.0);
+    ae_corrector_set_transition_ms (p, 50.0);
+
+    /* a 22-EDO degree, played +12c sharp (real fretting), each pluck
+       starting +25c sharper still and settling with tau 40 ms */
+    const int deg = 4 * 22 + 7;
+    const double true_hz = ae_degree_hz (deg, 22, AE_REFERENCE_C0_HZ, 1200.0);
+    const double f0 = true_hz * pow (2.0, 12.0 / 1200.0);
+    const int total = 512 * 188, pluck_every = 512 * 47;
+    float *buf = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        const double t = (double) (i % pluck_every) / 48000.0;
+        const double sharp = 1.0 + 0.0146 * exp (-t / 0.040);
+        const double amp = 0.5 * exp (-t / 0.5);
+        ph += 2.0 * M_PI * f0 * sharp / 48000.0;
+        buf[i] = (float) (amp * (sin (ph) + 0.35 * sin (2.0 * ph)
+                                 + 0.15 * sin (3.0 * ph)));
+    }
+
+    int bad = 0, seen = 0;
+    for (int off = 0; off < total; off += 512)
+    {
+        ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        const float tgt = ae_corrector_target_hz (p);
+        if (off >= pluck_every && tgt > 0.0f) /* from the 2nd pluck on */
+        {
+            ++seen;
+            if (fabs (1200.0 * log2 ((double) tgt / true_hz)) > 27.0)
+                ++bad;
+        }
+    }
+    CHECK (seen > 100 && bad == 0,
+           "attack hold: re-plucked notes never flip a degree "
+           "(%d of %d hops off target)", bad, seen);
+
+    /* Negative control: a REAL step up commits fast -- the hold must not
+       tax legitimate moves. Same pluck shape, second half one degree up. */
+    {
+        AeCorrector *q = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (q, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (q, 22);
+        ae_corrector_set_retune_ms (q, 20.0);
+        ae_corrector_set_transition_ms (q, 50.0);
+        const double f1 = ae_degree_hz (deg + 1, 22, AE_REFERENCE_C0_HZ, 1200.0)
+                          * pow (2.0, 12.0 / 1200.0);
+        const int half = 512 * 94;
+        double ph2 = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const int since = i % pluck_every;
+            const double t = (double) since / 48000.0;
+            const double sharp = 1.0 + 0.0146 * exp (-t / 0.040);
+            const double amp = 0.5 * exp (-t / 0.5);
+            const double f = (i < half ? f0 : f1) * sharp;
+            ph2 += 2.0 * M_PI * f / 48000.0;
+            buf[i] = (float) (amp * (sin (ph2) + 0.35 * sin (2.0 * ph2)
+                                     + 0.15 * sin (3.0 * ph2)));
+        }
+        const double t1 = ae_degree_hz (deg + 1, 22, AE_REFERENCE_C0_HZ, 1200.0);
+        int settle_hops = -1, hops_after = 0;
+        for (int off = 0; off < total; off += 512)
+        {
+            ae_corrector_process (q, buf + off, NULL, NULL, 512);
+            if (off < half)
+                continue;
+            ++hops_after;
+            const float tgt = ae_corrector_target_hz (q);
+            if (settle_hops < 0 && tgt > 0.0f
+                && fabs (1200.0 * log2 ((double) tgt / t1)) < 27.0)
+                settle_hops = hops_after;
+        }
+        CHECK (settle_hops >= 0 && settle_hops <= 8,
+               "attack hold: a real step up still commits promptly "
+               "(%d blocks)", settle_hops);
+        ae_corrector_free (q); free (q);
+    }
+
+    ae_corrector_free (p); free (p); free (buf);
+}
+
 static void test_release_pitch_stability (void)
 {
     const int hold = 48000, rel = 3600, quiet = 48000;
@@ -4058,6 +4152,7 @@ int main (void)
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();
+    test_attack_hold();
     test_release_pitch_stability();
     test_midi_octave_fold();
     test_synth_envelope();
