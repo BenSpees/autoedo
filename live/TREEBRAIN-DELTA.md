@@ -1533,3 +1533,27 @@ Four field reports, one build. No UI beyond one new key.
   within 60 ms of the note ending. Note for the panel copy: a sampled
   choir on the HARMONY voices releases under `synthReleaseMs`, not
   `leadReleaseMs` — the two knobs rule their own rows.
+
+### 14b. Grid-residue diagnostics (2026-08-17, follow-up)
+
+Field state: samples read ~22 cents off against an outside reference at
+the correct C, "sounds right" only with the reference pushed to 265, and
+high notes fold an octave down. Both smell like SAVED-CONFIG residues,
+so status now carries the readout that settles it in one glance:
+
+- **`anchorHz`** (status): the REALIZED root-degree frequency in octave
+  4, after `refA4`/`refNote`, `rootNote`, `rootCents` and `stretchCents`
+  have all had their say. A rig that believes C = 261.626 but reads
+  258.3 here has a residue displacing every degree (and every sample).
+  Put it on the tuning card next to the reference field, and badge when
+  it disagrees with `refNoteHz` by more than a couple of cents -- that
+  disagreement IS the "everything is consistently off" bug, found
+  before a string is played.
+- **Octave-low folding**: any note above `detectMaxHz` (or above a low
+  `range` preset's ceiling) cannot be represented and detects an octave
+  down BY CONSTRUCTION. Badge when `detectMaxHz` (or the preset
+  ceiling) sits below ~1400 on a guitar channel.
+- **Show the Hz**: the note-debug display should print `detectedHz` /
+  `targetHz` (status) and `polyDetected[].hz` next to note names -- the
+  user asked for exactly this while diagnosing, and cents-only displays
+  hide reference-level mistakes that raw Hz makes obvious.

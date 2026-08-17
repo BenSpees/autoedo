@@ -1281,7 +1281,7 @@ static void status_refresh (App *app)
         "\"polyNotesActive\":%d,\"polyDetected\":%s,"
         "\"sampleInstruments\":%s,"
         "\"sampleNormDb\":%.1f,\"sampleOctaveApplied\":%d,\"sampleClipped\":%d,"
-        "\"stepCents\":%.4f,\"config\":%s}",
+        "\"stepCents\":%.4f,\"anchorHz\":%.4f,\"config\":%s}",
         st.running ? "true" : "false", AE_BUILD_ID, err,
         st.input_rate, st.output_rate,
         st.latency_samples, lat_ms, lat_ms,
@@ -1306,6 +1306,19 @@ static void status_refresh (App *app)
         ae_edo_step_cents_ex (app->engine_cfg.params.edo,
                               app->engine_cfg.params.period_cents > 0.0
                                 ? app->engine_cfg.params.period_cents : 1200.0),
+        /* The REALIZED anchor: the root degree's octave-4 frequency after
+           refA4/refNote, rootNote, rootCents AND stretchCents have all had
+           their say. One glance answers "is the grid where I think it is"
+           -- a rig that believes C = 261.6 but reads 258.3 here has a
+           residue (rootCents, stretch) displacing every degree. */
+        ae_degree_hz (4L * (app->engine_cfg.params.edo > 0
+                                ? app->engine_cfg.params.edo : 12),
+                      app->engine_cfg.params.edo > 0
+                          ? app->engine_cfg.params.edo : 12,
+                      app->engine_cfg.params.ref_hz > 0.0
+                          ? app->engine_cfg.params.ref_hz : 16.3516,
+                      app->engine_cfg.params.period_cents > 0.0
+                          ? app->engine_cfg.params.period_cents : 1200.0),
         cfg);
 
     pthread_mutex_unlock (&app->lock);
