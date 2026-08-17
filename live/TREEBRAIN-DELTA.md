@@ -1500,3 +1500,36 @@ explains the confusing half-working state in one line, and the fix
 re-asserts) is always the same. Your existing "may be older than this
 rig expects" message stays as the fallback for a genuinely old build
 on both.
+
+## 14. Field-fix batch 2026-08-17 — attack behaviour, triggering, release
+
+Four field reports, one build. No UI beyond one new key.
+
+- **Attack hold** (no key, always on): note identification leaned ~20
+  cents sharp and repeated plucks kept triggering the next 22-EDO step
+  up. Cause: a plucked string physically STARTS sharp (+20..40 cents,
+  settling ~50 ms) and the boundary is 27.3 cents away. The quantizer
+  now holds the note that was already sounding through its own attack
+  transient (re-plucks are recognised by energy onset, pitch jump, or
+  re-voicing after the pick's brief unvoiced dip); a genuinely new note
+  commits immediately. **If the rig compensated by moving the reference
+  (C=265 was reported dead-on), move it BACK to the true value on this
+  build** — the workaround was centring the grid on the attack instead
+  of the sustain, and it now makes the sustain read ~22 cents flat.
+- **`gateDb`** (float, live, 0 or −80..−30; 0 = default −56): the one
+  noise/trigger floor, in dBFS RMS. Quiet playing losing notes = lower
+  it. Belongs beside the detection-range controls; echo shows the value
+  in force. Feature-detect: `gateDb` in the config echo (chain: after
+  `polyNotes`).
+- **Sampled-lead triggering** (no key): the energy onset was the ONLY
+  strike trigger, so re-plucks under a still-ringing string and legato
+  note changes never struck — "loses repeated/successive notes". The
+  lead sampler now also strikes on a degree change while voiced and on
+  a detected re-attack of the same note, with a 40 ms de-dupe guard.
+- **Release fixes**: a superseded/finished let-ring slot now decays to
+  −80 dB before it is freed (−60 was an audible cut on dense sustained
+  textures — "fades out, then cuts off at a quiet volume"), and the
+  suite pins that `leadReleaseMs: 5` really silences a sampled lead
+  within 60 ms of the note ending. Note for the panel copy: a sampled
+  choir on the HARMONY voices releases under `synthReleaseMs`, not
+  `leadReleaseMs` — the two knobs rule their own rows.

@@ -417,6 +417,20 @@ typedef struct
                                     target_valid exactly when the hold needs
                                     it, so the hold keeps its own memory */
     int    att_hold_recent;      /* ...valid for this many more samples */
+    int    att_seq;              /* counts attack-hold ARMING EDGES (energy
+                                    onset, pitch jump, re-voice): the sample
+                                    lead strikes on these too, because the
+                                    Schmitt misses re-plucks under ring */
+    double gate_rms;             /* gateDb as linear RMS; <= 0 = the default
+                                    AE_GATE_RMS. Scales the voicing gate,
+                                    the onset floors and the envelope gate
+                                    together -- one knob, one meaning */
+    long long smp_lead_deg;      /* lead sampler: last degree struck/heard */
+    bool   smp_lead_deg_valid;
+    int    smp_guard;            /* samples until another lead strike may
+                                    fire (de-dupes onset + degree + re-attack
+                                    triggers landing on one event) */
+    int    att_seq_seen;         /* lead sampler's read cursor on att_seq */
     bool   atk_armed;            /* Schmitt: a hit fires once per onset EDGE;
                                     re-arms only when the fast/slow ratio
                                     collapses (note settled or ended), so a
@@ -652,6 +666,13 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
 /* Supply the strike-velocity reference (linear peak) instead of letting
    the engine observe one; negative = observe. See vel_ref_fixed. */
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin);
+
+/* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
+   between blocks. */
+static inline void ae_corrector_set_gate (AeCorrector *p, double rms)
+{
+    p->gate_rms = rms > 0.0 && rms < 0.5 ? rms : 0.0;
+}
 
 /* POLY sample mode: cap the chord sampler's polyphony (1..6, live;
    <1 = uncapped). */

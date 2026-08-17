@@ -3972,6 +3972,264 @@ static void test_sample_ring (void)
    is a real tail, and a long one must outlast a short one. The harmony's
    synthReleaseMs is held identical across the two runs, which is the whole
    point of the key: the lead's envelope is no longer the harmony's. */
+/* Field report: "the threshold to trigger notes is too high, I'm losing
+   my quiet notes" and "it loses repeated/successive notes a lot". Three
+   fixes under test: gateDb scales every trigger floor; a re-pluck under
+   a still-ringing string strikes via the attack-hold's arming (the
+   energy Schmitt cannot see it); a legato note change strikes on the
+   degree change (no energy edge exists at all). */
+static void test_sample_triggering (void)
+{
+    const char *root = "/tmp/ae-smp-trig";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "triggering: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000; /* sustained sine */
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    const int total = 512 * 188, t1 = 512 * 94;
+    float *buf = calloc ((size_t) total, sizeof (float));
+
+    /* 1. QUIET NOTES: a pluck at ~-52 dBFS RMS. The default gate's onset
+       floor sits just above it -- no strike; gateDb -65 hears it. */
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        ae_corrector_set_gate (p, pass == 0 ? 0.0 /* default */
+                                            : pow (10.0, -65.0 / 20.0));
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+               "triggering: bank loads (%s)", err);
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        ae_corrector_set_lead_env (p, 5.0, 400.0);
+
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const double t = i < 512 * 20 ? -1.0
+                            : (double) (i - 512 * 20) / 48000.0;
+            const double amp = t < 0.0 ? 0.0 : 0.003 * exp (-t / 0.5);
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            buf[i] = (float) (amp * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        double e = 0.0;
+        for (int i = 512 * 30; i < total; ++i)
+            e += (double) buf[i] * buf[i];
+        if (pass == 0)
+            CHECK (e < 1e-6,
+                   "gateDb: below the default floor stays silent (%.3g) -- "
+                   "if this fires, lower the fixture level", e);
+        else
+            CHECK (e > 1e-4,
+                   "gateDb: -65 dB hears the quiet pluck (energy %.3g)", e);
+        ae_corrector_free (p); free (p);
+    }
+
+    /* 2. RE-PLUCK UNDER RING + 3. LEGATO DEGREE CHANGE, one corrector:
+       first half re-plucks A3 (sharp attack, ring between); second half
+       steps to B3 with NO amplitude edge at all. Count strikes by live
+       slots (400 ms release keeps every struck slot alive to the end). */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+               "triggering: bank loads again (%s)", err);
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        ae_corrector_set_lead_env (p, 5.0, 2000.0); /* slots outlive the test */
+
+        const int pluck2 = 512 * 47; /* second pluck of A3, under ring */
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            double f, amp;
+            if (i < t1)
+            {
+                const int since = i % pluck2;
+                const double t = (double) since / 48000.0;
+                f   = 220.0 * (1.0 + 0.0146 * exp (-t / 0.040));
+                amp = 0.4 * exp (-t / 0.5);
+            }
+            else
+            {   /* legato: pitch steps a whole tone, amplitude steady */
+                f   = 246.94;
+                amp = 0.4;
+            }
+            ph += 2.0 * M_PI * f / 48000.0;
+            buf[i] = (float) (amp * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        int live_mid = 0, live_end = 0;
+        for (int off = 0; off < total; off += 512)
+        {
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+            if (off == t1 - 512 || off == total - 512)
+            {
+                int live = 0;
+                for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                    if (p->smp[AE_HARM_VOICES][sl].rec != NULL)
+                        ++live;
+                if (off < t1) live_mid = live; else live_end = live;
+            }
+        }
+        CHECK (live_mid >= 2,
+               "re-pluck: the second pluck under ring STRIKES "
+               "(%d live slots; the Schmitt alone leaves 1)", live_mid);
+        CHECK (live_end >= live_mid + 1,
+               "legato: a degree change with no energy edge strikes "
+               "(%d -> %d live slots)", live_mid, live_end);
+        ae_corrector_free (p); free (p);
+    }
+
+    free (buf);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* Field report: leadReleaseMs 5 but a sampled choir faded far longer and
+   then CUT at a quiet volume. Two properties pinned here: a superseded
+   let-ring slot decays to -80 dB before it is freed (at -60 the cut was
+   audible on dense sustained textures after bank makeup gain), and the
+   lead's own release really silences the output at the pace set. */
+static void test_sample_release (void)
+{
+    const char *root = "/tmp/ae-smp-rel";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "release: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 6 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    /* 1. Release-ceiling slot lifetime: superseded under a 200 ms
+       ceiling, the old slot must survive past 1.6 s (freed at -80 dB =
+       9.2 time constants) -- the old -60 dB threshold freed it by 1.4 s. */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+               "release: bank loads (%s)", err);
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        ae_corrector_set_lead_env (p, 5.0, 200.0);
+
+        const int t1 = 512 * 94, total = 512 * 400; /* step at ~1 s, run 4.3 s */
+        float *buf = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const double f = i < t1 ? 220.0 : 246.94; /* legato step strikes */
+            ph += 2.0 * M_PI * f / 48000.0;
+            buf[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        int live_16 = 0, live_22 = 0;
+        const int c16 = t1 + (int) (1.6 * 48000.0) / 512 * 512;
+        const int c22 = t1 + (int) (2.2 * 48000.0) / 512 * 512;
+        for (int off = 0; off < total; off += 512)
+        {
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+            if (off == c16 || off == c22)
+            {
+                int live = 0;
+                for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                    if (p->smp[AE_HARM_VOICES][sl].rec != NULL)
+                        ++live;
+                if (off == c16) live_16 = live; else live_22 = live;
+            }
+        }
+        CHECK (live_16 >= 2,
+               "release ceiling: the superseded slot decays to -80 dB "
+               "before it is freed (%d live at +1.6 s; -60 dB freed it "
+               "by 1.4 s)", live_16);
+        CHECK (live_22 <= live_16 - 1,
+               "release ceiling: ...and it IS freed once finished "
+               "(%d live at +2.2 s)", live_22);
+        ae_corrector_free (p); free (p); free (buf);
+    }
+
+    /* 2. The lead's release is honest: leadReleaseMs 5, input cut dead --
+       the sampled output must be silent within 60 ms. */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+               "release: bank loads twice (%s)", err);
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        ae_corrector_set_lead_env (p, 5.0, 5.0);
+
+        const int t1 = 512 * 94, total = 512 * 141;
+        float *buf = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < t1; ++i)
+        {
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            buf[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        double tail = 0.0;
+        for (int i = t1 + (int) (0.060 * 48000.0); i < total; ++i)
+            tail += (double) buf[i] * buf[i];
+        CHECK (tail < 1e-6,
+               "lead release 5 ms: the sampled lead is SILENT 60 ms after "
+               "the note ends (tail energy %.3g)", tail);
+        ae_corrector_free (p); free (p); free (buf);
+    }
+
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_lead_envelope (void)
 {
     double tail[2] = { 0.0, 0.0 };
@@ -4179,6 +4437,8 @@ int main (void)
     test_velocity_relative();
     test_velocity_ref_supplied();
     test_sample_ring();
+    test_sample_triggering();
+    test_sample_release();
     test_lead_envelope();
     test_bypass_output();
     test_lead_wet_tap();

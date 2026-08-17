@@ -9,7 +9,10 @@
 #define AE_SQRT2    1.41421356237309504880
 #define AE_MIN_FREQ 65.0    /* default lowest detectable pitch (Hz) */
 #define AE_MAX_FREQ 1600.0  /* default highest detectable pitch (Hz) */
-#define AE_GATE_RMS 0.0015  /* ~ -56 dBFS noise gate for detection */
+#define AE_GATE_RMS 0.0015  /* ~ -56 dBFS default noise gate; gateDb
+                               overrides per rig (p->gate_rms) -- no fixed
+                               floor fits every pickup's level */
+#define GATE(p) ((p)->gate_rms > 0.0 ? (p)->gate_rms : AE_GATE_RMS)
 
 static double dclamp (double v, double lo, double hi)
 {
@@ -711,6 +714,9 @@ void ae_corrector_reset (AeCorrector *p)
     p->attack_hold     = 0;
     p->att_hold_recent = 0;
     p->att_hold_j      = 0;
+    p->smp_guard          = 0;
+    p->smp_lead_deg_valid = false;
+    p->att_seq_seen       = p->att_seq;
     p->prev_pair_valid = false;
     p->prev_det_cents = p->prev_tgt_cents = 0.0;
     p->in_transition  = false;
@@ -1294,7 +1300,12 @@ static double sample_mix_slots (AeCorrector *p, int v, double fade_step,
         else if (p->smp[v][k].releasing)
         {
             p->smp[v][k].renv -= p->smp[v][k].renv * rel_a;
-            if (p->smp[v][k].renv < 1e-3)
+            /* Freed at -80 dB, not -60: a slot cut at -60 dB is a step a
+               dense sustained texture (choir) makes audible, especially
+               after the bank's makeup gain -- "fades out, then cuts off
+               at a quiet volume". At -80 the exponential has genuinely
+               finished. */
+            if (p->smp[v][k].renv < 1e-4)
             {
                 p->smp[v][k].rec       = NULL;
                 p->smp[v][k].releasing = false;
@@ -1455,7 +1466,7 @@ static void detect_onset (AeCorrector *p, int num_samples)
        gated to a clean zero so "note stopped" transmits as silence rather
        than as the noise floor. */
     {
-        const double lvl = p->atk_fast > AE_GATE_RMS
+        const double lvl = p->atk_fast > GATE (p)
                                ? p->atk_fast * AE_SQRT2 : 0.0;
         atomic_store_explicit (&p->env_out,
                                (float) (lvl > 1.0 ? 1.0 : lvl),
@@ -1465,12 +1476,12 @@ static void detect_onset (AeCorrector *p, int num_samples)
     /* One pulse per onset EDGE (Schmitt: re-arms only when the fast/slow
        ratio collapses, so a refractory expiring mid-note cannot double). */
     if (! p->atk_armed
-        && (p->atk_fast < 1.2 * p->atk_slow || p->atk_fast < AE_GATE_RMS))
+        && (p->atk_fast < 1.2 * p->atk_slow || p->atk_fast < GATE (p)))
         p->atk_armed = true;
 
     p->onset_pulse = false;
     if (p->atk_armed && p->atk_refract <= 0
-        && p->atk_fast > 2.0 * AE_GATE_RMS
+        && p->atk_fast > 2.0 * GATE (p)
         && p->atk_fast > 2.5 * slow_prev)
     {
         p->onset_pulse = true;
@@ -1489,6 +1500,8 @@ static void detect_onset (AeCorrector *p, int num_samples)
            a plucked string starts sharp, and the snap must not believe
            the first hops of the transient over the note that was already
            sounding. */
+        if (p->attack_hold <= 0)
+            ++p->att_seq;
         p->attack_hold = (int) (0.080 * p->fs);
     }
     if (p->attack_hold > 0)
@@ -1645,7 +1658,7 @@ static void run_detection (AeCorrector *p)
     p->last_detect_at = p->in_write;
 
     const AeYinResult res = ae_yin_process (&p->detector, p->frame, p->frame_size);
-    const bool now_voiced = res.voiced && res.frequency_hz > 0.0 && rms > AE_GATE_RMS;
+    const bool now_voiced = res.voiced && res.frequency_hz > 0.0 && rms > GATE (p);
 
     /* Vocal-tract estimate for LPC vowel mode, on the newest window of the
        same frame the detector just used. Runs whether or not the frame is
@@ -1728,7 +1741,11 @@ static void run_detection (AeCorrector *p)
            arm BEFORE the quantizer runs this hop, or the transient snaps
            first and poisons the remembered degree with its own commit. */
         if ((! p->voiced || ! p->primed) && p->att_hold_recent > 0)
+        {
+            if (p->attack_hold <= 0)
+                ++p->att_seq;
             p->attack_hold = (int) (0.080 * p->fs);
+        }
 
         /* Re-plucks the energy onset MISSES (string still ringing, so the
            fast/slow contrast is small) still announce themselves in
@@ -1742,7 +1759,11 @@ static void run_detection (AeCorrector *p)
            the current target -- exactly the wobble that should hold. */
         if (p->att_prev_valid
             && fabs (detected_cents - p->att_hist[2]) > 18.0)
+        {
+            if (p->attack_hold <= 0)
+                ++p->att_seq;
             p->attack_hold = (int) (0.080 * p->fs);
+        }
         p->att_hist[2] = p->att_hist[1];
         p->att_hist[1] = p->att_hist[0];
         p->att_hist[0] = detected_cents;
@@ -2733,7 +2754,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     }
     detect_onset (p, num_samples); /* env_out, the gate, the vel reference */
 
-    const bool gate = p->atk_fast > AE_GATE_RMS;
+    const bool gate = p->atk_fast > GATE (p);
     p->voiced = gate;
     atomic_store_explicit (&p->voiced_out, gate, memory_order_relaxed);
     atomic_store_explicit (&p->detected_hz_out, 0.0f, memory_order_relaxed);
@@ -3108,6 +3129,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const double vel = p->smp_vel_fixed >= 0.0 ? p->smp_vel_fixed
             : vel_from_peak (p, p->atk_fast * AE_SQRT2);
         const int L = AE_HARM_VOICES;
+        if (p->smp_guard > 0)
+            p->smp_guard -= num_samples;
         if (p->onset_pulse)
         {
             p->smp_pending[L] = true;
@@ -3122,6 +3145,45 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             {
                 sample_strike (p, L, hz, vel);
                 p->smp_pending[L] = false;
+                p->smp_guard = (int) (0.040 * p->fs);
+            }
+        }
+
+        /* The energy Schmitt is NOT the only note edge -- it misses
+           re-plucks under a still-ringing string (small fast/slow
+           contrast) and legato notes that never dip at all, which played
+           as "losing repeated and successive notes" on a sampled lead.
+           Two more triggers, one guard against double-firing:
+           - the corrected DEGREE changed while voiced: a hammer-on, a
+             run, or a pick the Schmitt slept through -- a new note is a
+             new strike;
+           - the attack hold ARMED (energy onset, pitch jump, re-voice
+             after a pick's dip) while the envelope actually rose
+             (fast > 1.3x slow): a re-pluck of the SAME note. The
+             envelope condition keeps deep vibrato -- which can arm the
+             hold -- from machine-gunning the sample. */
+        {
+            const int ldeg = atomic_load_explicit (&p->lead_deg_out,
+                                                   memory_order_relaxed);
+            bool want = false;
+            if (hz > 0.0 && ldeg != AE_HARM_DEG_OFF)
+            {
+                if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg)
+                    want = true;
+                if (p->att_seq != p->att_seq_seen
+                    && p->atk_fast > 1.3 * p->atk_slow)
+                    want = true;
+                p->smp_lead_deg       = ldeg;
+                p->smp_lead_deg_valid = true;
+            }
+            else
+                p->smp_lead_deg_valid = false;
+            p->att_seq_seen = p->att_seq;
+            if (want && p->smp_guard <= 0 && hz > 0.0)
+            {
+                sample_strike (p, L, hz, vel);
+                p->smp_pending[L] = false; /* this event is served */
+                p->smp_guard = (int) (0.040 * p->fs);
             }
         }
         sample_repitch (p, L, hz);

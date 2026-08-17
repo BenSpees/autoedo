@@ -258,6 +258,7 @@ static void config_defaults (App *app)
     c->params.sample_ring     = true; /* let-ring: struck notes finish */
     c->params.sample_vel_ref  = -1.0; /* observe the reference, "auto" */
     c->params.poly_notes      = 6;    /* chord sampler polyphony cap */
+    c->params.gate_db         = 0.0;  /* 0 = the built-in -56 dBFS floor */
     c->sample_root[0] = c->sample_manifest[0] = '\0';
     snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
     c->sample_octave = AE_SMP_OCTAVE_AUTO;
@@ -431,7 +432,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
               "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
-              "\"polyMode\":%s,\"polyNotes\":%d,"
+              "\"polyMode\":%s,\"polyNotes\":%d,\"gateDb\":%.4g,"
               "\"sampleVelRefDb\":%s,"
               "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
@@ -456,6 +457,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.follow_env,
               c->poly_mode ? "true" : "false",
               c->params.poly_notes,
+              c->params.gate_db != 0.0 ? c->params.gate_db : -56.0,
               vel_ref_str,
               c->sample_instrument, sample_oct_str,
               c->send_channel,
@@ -629,6 +631,8 @@ static bool config_apply_json (App *app, const char *json)
     }
     if (ae_json_get_number (json, "polyNotes", &num))
         c->params.poly_notes = (int) num_clamp (num, 1.0, 6.0);
+    if (ae_json_get_number (json, "gateDb", &num))
+        c->params.gate_db = num == 0.0 ? 0.0 : num_clamp (num, -80.0, -30.0);
     if (ae_json_get_string (json, "quality", str, sizeof (str)))
     {
         if (quality_lookup (str) != quality_lookup (app->quality_name))

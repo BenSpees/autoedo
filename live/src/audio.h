@@ -146,6 +146,10 @@ typedef struct
     bool     sample_ring;            /* let-ring: a struck voice finishes on
                                         its own decay THROUGH the next
                                         strike. false = damp on repitch */
+    double   gate_db;                /* noise/trigger gate in dBFS (RMS):
+                                        the voicing gate, onset floors and
+                                        envelope gate all scale from it.
+                                        0 = the built-in default (-56) */
     int      poly_notes;             /* POLY chord sampler: strike at most
                                         this many simultaneous notes (1..6).
                                         Live; only meaningful with polyMode
