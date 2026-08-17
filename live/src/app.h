@@ -55,7 +55,8 @@ AeAudioEngine *ae_app_engine_live (AeApp *app);
 
 /* The configured 1-based live output channel (0 = stereo on 1-2): where an
    embedding host should land this instance's PA feed, same semantics as the
-   standalone engine's own device routing. */
+   standalone engine's own device routing. Lock-free -- safe to read per
+   block from the host's audio thread. */
 int ae_app_output_channel (AeApp *app);
 
 #endif /* AUTOEDO_APP_H */

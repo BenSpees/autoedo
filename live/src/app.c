@@ -99,6 +99,10 @@ struct AeApp
        (ae_app_engine_live). Cleared -- with one block's grace -- BEFORE the
        engine it points at is stopped. */
     _Atomic (AeAudioEngine *) engine_live;
+    /* Lock-free mirror of engine_cfg.output_channel, for the same caller:
+       the host routes the PA feed per block and must not take app->lock
+       (a config restart holds it across the teardown grace). */
+    _Atomic int out_channel_live;
     char            engine_err[256];
 
     /* IR points (v0.4-delta B7): the librarian's {path, hash} plus the
@@ -1538,6 +1542,9 @@ static void api_config_post (App *app, const char *body, AeHttpResponse *resp)
 
     const bool restart = config_apply_json (app, body);
     config_sync (app);
+    atomic_store_explicit (&app->out_channel_live,
+                           app->engine_cfg.output_channel,
+                           memory_order_relaxed);
     if (restart || app->engine == NULL)
         engine_restart_locked (app); /* reloads every configured IR too */
     else
@@ -1909,6 +1916,9 @@ AeApp *ae_app_create (const AeAppOptions *opt, char *err, size_t err_len)
     app->engine_cfg.embed_rate  = opt->embed_rate;
     app->engine_cfg.embed_block = opt->embed_block;
     config_sync (app);
+    atomic_store_explicit (&app->out_channel_live,
+                           app->engine_cfg.output_channel,
+                           memory_order_relaxed);
 
     pthread_mutex_lock (&app->lock);
     engine_restart_locked (app);
@@ -2005,8 +2015,6 @@ AeAudioEngine *ae_app_engine_live (AeApp *app)
 
 int ae_app_output_channel (AeApp *app)
 {
-    pthread_mutex_lock (&app->lock);
-    const int ch = app->engine_cfg.output_channel;
-    pthread_mutex_unlock (&app->lock);
-    return ch;
+    /* Lock-free: read per block by the embedding host's audio thread. */
+    return atomic_load_explicit (&app->out_channel_live, memory_order_relaxed);
 }
