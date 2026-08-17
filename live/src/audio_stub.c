@@ -304,3 +304,5 @@ void ae_audio_engine_stop (AeAudioEngine *e)
     ae_corrector_free (&e->corrector);
     free (e);
 }
+
+bool ae_audio_backend_embedded (void) { return false; }

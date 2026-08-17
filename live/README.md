@@ -251,13 +251,37 @@ conformance checklist — is specced in [`CONTROL.md`](CONTROL.md).
 
 ```bash
 make          # -> build/autoedo  (CoreAudio backend on macOS)
-make test     # DSP + JSON self-tests (no audio hardware needed)
+make lib      # -> build/libautoedo.a  (the engine as an embeddable library)
+make test     # DSP + JSON self-tests + embed-library tests (no hardware)
 ./build/autoedo --port 8017
 ```
 
 On non-macOS hosts `make` builds the same app against a stub audio backend
 (`src/audio_stub.c`) that feeds the corrector a wobbling test tone — useful
 for developing the UI/API and running the self-tests anywhere.
+
+## Embedding (the engine as a library)
+
+Treebrain's record-send ask B2: the whole engine — corrector, harmony,
+sampler, IRs, the JSON config grammar and optionally its own HTTP/WS control
+server — builds as `libautoedo.a` and runs inside a host process, fed mono
+float32 blocks instead of opening a device. Public API: `src/embed.h`
+(create / process / destroy; config via the same JSON grammar as
+`POST /api/config`; the same web UI served in-process when a port is given,
+so an existing controller cannot tell the engine moved in). Feature-detect:
+the status echo carries `"embedded":true`.
+
+`ae_embed_process()` returns two things per block: the live PA feed (what
+the standalone engine's output jack carried, `bypassOutput` semantics
+included, routed per the instance's own `outputChannel`) and the **chain
+feed** — what the host's own downstream chain (looper / FX / spaces) should
+hear. Under bypass the chain feed always carries the dry input at unity:
+`bypassOutput:"mute"` governs the PA jack, never the chain, so a PA-side
+mute can never silence the host looper's source.
+
+The standalone app is unchanged in behaviour and stays the answer for a rig
+that wants the engine as its own process; both faces share `src/app.c`
+verbatim, so they cannot drift apart.
 
 ## Layout
 
@@ -288,11 +312,16 @@ live/
 │   ├── audio_win.c     Windows 10 WASAPI backend (event-driven capture /
 │   │                   render threads) + winmm MIDI
 │   ├── audio_stub.c    test-tone backend for other hosts (dev/CI)
+│   ├── audio_embed.c   embed backend: the HOST pushes blocks (make lib)
 │   ├── httpd.[ch]      tiny embedded HTTP server (127.0.0.1 only; POSIX
 │   │                   sockets or Winsock)
 │   ├── json.[ch]       minimal JSON helpers
-│   └── main.c          config persistence + JSON API + lifecycle
-└── tests/selftest.c    tuning/YIN/correction/harmony/JSON self-tests
+│   ├── app.[ch]        the application core: config persistence + JSON
+│   │                   API + lifecycle, shared by both faces below
+│   ├── main.c          the standalone process (args + signal loop)
+│   └── embed.[ch]      the library face a host process links (make lib)
+├── tests/selftest.c    tuning/YIN/correction/harmony/JSON self-tests
+└── tests/embedtest.c   embed-library tests (create/config/process/status)
 ```
 
 ## Latency

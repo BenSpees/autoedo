@@ -2,7 +2,9 @@
 #
 #   make            build ./build/autoedo — CoreAudio on macOS, WASAPI on
 #                   Windows (MSYS2/mingw-w64), test-tone stub elsewhere
-#   make test       build and run the DSP/JSON self-tests
+#   make lib        build ./build/libautoedo.a — the engine as a library a
+#                   host mixes in-process (embed backend; public API src/embed.h)
+#   make test       build and run the DSP/JSON self-tests + the embed tests
 #   make clean
 #
 # Cross-compile the Windows build from Linux/macOS:
@@ -29,8 +31,11 @@ else
   PLATFORM ?= stub
 endif
 
-SRC    := src/yin.c src/corrector.c src/json.c src/httpd.c src/main.c src/ir_load.c \
-          src/sampler.c src/polyf0.c
+# The application core (everything but main() and the audio backend) is
+# shared verbatim between the standalone binary and the library build.
+CORESRC := src/yin.c src/corrector.c src/json.c src/httpd.c src/app.c \
+           src/ir_load.c src/sampler.c src/polyf0.c
+SRC    := $(CORESRC) src/main.c
 CXXSRC := src/shifter.cpp
 
 ifeq ($(PLATFORM),mac)
@@ -52,7 +57,19 @@ OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC)) \
        $(patsubst src/%.cpp,$(BUILD)/%.opp,$(CXXSRC)) \
        $(BUILD)/irconv.opp
 
+# The library: the same core, the embed backend instead of a device one,
+# and the embed.h face. No main().
+LIBSRC := $(CORESRC) src/embed.c src/audio_embed.c
+LIBOBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(LIBSRC)) \
+          $(patsubst src/%.cpp,$(BUILD)/%.opp,$(CXXSRC)) \
+          $(BUILD)/irconv.opp
+
 all: $(BUILD)/autoedo$(EXE)
+
+lib: $(BUILD)/libautoedo.a
+
+$(BUILD)/libautoedo.a: $(LIBOBJ)
+	$(AR) rcs $@ $(LIBOBJ)
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -77,7 +94,7 @@ $(BUILD)/autoedo$(EXE): $(OBJ)
 	$(CXX) $(CXXFLAGS) $(OBJ) $(LDLIBS) -o $@
 
 # Headers are few; rebuild everything when any of them changes.
-$(OBJ): $(wildcard src/*.h)
+$(OBJ) $(LIBOBJ): $(wildcard src/*.h)
 
 $(BUILD)/selftest: tests/selftest.c src/yin.c src/corrector.c src/json.c src/ir_load.c \
                    src/sampler.c src/polyf0.c src/audio_stub.c $(BUILD)/shifter.opp $(BUILD)/irconv.opp | $(BUILD)
@@ -94,10 +111,18 @@ $(BUILD)/selftest: tests/selftest.c src/yin.c src/corrector.c src/json.c src/ir_
 	    $(BUILD)/t-sampler.o $(BUILD)/t-polyf0.o \
 	    $(BUILD)/shifter.opp $(BUILD)/irconv.opp -lm -lpthread -o $@
 
-test: $(BUILD)/selftest
+# The embed tests drive the public library face end to end (create, config
+# JSON, blocks through, status echo, destroy), linked against the real lib.
+$(BUILD)/embedtest: tests/embedtest.c src/embed.h $(BUILD)/libautoedo.a
+	$(CC) $(CFLAGS) -c tests/embedtest.c -o $(BUILD)/embedtest-main.o
+	$(CXX) $(CXXFLAGS) $(BUILD)/embedtest-main.o $(BUILD)/libautoedo.a \
+	    $(LDLIBS) -lm -lpthread -o $@
+
+test: $(BUILD)/selftest $(BUILD)/embedtest
 	$(BUILD)/selftest
+	$(BUILD)/embedtest
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean
+.PHONY: all lib test clean

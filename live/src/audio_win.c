@@ -1079,3 +1079,5 @@ void ae_audio_engine_stop (AeAudioEngine *e)
     if (e != NULL)
         engine_teardown (e);
 }
+
+bool ae_audio_backend_embedded (void) { return false; }

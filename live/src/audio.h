@@ -239,6 +239,11 @@ typedef struct
                                             doubled analysis block (more latency,
                                             chord-clean). Restart-scoped, lives
                                             with the detection-range controls */
+    /* Embed backend only (audio_embed.c): the HOST's audio format, set by
+       the embedding process at create time -- a fact about the process, so
+       no JSON key writes it. Device backends ignore both. 0 = defaults. */
+    double       embed_rate;
+    int          embed_block;
     AeLiveParams params;
 } AeEngineConfig;
 
@@ -363,5 +368,22 @@ bool ae_audio_engine_load_samples (AeAudioEngine *e, const char *root,
 bool ae_audio_engine_load_ir (AeAudioEngine *e, int point, const char *path,
                               const char *hash, double predelay_ms,
                               char *err, size_t err_len);
+
+/* Which backend this binary carries: true = the embed backend (the host
+   process owns the device and pushes blocks), false = a device backend.
+   Echoed in status as "embedded" so a UI can hide the device pickers. */
+bool ae_audio_backend_embedded (void);
+
+/* EMBED BACKEND ONLY (audio_embed.c defines it; device backends do not).
+   Host audio thread: run `n` mono input frames through the engine.
+   out_l/out_r get the live PA feed (what the standalone engine's output
+   jack carries -- bypassOutput semantics included). `chain` gets the feed
+   for the host's own downstream chain (looper / FX / spaces): the same
+   live mono mix, except that bypass ALWAYS passes the dry input through
+   at unity -- bypassOutput:"mute" governs the PA jack, never the chain,
+   because a bypassed corrector must not silence the looper's source.
+   Any of the three outputs may be NULL. Returns frames written. */
+int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
+                             float *out_r, float *chain, int n);
 
 #endif /* AUTOEDO_AUDIO_H */
