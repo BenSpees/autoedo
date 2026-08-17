@@ -70,6 +70,14 @@ typedef struct
     double   lead_gain_db;    /* -60..+12: the lead's own fader, after the
                                  wet/dry mix, before the output sum. The
                                  ghosts never pass through it */
+    double   lead_sound_gain_db; /* -60..+12: the SYNTH/SAMPLE lead sound's
+                                 own trim -- inert (unity) when leadSource
+                                 is "voice", so dialing a sample in never
+                                 moves the instrument's own level. The
+                                 panel's fader; leadGainDb stays the whole-
+                                 lead fader the ghost-as-control recipes
+                                 ride (a voice lead muted at -60 with a
+                                 unison ghost still tracking it) */
 
     /* The record send: a separate output channel for the recorder, so the
        stem on disk and the level on stage are independent. Content/gain/

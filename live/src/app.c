@@ -245,6 +245,7 @@ static void config_defaults (App *app)
     /* follow link defaults live on App, not AeEngineConfig: set at startup */
     c->params.lead_on         = true;
     c->params.lead_gain_db    = 0.0;
+    c->params.lead_sound_gain_db = 0.0; /* the synth/sample sound's own trim */
     c->params.lead_shift_steps = 0;
     c->params.output_gain_db  = 0.0;
 
@@ -394,7 +395,8 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"refNote\":%d,\"refNoteHz\":%.6g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
-              "\"bypass\":%s,\"bypassOutput\":\"%s\",\"leadOn\":%s,\"leadGainDb\":%.4g,\"leadShiftSteps\":%d,"
+              "\"bypass\":%s,\"bypassOutput\":\"%s\",\"leadOn\":%s,\"leadGainDb\":%.4g,"
+              "\"leadSoundGainDb\":%.4g,\"leadShiftSteps\":%d,"
               "\"outputGainDb\":%.6g,"
               "\"bufferFrames\":%d,\"inputChannel\":%d,\"outputChannel\":%d,\"inputUid\":\"",
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
@@ -409,6 +411,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.bypass_mute ? "mute" : "dry",
               c->params.lead_on ? "true" : "false",
               c->params.lead_gain_db,
+              c->params.lead_sound_gain_db,
               c->params.lead_shift_steps,
               c->params.output_gain_db, c->buffer_frames, c->input_channel,
               c->output_channel);
@@ -786,6 +789,11 @@ static bool config_apply_json (App *app, const char *json)
     /* Harmony. */
     if (ae_json_get_number (json, "leadGainDb", &num))
         c->params.lead_gain_db = num_clamp (num, -60.0, 12.0);
+    /* The SYNTH/SAMPLE lead sound's own trim: inert (unity) when the lead
+       source is "voice", so dialing a sample sound in never moves the
+       instrument's own level. leadGainDb stays the whole-lead fader. */
+    if (ae_json_get_number (json, "leadSoundGainDb", &num))
+        c->params.lead_sound_gain_db = num_clamp (num, -60.0, 12.0);
     if (ae_json_get_number (json, "leadShiftSteps", &num))
         c->params.lead_shift_steps = (int) num_clamp (num, -72.0, 72.0);
     if (ae_json_get_bool (json, "harmOn", &b))

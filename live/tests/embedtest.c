@@ -183,6 +183,22 @@ int main (void)
     }
     ae_embed_config (inst, "{\"leadOn\":true}");
 
+    /* leadSoundGainDb touches only a synth/sample lead sound: with the
+       lead source at "voice" (the default), even -60 must not move the
+       instrument's level on the PA feed. */
+    ae_embed_config (inst, "{\"leadSoundGainDb\":-60}");
+    for (int b2 = 0; b2 < 10; ++b2)
+    {
+        tone_block (in, BLOCK, 35.0, &phase);
+        ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+    }
+    CHECK (peak (out_l, BLOCK) > 0.05f,
+           "leadSoundGainDb is inert for a voice lead");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"leadSoundGainDb\":-60") != NULL,
+           "config echo: leadSoundGainDb");
+    ae_embed_config (inst, "{\"leadSoundGainDb\":0}");
+
     /* A restart-scoped key rebuilds the engine under the host's feet; the
        next process call must survive it (silence or audio, never a crash),
        and the engine must come back. */
