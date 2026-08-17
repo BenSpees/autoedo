@@ -1482,3 +1482,21 @@ port: engine + port on the same audio is the §8 cross-check from the
 port doc — diff your port's notes against `polyDetected` and badge
 disagreements as a diagnostic. Two independent implementations agreeing
 is the strongest lint either of us can have.
+
+### 13.5 Lint suggestion from the field (2026-08-17): build skew between instances
+
+First live symptom of the two-instance rig: "guitar ignored polyMode",
+voice fine. The engine binary was current on disk, but the GUITAR
+PROCESS predated it -- config-triggered restarts are in-process
+re-prepares and never pick up a new binary, so a long-running engine
+keeps its launch-time build forever. The voice had been relaunched
+since; the guitar had not.
+
+**Lint: when both engines are enabled and their `engineBuild` values
+differ, badge it** ("engines on different builds -- relaunch the older
+one") before any per-feature "engine too old" message. Build skew
+explains the confusing half-working state in one line, and the fix
+(quit + relaunch the stale process; its config persists and FOLLOW
+re-asserts) is always the same. Your existing "may be older than this
+rig expects" message stays as the fallback for a genuinely old build
+on both.
