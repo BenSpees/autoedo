@@ -286,6 +286,7 @@ static void config_defaults (App *app)
     c->params.sample_velocity = -1.0; /* measure it from the lead's attack */
     c->params.sample_ring     = true; /* let-ring: struck notes finish */
     c->params.sample_match    = 1.0;  /* source parity is the starting point */
+    c->params.sample_tilt     = 3.0;  /* discount the low strings' raw RMS */
     c->params.sample_vel_ref  = -1.0; /* observe the reference, "auto" */
     c->params.poly_notes      = 6;    /* chord sampler polyphony cap */
     c->params.gate_db         = 0.0;  /* 0 = the built-in -56 dBFS floor */
@@ -504,7 +505,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
-              "\"sampleMatch\":%.4g,"
+              "\"sampleMatch\":%.4g,\"strikeTilt\":%.4g,"
               "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
               "\"polyMode\":%s,\"polyNotes\":%d,\"gateDb\":%.4g,"
               "\"sampleVelRefDb\":%s,"
@@ -527,7 +528,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.formant_st,
               c->params.sample_mix, c->params.sample_velocity,
               c->params.sample_ring ? "true" : "false",
-              c->params.sample_match,
+              c->params.sample_match, c->params.sample_tilt,
               c->follow_url, app->follow_hold ? "true" : "false",
               c->params.follow_env,
               c->poly_mode ? "true" : "false",
@@ -853,6 +854,10 @@ static bool config_apply_json (App *app, const char *json)
        actually played. In between, a dB-domain crossfade. */
     if (ae_json_get_number (json, "sampleMatch", &num))
         c->params.sample_match = num_clamp (num, 0.0, 1.0);
+    /* strikeTilt: the strike measurement's dB/octave pitch weighting
+       around A3 -- the equal-loudness correction for matching raw RMS. */
+    if (ae_json_get_number (json, "strikeTilt", &num))
+        c->params.sample_tilt = num_clamp (num, -6.0, 6.0);
     /* FOLLOW link. followUrl aims THIS instance's corrected degree and
        envelope at another instance ("" = off); followHold keeps the last
        note held through this instance's silence; followEnv is the

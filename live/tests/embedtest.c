@@ -87,6 +87,13 @@ int main (void)
     CHECK (strstr (status, "\"edo\":22") != NULL, "config echo: edo 22");
     CHECK (strstr (status, "\"sampleMatch\":1") != NULL,
            "config echo: sampleMatch defaults to source parity");
+    CHECK (strstr (status, "\"strikeTilt\":3") != NULL,
+           "config echo: strikeTilt defaults to +3 dB/oct");
+    ae_embed_config (inst, "{\"strikeTilt\":0}");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"strikeTilt\":0") != NULL,
+           "config echo: strikeTilt follows a write");
+    ae_embed_config (inst, "{\"strikeTilt\":3}");
     ae_embed_config (inst, "{\"sampleMatch\":0.4}");
     ae_embed_status (inst, status, sizeof (status));
     CHECK (strstr (status, "\"sampleMatch\":0.4") != NULL,

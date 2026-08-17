@@ -89,6 +89,13 @@
    source_body / this puts the sample's body at the level the note was
    actually played. */
 #define AE_SMP_BODY_RMS  0.0794328 /* 10^(-22/20) */
+/* The strike measurement's pitch-weighting pivot (strikeTilt): a note at
+   this frequency is measured as-is; each octave below is discounted (and
+   above credited) by strikeTilt dB. Raw RMS is not loudness -- a guitar's
+   low strings carry far more electrical RMS than the high ones while the
+   ear discounts lows, so matching raw RMS made low notes strike loud and
+   high notes vanish (the field report, verbatim). */
+#define AE_VEL_TILT_PIVOT_HZ 220.0
 
 #define AE_SYNTH_PARTIALS 6
 
@@ -347,6 +354,10 @@ typedef struct
        CONFIG layer defaults the rig to 1 -- parity is the starting point,
        the faders are taste. */
     double smp_match;
+    /* strikeTilt, dB per octave around AE_VEL_TILT_PIVOT_HZ, applied to
+       the strike MEASUREMENT only (never the audio). Primitive default 0;
+       the config layer defaults the rig to +3. */
+    double smp_tilt;
     /* The velocity REFERENCE: "how hard this player plays when playing
        hard". A rolling peak that decays over ~20 s, so the map follows the
        rig's actual headroom instead of assuming the signal reaches full
@@ -703,6 +714,9 @@ void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin);
 
 /* sampleMatch 0..1 (see smp_match). Live; any thread. */
 void ae_corrector_set_sample_match (AeCorrector *p, double m);
+
+/* strikeTilt in dB/octave (see smp_tilt). Live; any thread. */
+void ae_corrector_set_strike_tilt (AeCorrector *p, double db_oct);
 
 /* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
    between blocks. */

@@ -760,6 +760,8 @@ void ae_corrector_reset (AeCorrector *p)
                                rig-level default of 1 (parity) is the config
                                layer's (config_defaults), so a direct
                                consumer of this struct is never surprised */
+    p->smp_tilt   = 0.0;    /* same split: the rig's +3 dB/oct lives in
+                               config_defaults */
     /* Start at the floor, so the reference is OBSERVED rather than assumed.
        Seeding it with a plausible "playing hard" level instead sounds
        reasonable and is not: the seed then outranks the player for as long
@@ -1081,6 +1083,11 @@ void ae_corrector_set_sample_match (AeCorrector *p, double m)
     p->smp_match = m < 0.0 ? 0.0 : (m > 1.0 ? 1.0 : m);
 }
 
+void ae_corrector_set_strike_tilt (AeCorrector *p, double db_oct)
+{
+    p->smp_tilt = db_oct < -6.0 ? -6.0 : (db_oct > 6.0 ? 6.0 : db_oct);
+}
+
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin)
 {
     p->vel_ref_fixed = ref_lin < 0.0 ? -1.0 : (ref_lin > 1.0 ? 1.0 : ref_lin);
@@ -1193,8 +1200,22 @@ static double body_level_now (const AeCorrector *p)
    sampleVelocity bypasses parity entirely, because a pinned strike level
    is a pinned strike level. Parity is clamped to -34..+12 dB so a noise
    floor can never be renormalised into fortissimo. */
-static double strike_gain (const AeCorrector *p, double level)
+/* The strike measurement's pitch weighting (strikeTilt): raw RMS is not
+   loudness, and a guitar's low strings carry far more of it than the ear
+   credits -- matching raw RMS made low notes strike loud and high notes
+   vanish. Discount below the pivot, credit above, on the MEASUREMENT
+   only; hz 0 (nothing detected yet) passes the level through. */
+static double tilt_level (const AeCorrector *p, double level, double hz)
 {
+    if (p->smp_tilt == 0.0 || hz <= 0.0 || level <= 1e-9)
+        return level;
+    return level
+         * pow (10.0, p->smp_tilt * log2 (hz / AE_VEL_TILT_PIVOT_HZ) / 20.0);
+}
+
+static double strike_gain (const AeCorrector *p, double level, double hz)
+{
+    level = tilt_level (p, level, hz);
     const double vel = p->smp_vel_fixed >= 0.0 ? p->smp_vel_fixed
                                                : vel_from_peak (p, level);
     const double m = p->smp_match;
@@ -1618,7 +1639,8 @@ static void detect_onset (AeCorrector *p, int num_samples)
                used, and keeps the per-instrument trim it used to drop. */
             if (p->smp_vel_fixed < 0.0)
             {
-                const double g = strike_gain (p, lvl)
+                const double g = strike_gain (p, lvl,
+                                              (double) ae_corrector_detected_hz (p))
                                * (p->smp_trim > 0.0 ? p->smp_trim : 1.0);
                 for (int v = 0; v <= AE_HARM_VOICES; ++v)
                     p->smp[v][p->smp_cur[v]].gain_t = g;
@@ -2721,7 +2743,8 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
        detect_onset). Reading smp_vel_out here instead would strike every
        note at the PREVIOUS note's level, which is exactly wrong the moment
        the dynamics change. */
-    const double vel = strike_gain (p, body_level_now (p));
+    const double vel = strike_gain (p, body_level_now (p),
+                                    (double) ae_corrector_detected_hz (p));
     const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
     const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
 
@@ -2918,7 +2941,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
 
         const double ref = p->ref_hz > 0.0 ? p->ref_hz
                                            : AE_REFERENCE_C0_HZ;
-        const double vel = strike_gain (p, body_level_now (p));
+        const double base_level = body_level_now (p);
         int active = 0;
         for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
         {
@@ -2958,7 +2981,9 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
             {
                 /* birth: a new note on this row strikes fresh -- and
                    owns the row for this onset (no restrike on top) */
-                sample_strike (p, k, out_hz, vel * note->level);
+                sample_strike (p, k, out_hz,
+                               strike_gain (p, base_level, note->hz)
+                                   * note->level);
                 /* A superseded note that only sounded a moment is a
                    CORRECTION (the onset burst's early birth settling on
                    its true pitch), not a note the player meant to let
@@ -2990,7 +3015,9 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                    decayed enough to clear it; fast strumming under a
                    still-loud ring deliberately does NOT re-fire -- the
                    pad sustains, which is the pedal behaviour. */
-                sample_strike (p, k, out_hz, vel * note->level);
+                sample_strike (p, k, out_hz,
+                               strike_gain (p, base_level, note->hz)
+                                   * note->level);
                 p->poly_refired[k] = true;
             }
             else if (on)
@@ -3211,7 +3238,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
            discipline as a sample ghost, aimed at the corrected target. */
         const double hz =
             (double) atomic_load_explicit (&p->target_hz_out, memory_order_relaxed);
-        const double vel = strike_gain (p, body_level_now (p));
+        const double vel = strike_gain (p, body_level_now (p),
+                                        (double) ae_corrector_detected_hz (p));
         const int L = AE_HARM_VOICES;
         if (p->smp_guard > 0)
             p->smp_guard -= num_samples;

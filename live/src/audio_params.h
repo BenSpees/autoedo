@@ -92,6 +92,7 @@ typedef struct
     _Atomic double   sample_vel_ref;
     _Atomic bool     sample_ring;
     _Atomic double   sample_match;
+    _Atomic double   sample_tilt;
     _Atomic int      poly_notes;
     _Atomic double   gate_rms;
     _Atomic double   sample_trim_lin;
@@ -245,6 +246,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->sample_velocity, p->sample_velocity, memory_order_relaxed);
     atomic_store_explicit (&a->sample_ring,     p->sample_ring,     memory_order_relaxed);
     atomic_store_explicit (&a->sample_match,    p->sample_match,    memory_order_relaxed);
+    atomic_store_explicit (&a->sample_tilt,     p->sample_tilt,     memory_order_relaxed);
     atomic_store_explicit (&a->poly_notes,      p->poly_notes,      memory_order_relaxed);
     atomic_store_explicit (&a->gate_rms,
                            p->gate_db < 0.0 ? pow (10.0, p->gate_db / 20.0)
@@ -363,6 +365,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->sample_vel_ref, memory_order_relaxed));
     ae_corrector_set_sample_match (ps,
                           atomic_load_explicit (&a->sample_match, memory_order_relaxed));
+    ae_corrector_set_strike_tilt (ps,
+                          atomic_load_explicit (&a->sample_tilt, memory_order_relaxed));
     ae_corrector_set_poly_notes (ps,
                           atomic_load_explicit (&a->poly_notes, memory_order_relaxed));
     ae_corrector_set_gate (ps,

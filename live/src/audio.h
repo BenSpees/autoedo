@@ -159,6 +159,12 @@ typedef struct
                                         1 (default) = SOURCE PARITY -- the
                                         sample's body lands at the level the
                                         note was actually played */
+    double   sample_tilt;            /* strikeTilt, dB/octave around A3: the
+                                        strike MEASUREMENT's pitch weighting.
+                                        Raw RMS overstates a guitar's low
+                                        strings; +3 (default) discounts each
+                                        octave below the pivot by 3 dB and
+                                        credits each octave above */
     double   gate_db;                /* noise/trigger gate in dBFS (RMS):
                                         the voicing gate, onset floors and
                                         envelope gate all scale from it.
