@@ -138,11 +138,21 @@ int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
             /* The chain feed (see audio.h): the engine's mix while any
                voice sounds, the DRY input at unity under bypass or with
                every voice off -- whatever bypassOutput says, the host's
-               looper and FX must never lose their source. */
+               looper and FX must never lose their source.
+
+               At UNITY, never through outputGainDb -- the standalone's
+               record send has always stated this contract ("the stem on
+               disk and the level on stage are independent"), and the
+               chain is that send's descendant. Baking the PA trim into
+               the take meant every trim change re-levelled future
+               recordings against old ones AND against the live sound
+               (field: "samples sound slightly louder from the loop"),
+               with the loop bus's own gains stacking on top. The looper's
+               level belongs to the looper's faders alone. */
             if (chain != NULL)
             {
                 e->chain_mix += (chain_target - e->chain_mix) * 0.002f;
-                chain[done + i] = e->chain_mix * ae_soft_clip (full)
+                chain[done + i] = e->chain_mix * ae_soft_clip (mono)
                                 + (1.0f - e->chain_mix) * e->dry[i];
             }
         }

@@ -1119,7 +1119,12 @@ void ae_corrector_set_sample_match (AeCorrector *p, double m)
 
 void ae_corrector_set_strike_tilt (AeCorrector *p, double db_oct)
 {
-    p->smp_tilt = db_oct < -6.0 ? -6.0 : (db_oct > 6.0 ? 6.0 : db_oct);
+    /* +-12, doubled from +-6 (field: "Tilt up to the max but high notes
+       are much too quiet through the samples") -- a guitar's thin strings
+       plus a pickup's rolloff can fall faster than 6 dB/oct above the
+       pivot, and a range that cannot reach the correction is a range
+       that lies about having one. */
+    p->smp_tilt = db_oct < -12.0 ? -12.0 : (db_oct > 12.0 ? 12.0 : db_oct);
 }
 
 void ae_corrector_set_sample_level (AeCorrector *p, double lin)
@@ -1346,7 +1351,11 @@ static double strike_gain (const AeCorrector *p, double level, double hz)
         return vel;
     double parity = (level > 1e-9 ? level / AE_SQRT2 : 0.0) / AE_SMP_BODY_RMS;
     if (parity < 0.02) parity = 0.02;
-    if (parity > 4.0)  parity = 4.0;
+    if (parity > 8.0)  parity = 8.0; /* was 4.0: the tilt's high-note
+        credit ran into this ceiling and flattened -- max tilt asked for
+        gain the clamp then refused, which read as "tilt does nothing up
+        there". +18 dB headroom; the strike-to-strike clamp still tames
+        any one wild measurement. */
     if (m >= 1.0)
         return parity;
     return pow (10.0, ((1.0 - m) * log10 (vel > 1e-9 ? vel : 1e-9)

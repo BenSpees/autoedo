@@ -219,6 +219,29 @@ int main (void)
     CHECK (peak (chain, BLOCK) > 0.05f,
            "...and the chain keeps the instrument under it too");
     ae_embed_config (inst, "{\"leadGainDb\":0}");
+    /* The chain records at UNITY: outputGainDb is the STAGE's level and
+       must not re-level the take (the standalone record send's contract,
+       inherited). */
+    {
+        float ref_pk;
+        for (int b2 = 0; b2 < 40; ++b2)
+        {
+            tone_block (in, BLOCK, 35.0, &phase);
+            ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+        }
+        ref_pk = peak (chain, BLOCK);
+        ae_embed_config (inst, "{\"outputGainDb\":-20}");
+        for (int b2 = 0; b2 < 40; ++b2)
+        {
+            tone_block (in, BLOCK, 35.0, &phase);
+            ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+        }
+        CHECK (peak (out_l, BLOCK) < 0.6f * ref_pk,
+               "outputGainDb -20 moves the PA feed");
+        CHECK (peak (chain, BLOCK) > 0.7f * ref_pk,
+               "...and leaves the chain feed at unity");
+        ae_embed_config (inst, "{\"outputGainDb\":0}");
+    }
     ae_embed_config (inst, "{\"sampleMix\":1}");
     for (int b2 = 0; b2 < 40; ++b2)
     {

@@ -890,7 +890,7 @@ static bool config_apply_json (App *app, const char *json)
     /* strikeTilt: the strike measurement's dB/octave pitch weighting
        around A3 -- the equal-loudness correction for matching raw RMS. */
     if (ae_json_get_number (json, "strikeTilt", &num))
-        c->params.sample_tilt = num_clamp (num, -6.0, 6.0);
+        c->params.sample_tilt = num_clamp (num, -12.0, 12.0);
     /* The consolidated sample section: one fader over every sample voice
        (lead and ghosts alike, pre-mix), and a tilt EQ on the samples only. */
     if (ae_json_get_number (json, "sampleLevelDb", &num))
