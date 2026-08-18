@@ -659,7 +659,7 @@ Attach `engineBuild` to every report.
 
 | Key | Type | Applies | Meaning |
 |---|---|---|---|
-| `leadGainDb` | float −60…+12 | live | the lead's own fader, after the wet/dry mix, before the output sum; ghosts never pass through it. Unlike `leadOn:false` it does NOT re-anchor the ghosts — they keep tracking the corrected lead. The mixing control the diagnosis above needs, and generally the lead-vs-choir balance |
+| `leadGainDb` | float −60…+12 | live | **the lead VOICE's fader** — the corrected/synth/sample wet and the shifted lead's unvoiced fallback. It no longer touches the `sampleMix` DRY side, the MEL layer or the STEEL drone (each has its own fader): a lead fader that silenced the player's own instrument read as "the guitar is not being mixed or recorded" (field). Ghosts never pass through it. Unlike `leadOn:false` it does NOT re-anchor the ghosts — they keep tracking the corrected lead. The mixing control the diagnosis above needs, and generally the lead-vs-choir balance |
 
 ### Attack Sound
 

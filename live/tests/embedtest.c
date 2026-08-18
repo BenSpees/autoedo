@@ -204,6 +204,21 @@ int main (void)
     }
     CHECK (peak (out_l, BLOCK) > 0.05f,
            "sample lead at 50% mix: the dry side carries the instrument");
+    /* ...and it must SURVIVE the lead fader: leadGainDb scales the lead
+       voice, never the player's own instrument (field: a -43 dB lead
+       fader silenced the mix's dry side and read as "the guitar is not
+       being mixed or recorded"). */
+    ae_embed_config (inst, "{\"leadGainDb\":-60}");
+    for (int b2 = 0; b2 < 40; ++b2)
+    {
+        tone_block (in, BLOCK, 35.0, &phase);
+        ae_embed_process (inst, in, out_l, out_r, chain, BLOCK);
+    }
+    CHECK (peak (out_l, BLOCK) > 0.05f,
+           "sample lead at 50% mix: the dry SURVIVES leadGainDb -60");
+    CHECK (peak (chain, BLOCK) > 0.05f,
+           "...and the chain keeps the instrument under it too");
+    ae_embed_config (inst, "{\"leadGainDb\":0}");
     ae_embed_config (inst, "{\"sampleMix\":1}");
     for (int b2 = 0; b2 < 40; ++b2)
     {

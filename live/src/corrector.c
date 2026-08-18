@@ -1198,6 +1198,11 @@ void ae_corrector_set_mel (AeCorrector *p, double mix, double oct_lin,
                   : (preset >= ae_corrector_mel_presets () ? 0 : preset);
 }
 
+void ae_corrector_set_lead_gain (AeCorrector *p, double lin)
+{
+    p->lead_gain = lin < 0.0 ? 0.0 : (lin > 4.0 ? 4.0 : lin);
+}
+
 void ae_corrector_set_steel (AeCorrector *p, bool on, int root_deg,
                              double level_lin)
 {
@@ -3647,10 +3652,11 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
            replaces the latency-matched unvoiced fallback for a sample
            lead (both at once would double the instrument). */
         p->smp_dry_g += (g_dry_lead - p->smp_dry_g) * gain_alpha;
-        mono[i] = (float) (wet_only
-                           + (p->lead_source == AE_HARM_SRC_SAMPLE
-                                  ? 0.0
-                                  : (1.0 - v_gain) * dry)
+        mono[i] = (float) ((p->lead_gain > 0.0 ? p->lead_gain : 1.0)
+                               * (wet_only
+                                  + (p->lead_source == AE_HARM_SRC_SAMPLE
+                                         ? 0.0
+                                         : (1.0 - v_gain) * dry))
                            + p->smp_dry_g * p->in_block[i]
                            /* the MEL layer: the preset's share of raw dry
                               (footage only) plus the remodelled sum --
@@ -4026,7 +4032,12 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         if (wet_out != NULL)
             wet_out[i] = (float) wet_only;
         p->smp_dry_g += (g_dry_lead - p->smp_dry_g) * gain_alpha;
-        mono[i] = (float) (wet_only + (1.0 - v_gain) * dry
+        /* leadGainDb scales the LEAD VOICE (wet + its unvoiced fallback)
+           and nothing else: the mix's dry side, the steel drone and (in
+           poly) the MEL layer have their own faders and must not die
+           with this one. */
+        mono[i] = (float) ((p->lead_gain > 0.0 ? p->lead_gain : 1.0)
+                               * (wet_only + (1.0 - v_gain) * dry)
                            + p->smp_dry_g * p->in_block[i]
                            + p->steel_buf[i]);
     }

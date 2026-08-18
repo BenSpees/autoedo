@@ -446,6 +446,16 @@ typedef struct
        slow per-row centre (seeded at birth, ~0.7 s) -- the centre is
        corrected, the modulation is kept. */
     double poly_dev_ema[AE_POLY_MAX_NOTES];
+
+    /* leadGainDb, applied HERE to the lead VOICE alone (the wet and the
+       shifted lead's unvoiced fallback) -- never to the sampleMix dry
+       side, MEL or STEEL, which carry their own faders. Applied in the
+       backend to the whole mono bus, it silenced the player's own
+       instrument with the fader (field: "not hearing the guitar mixed...
+       just the sample in the loop" -- the loop was an old take; the live
+       bus, dry included, was riding a -43 dB lead fader). 0 = unset,
+       read as unity, so a bare corrector needs no setter call. */
+    double lead_gain;
     /* The velocity REFERENCE: "how hard this player plays when playing
        hard". A rolling peak that decays over ~20 s, so the map follows the
        rig's actual headroom instead of assuming the signal reaches full
@@ -849,6 +859,9 @@ const char *ae_corrector_mel_preset_name (int i); /* NULL past the end */
    0..edo-1 -- the caller maps the 12-TET rootNote). Live; any thread. */
 void ae_corrector_set_steel (AeCorrector *p, bool on, int root_deg,
                              double level_lin);
+
+/* leadGainDb as linear -- the lead VOICE's fader (see the field note). */
+void ae_corrector_set_lead_gain (AeCorrector *p, double lin);
 
 /* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
    between blocks. */

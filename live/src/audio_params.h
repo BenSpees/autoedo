@@ -398,6 +398,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->mel_attack_ms, memory_order_relaxed),
                           atomic_load_explicit (&a->mel_release_ms, memory_order_relaxed),
                           atomic_load_explicit (&a->mel_preset, memory_order_relaxed));
+    ae_corrector_set_lead_gain (ps,
+                          atomic_load_explicit (&a->lead_gain_lin, memory_order_relaxed));
     ae_corrector_set_steel (ps,
                           atomic_load_explicit (&a->steel_on, memory_order_relaxed),
                           atomic_load_explicit (&a->steel_root_deg, memory_order_relaxed),
@@ -458,7 +460,12 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
     mix->lead_on     = atomic_load_explicit (&a->lead_on, memory_order_relaxed);
     mix->harm_on     = atomic_load_explicit (&a->harm_on, memory_order_relaxed);
     mix->drone_on    = atomic_load_explicit (&a->drone_on, memory_order_relaxed);
-    mix->lead_gain   = (float) atomic_load_explicit (&a->lead_gain_lin, memory_order_relaxed);
+    /* leadGainDb lives in the CORRECTOR now, scaled onto the lead voice
+       alone -- a backend multiplying the whole mono bus silenced the
+       sampleMix dry side (the player's instrument), MEL and STEEL with
+       it. Backends keep their lead_gain factor for structure; it is
+       unity from here. */
+    mix->lead_gain   = 1.0f;
     mix->master_gain = (float) atomic_load_explicit (&a->gain_lin, memory_order_relaxed);
     mix->send_content = atomic_load_explicit (&a->send_content, memory_order_relaxed);
     mix->send_gain    = (float) atomic_load_explicit (&a->send_gain_lin, memory_order_relaxed);
