@@ -401,8 +401,16 @@ static void config_json (const App *app, char *out, size_t cap)
               "{\"edo\":%d,\"retuneMs\":%.6g,\"transitionMs\":%.6g,"
               "\"amount\":%.6g,\"toleranceCents\":%.6g,\"stickiness\":%.6g,"
               "\"humanize\":%.6g,\"expression\":%.6g,"
-              "\"rootNote\":%d,\"rootCents\":%.6g,\"refA4\":%.6g,"
-              "\"refNote\":%d,\"refNoteHz\":%.6g,"
+              /* The PITCH STANDARD echoes at FULL precision (%.10g, not
+                 %.6g): the echo is also the config file and the body any
+                 rig layer re-asserts, and at 6 significant digits every
+                 echo->write round trip re-quantised refNoteHz and re-derived
+                 refA4 -- measured creeping 440 -> 440.001 over 20 cycles,
+                 compounding across restarts until the anchor-residue
+                 warning tripped on a rig nobody had touched. A reference
+                 must survive its own echo byte-exactly. */
+              "\"rootNote\":%d,\"rootCents\":%.10g,\"refA4\":%.10g,"
+              "\"refNote\":%d,\"refNoteHz\":%.10g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
               "\"bypass\":%s,\"bypassOutput\":\"%s\",\"leadOn\":%s,\"leadGainDb\":%.4g,"

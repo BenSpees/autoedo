@@ -241,6 +241,27 @@ int main (void)
         "{\"leadSource\":\"voice\",\"sampleMix\":1,"
         "\"sampleLevelDb\":0,\"sampleToneDb\":0}");
 
+    /* The pitch standard must survive its own echo BYTE-EXACTLY: the echo
+       is also the config file and the body rig layers re-assert, and at
+       %.6g it crept (440 -> 440.001 over 20 cycles) until the anchor
+       residue warning fired on an untouched rig. */
+    ae_embed_config (inst, "{\"refNote\":0,\"refNoteHz\":261.6256}");
+    for (int rt = 0; rt < 20; ++rt)
+    {
+        char body[128];
+        double hz = 0.0;
+        ae_embed_status (inst, status, sizeof (status));
+        const char *rn = strstr (status, "\"refNoteHz\":");
+        if (rn == NULL || sscanf (rn, "\"refNoteHz\":%lf", &hz) != 1)
+            break; /* the final CHECK will say so */
+        snprintf (body, sizeof (body), "{\"refNote\":0,\"refNoteHz\":%.10g}", hz);
+        ae_embed_config (inst, body);
+    }
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"refNoteHz\":261.6256") != NULL
+           && strstr (status, "\"refA4\":440") != NULL,
+           "pitch standard survives 20 echo round-trips exactly");
+
     /* A restart-scoped key rebuilds the engine under the host's feet; the
        next process call must survive it (silence or audio, never a crash),
        and the engine must come back. */
