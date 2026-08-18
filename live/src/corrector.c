@@ -1146,19 +1146,6 @@ void ae_corrector_set_sample_tone (AeCorrector *p, double db)
    is most of why the layer stops sounding like the guitar. Ratios are
    harmonic (2:1, 3:1), so any tuning survives them; the tiny detunes
    (strings, choir) are ensemble, not temperament. */
-typedef struct { double st, gain, lp_hz; bool sweep; } AeMelLayerSpec;
-typedef struct
-{
-    const char    *name;
-    double         g_dry;      /* the RAW latency-matched dry's share */
-    AeMelLayerSpec layer[3];
-    double         wow_c;      /* tape wow depth, cents (random walk) */
-    double         flut_c;     /* flutter depth, cents (~6.3 Hz) */
-    double         drive;      /* soft saturation amount */
-    double         master_lp;  /* bandwidth rolloff Hz; 0 = none */
-    double         retrig;     /* onset re-swell: env *= (1 - retrig) */
-} AeMelPresetSpec;
-
 static const AeMelPresetSpec k_mel_presets[] = {
     /* gain -1 in the octave slot = "use melOctDb" (the footage knob) */
     { "footage", 1.0, { { 0.0,  0.0,    0, false },
@@ -1179,7 +1166,146 @@ static const AeMelPresetSpec k_mel_presets[] = {
     { "choir",   0.0, { { 0.0,   0.9, 3400, false },
                         { 12.0,  0.4, 3000, false },
                         { -0.22, 0.6, 3400, false } }, 4.0, 0.5, 0.15, 5000, 0.45 },
+    /* "auto": the spec is MEASURED from the loaded bank (mel_analyze_bank)
+       and lives in p->mel_auto; this row is only the face shown before any
+       bank has been analyzed -- the plain footage stack, so picking auto
+       early is never silence. */
+    { "auto",    1.0, { { 0.0,  0.0,    0, false },
+                        { 12.0, -1.0,   0, false },
+                        { 0.0,  0.0,    0, false } }, 0.0, 0.0, 0.0,    0, 0.0 },
 };
+
+/* The spec the render should follow: the measured bank timbre when the
+   preset is "auto" and an analysis exists, the table otherwise. */
+static const AeMelPresetSpec *mel_spec (const AeCorrector *p)
+{
+    const int n = (int) (sizeof (k_mel_presets) / sizeof (k_mel_presets[0]));
+    if (p->mel_preset == n - 1)
+    {
+        const int g = atomic_load_explicit (
+            &((AeCorrector *) p)->mel_auto_gen, memory_order_acquire);
+        if (g > 0)
+            return &p->mel_auto[(g - 1) & 1];
+    }
+    return &k_mel_presets[p->mel_preset >= 0 && p->mel_preset < n
+                              ? p->mel_preset : 0];
+}
+
+/* MEL "auto" (field ask: "spectral analysis on the selected samples ...
+   applied to the MEL algorithm to replicate the timbre"): measure the
+   bank's own steady-state harmonic weights and derive the remodeller's
+   parameters from them -- the harmonic-transfer-function move, with the
+   table read off the actual recordings instead of tuned by hand.
+
+   Control thread only (called from ae_corrector_load_samples). Publishes
+   into the idle mel_auto buffer, then flips mel_auto_gen (release). */
+static void mel_analyze_bank (AeCorrector *p, int bank_idx)
+{
+    const AeSampleBank *b = &p->smp_bank[bank_idx];
+    if (b->n_recs <= 0)
+        return;
+    /* The record nearest middle C, main takes preferred: mid-register is
+       where the timbre statement lives (extremes carry zone quirks). */
+    const AeSampleRec *r = NULL;
+    int best = 1 << 30;
+    for (int i = 0; i < b->n_recs; ++i)
+    {
+        const AeSampleRec *c = &b->recs[i];
+        const int d = abs (c->midi - 60) * 2 + (c->soft ? 1 : 0);
+        if (c->pcm != NULL && c->len > 0 && d < best)
+        {
+            best = d;
+            r = c;
+        }
+    }
+    if (r == NULL)
+        return;
+    const double f0 = 440.0 * pow (2.0, (r->midi - 69) / 12.0);
+    /* Steady state: inside the loop when one exists, else past the attack
+       (a quarter in, capped at 200 ms). At least ~50 ms of material or
+       the estimate is noise. */
+    int start = r->loop_end > r->loop_start ? r->loop_start
+              : (int) (0.2 * p->fs) < r->len / 4 ? (int) (0.2 * p->fs)
+                                                 : r->len / 4;
+    int n = r->len - start;
+    if (n > (int) p->fs)
+        n = (int) p->fs;
+    if (n < (int) (0.05 * p->fs))
+        return;
+    /* Harmonic magnitudes by Goertzel at k * f0. */
+    double m[17] = { 0 };
+    double mmax = 0.0;
+    for (int k = 1; k <= 16; ++k)
+    {
+        const double f = f0 * k;
+        if (f > 0.45 * p->fs)
+            break;
+        const double w = 2.0 * M_PI * f / p->fs, c2 = 2.0 * cos (w);
+        double s0, s1 = 0.0, s2 = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            s0 = (double) r->pcm[start + i] + c2 * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        m[k] = sqrt (s1 * s1 + s2 * s2 - c2 * s1 * s2) / n;
+        if (m[k] > mmax)
+            mmax = m[k];
+    }
+    if (mmax <= 0.0)
+        return;
+    for (int k = 1; k <= 16; ++k)
+        m[k] /= mmax;
+
+    /* Map onto the remodeller. The unison layer's LP: the guitar source
+       arrives roughly 1/k, so the wanted response at k*f0 is ~k*m[k] --
+       take the highest harmonic still holding half the peak of that
+       curve as the corner. Octave layer from the even/odd balance,
+       twelfth layer from the 3rd partial, bandwidth from the highest
+       audible harmonic. Tape character stays fixed -- the wow is the
+       MEDIUM, not the instrument. */
+    double kw_max = 0.0;
+    for (int k = 1; k <= 16; ++k)
+        if (k * m[k] > kw_max)
+            kw_max = k * m[k];
+    int k_fc = 1;
+    for (int k = 1; k <= 16; ++k)
+        if (k * m[k] >= 0.5 * kw_max)
+            k_fc = k;
+    double fc = (k_fc + 0.5) * f0;
+    if (fc < 800.0)  fc = 800.0;
+    if (fc > 8000.0) fc = 8000.0;
+    const double even = m[2] + m[4] + m[6];
+    const double odd  = m[1] + m[3] + m[5];
+    double g12 = even + odd > 1e-9 ? 0.9 * even / (even + odd) : 0.0;
+    if (g12 > 0.8) g12 = 0.8;
+    double g19 = m[1] > 1e-6 ? 0.5 * m[3] / m[1] : 0.0;
+    if (g19 > 0.6) g19 = 0.6;
+    int k_hi = 1;
+    for (int k = 1; k <= 16; ++k)
+        if (m[k] > 0.02)
+            k_hi = k;
+    double mlp = 1.2 * k_hi * f0;
+    if (mlp < 2500.0) mlp = 2500.0;
+    if (mlp > 9000.0) mlp = 9000.0;
+
+    const int cur = atomic_load_explicit (&p->mel_auto_gen,
+                                          memory_order_relaxed);
+    const int nxt = cur > 0 ? ((cur - 1) & 1) ^ 1 : 0;
+    AeMelPresetSpec *s = &p->mel_auto[nxt];
+    memset (s, 0, sizeof (*s));
+    s->name = "auto";
+    s->g_dry = 0.0;
+    s->layer[0] = (AeMelLayerSpec) { 0.0,   1.0, fc,        false };
+    s->layer[1] = (AeMelLayerSpec) { 12.0,  g12, fc,        false };
+    s->layer[2] = (AeMelLayerSpec) { 19.02, g19, fc * 0.9,  false };
+    s->wow_c = 2.5;
+    s->flut_c = 0.8;
+    s->drive = 0.2;
+    s->master_lp = mlp;
+    s->retrig = 0.5;
+    atomic_store_explicit (&p->mel_auto_gen, nxt + 1, memory_order_release);
+}
 
 int ae_corrector_mel_presets (void)
 {
@@ -1243,6 +1369,8 @@ void ae_corrector_set_sample_octave (AeCorrector *p, int semitones)
     p->smp_octave = semitones;
 }
 
+static void mel_analyze_bank (AeCorrector *p, int bank_idx);
+
 bool ae_corrector_load_samples (AeCorrector *p, const char *root,
                                 const char *instrument, const char *manifest,
                                 char *err, size_t err_len)
@@ -1260,6 +1388,7 @@ bool ae_corrector_load_samples (AeCorrector *p, const char *root,
                            memory_order_relaxed);
     atomic_store_explicit (&p->smp_live, idle, memory_order_release);
     memset (p->smp_rr, -1, sizeof (p->smp_rr));
+    mel_analyze_bank (p, idle); /* melPreset "auto" learns this bank */
     return true;
 }
 
@@ -3257,7 +3386,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
            9-series lineage): a partial dip, so each attack blooms without
            pumping the pad under a ringing chord. Sampler or not -- the
            layer is poly's instrument either way. */
-        p->mel_env *= 1.0 - k_mel_presets[p->mel_preset].retrig;
+        p->mel_env *= 1.0 - mel_spec (p)->retrig;
         if (chord_sampler)
         {
             /* Arm the re-strum window: freeze each row's raw salience as
@@ -3530,7 +3659,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
        "this is a guitar" cue) -- each under its own spectral shape, the
        sum under shared tape wow/flutter. Saturation and the bandwidth
        rolloff run in a second pass; the swell scales it at delivery. */
-    const AeMelPresetSpec *mp = &k_mel_presets[p->mel_preset];
+    const AeMelPresetSpec *mp = mel_spec (p);
     /* POLY is the only requirement (field: "turned on Poly but the Mel
        control remained grayed") -- with its own shifter bank the layer no
        longer borrows anything from the chord sampler, so it serves as the

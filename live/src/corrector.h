@@ -155,6 +155,19 @@ static inline bool ae_harm_voice_on (const AeHarmVoice *hv)
     return hv->interval != 0 || hv->detune_cents != 0.0;
 }
 
+/* MEL remodeller preset: an instrument as a parameter set (the hand-tuned
+   table lives in corrector.c; the bank-derived "auto" analysis fills the
+   corrector's own copy). Public so the analysis result can live in state. */
+typedef struct { double st, gain, lp_hz; bool sweep; } AeMelLayerSpec;
+typedef struct
+{
+    const char    *name;
+    double         g_dry;      /* the RAW latency-matched dry's share */
+    AeMelLayerSpec layer[3];
+    double         wow_c, flut_c, drive, master_lp;
+    double         retrig;     /* onset re-swell: env *= (1 - retrig) */
+} AeMelPresetSpec;
+
 typedef struct
 {
     /* Configuration -------------------------------------------------------- */
@@ -396,6 +409,12 @@ typedef struct
     double mel_env;      /* the layer's own envelope state */
     AeShifter *mel_shifter[3]; /* unison-resynth / +oct / preset third
                                   (allocated in prepare, poly only) */
+    /* melPreset "auto": the spec MEASURED from the loaded bank's own
+       spectrum (mel_analyze_bank, control thread at load). Double-
+       buffered; mel_auto_gen is 0 while no analysis exists (calloc-
+       safe), else the live buffer index + 1. Audio acquires per block. */
+    AeMelPresetSpec mel_auto[2];
+    _Atomic int     mel_auto_gen;
     bool   mel_fed;      /* the bank is being fed; reset stale state on
                             re-engage */
     double mel_lp[3];    /* per-layer one-pole LP states */

@@ -1943,6 +1943,62 @@ static void test_mel_layer (void)
    drone (the lead sample sits at E3, the input's partials at E3/E4). Run
    once per lead source family: sample (bank drone) and voice (synth
    drone). */
+/* MEL "auto": the preset measured from the loaded bank. A bank with a
+   hot 3rd harmonic must yield a hot 3:1 layer; a pure-sine bank must
+   yield none and a dark corner. Reads the corrector's published spec. */
+static void test_mel_auto_analysis (void)
+{
+    const char *root = "/tmp/ae-smp-melauto";
+    char dir[256], pth[512], cmd[512];
+    for (int bright = 0; bright < 2; ++bright)
+    {
+        snprintf (dir, sizeof (dir), "%s/piano", root);
+        snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+        if (system (cmd) != 0) { CHECK (false, "mel auto: cannot stage"); return; }
+        snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+        {
+            const int n = 2 * 48000;
+            float *pcm = calloc ((size_t) n, sizeof (float));
+            double ph = 0.0;
+            for (int i = 0; i < n; ++i)
+            {
+                ph += 2.0 * M_PI * 261.6256 / 48000.0;
+                pcm[i] = (float) (0.4 * sin (ph)
+                                  + (bright ? 0.36 * sin (3.0 * ph) : 0.0));
+            }
+            write_wav_pcm (pth, pcm, n);
+            free (pcm);
+        }
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED
+                              | AE_SHIFT_QUALITY_POLY_FLAG);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL,
+                                          err, sizeof (err)),
+               "mel auto: bank loads (%s)", err);
+        const int gen = atomic_load (&p->mel_auto_gen);
+        CHECK (gen > 0, "mel auto: the load published an analysis");
+        if (gen > 0)
+        {
+            const AeMelPresetSpec *s = &p->mel_auto[(gen - 1) & 1];
+            if (bright)
+                CHECK (s->layer[2].gain > 0.25,
+                       "mel auto: a hot 3rd harmonic becomes a hot 3:1 "
+                       "layer (gain %.2f)", s->layer[2].gain);
+            else
+                CHECK (s->layer[2].gain < 0.10 && s->layer[0].lp_hz < 2000.0,
+                       "mel auto: a pure sine bank reads dark and 3:1-free "
+                       "(gain %.2f, fc %.0f)", s->layer[2].gain,
+                       s->layer[0].lp_hz);
+        }
+        ae_corrector_free (p);
+        free (p);
+    }
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_steel_mode (void)
 {
     const char *root = "/tmp/ae-smp-steel";
@@ -4960,6 +5016,7 @@ int main (void)
     test_poly_restrum_fallback();
     test_chord_sampler();
     test_mel_layer();
+    test_mel_auto_analysis();
     test_steel_mode();
     test_sample_bend_follow();
     test_follow_link();
