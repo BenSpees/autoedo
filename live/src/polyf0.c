@@ -84,6 +84,8 @@ void ae_polyf0_prepare (AePolyF0 *t, double fs, double min_hz, double max_hz)
     for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
         t->notes[k].id = -1;
     t->next_id = 1;
+    t->gate_rms = 0.0015; /* the engine's default noise gate; callers with
+                             their own gate mirror it here */
 }
 
 void ae_polyf0_free (AePolyF0 *t)
@@ -133,8 +135,20 @@ static double salience (const AePolyF0 *t, const double *mag, double hz)
        major triad as its chord root an octave below every played note --
        the virtual pitch the ear also hears -- but a chord SAMPLER must
        strike what was played. A candidate whose own fundamental bin is
-       nearly empty is a virtual pitch, not a note. */
-    if (fund < 0.15 * strongest)
+       nearly empty is a virtual pitch, not a note.
+
+       The bar RELAXES below ~160 Hz: a guitar's low strings genuinely
+       arrive with the fundamental 20 dB under the strongest partial
+       (pickup placement filters it), and at 0.15 the guard was erasing
+       REAL low notes -- which played as chords going randomly silent,
+       varying with pickup and tone knob. A virtual chord root's
+       fundamental bin holds nothing but noise floor, so a lower relative
+       bar still tells the two apart; 0.05 is ~-26 dB, present-but-weak. */
+    double fund_bar = 0.15;
+    if (hz < 160.0)
+        fund_bar = hz <= 110.0 ? 0.05
+                               : 0.05 + 0.10 * (hz - 110.0) / 50.0;
+    if (fund < fund_bar * strongest)
         return 0.0;
     for (int k = 1; k <= 3; ++k)
     {
@@ -176,11 +190,17 @@ static void subtract_comb (const AePolyF0 *t, double *mag, double hz)
    which a 54.5-cent EDO grid downstream cannot absorb), the implied
    fundamentals are averaged weighted by partial magnitude, and a partial
    whose implied f0 disagrees by more than a quarter tone is someone
-   else's partial and gets no vote. */
-static double refine_f0 (const AePolyF0 *t, const double *mag, double hz)
+   else's partial and gets no vote.
+
+   `votes_out` (optional) reports how many partials agreed -- the
+   candidate's HARMONICITY. A real note's partials vote together; a pick
+   transient's broadband peaks scatter and mostly cannot. */
+static double refine_f0 (const AePolyF0 *t, const double *mag, double hz,
+                         int *votes_out)
 {
     const double bin_hz = t->fs / t->fft_size;
     double sum = 0.0, wsum = 0.0;
+    int    votes = 0;
     for (int k = 1; k <= 4; ++k)
     {
         const int b = (int) (hz * k / bin_hz + 0.5);
@@ -206,7 +226,10 @@ static double refine_f0 (const AePolyF0 *t, const double *mag, double hz)
         const double w = mag[pb] / (double) (k * k);
         sum  += f0k * w;
         wsum += w;
+        ++votes;
     }
+    if (votes_out != NULL)
+        *votes_out = votes;
     return wsum > 0.0 ? sum / wsum : hz;
 }
 
@@ -243,7 +266,16 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
     int    n_cand = 0;
     double cand_hz[AE_POLY_MAX_NOTES], cand_lv[AE_POLY_MAX_NOTES];
     double cand_raw[AE_POLY_MAX_NOTES];
-    const double gate = 1e-4 * t->win_size; /* window power gate */
+    /* The energy gate rides the CALLER's noise gate, not an absolute:
+       a Hann window's power sums to ~0.375 N, so an input sitting at
+       RMS `a` measures ~a^2 * 0.375 * N here. Gate at twice the noise
+       gate's amplitude (+6 dB over the floor). The old absolute gate
+       (1e-4 * N) worked out to ~-36 dBFS -- 20 dB ABOVE the engine's
+       default gate, a dead zone where the player was audibly voiced
+       and this tracker returned nothing. */
+    const double g_rms = t->gate_rms > 0.0 ? t->gate_rms : 0.0015;
+    const double gate = (2.0 * g_rms) * (2.0 * g_rms) * 0.375
+                      * (double) t->win_size;
     if (power > gate)
     {
         /* Iterative pick-and-subtract over a log grid (~4 candidates per
@@ -274,12 +306,41 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
                 first_sal = best_s;
             else if (best_s < 0.20 * first_sal)
                 break; /* residual notes must hold their own */
-            const double hz = refine_f0 (t, t->mag0, best_hz);
+            int votes = 0;
+            const double hz = refine_f0 (t, t->mag0, best_hz, &votes);
+            /* HARMONICITY gate: a real note's partials agree on its f0
+               (>= 2 votes above), or the note is a near-pure tone whose
+               fundamental dominates its own comb. A pick transient's
+               broadband energy makes salience-shaped lumps whose "partials"
+               are unrelated noise peaks -- they scatter, gather one vote at
+               best, and their fundamental is no stronger than the rest of
+               the lump. Un-gated, those birthed as short-lived ghost notes
+               on every hard attack (the strike they stole from the real
+               re-strum was the field's "randomly produces no output"). */
+            bool tonal = votes >= 2;
+            if (! tonal)
+            {
+                const double bh = t->fs / t->fft_size;
+                const double fund = mag_near (t->mag, t->fft_size / 2,
+                                              hz / bh);
+                double strongest = fund;
+                for (int k = 2; k <= 8; ++k)
+                {
+                    const double f = hz * k;
+                    if (f > t->fs * 0.45)
+                        break;
+                    const double m = mag_near (t->mag, t->fft_size / 2,
+                                               f / bh);
+                    if (m > strongest)
+                        strongest = m;
+                }
+                tonal = fund >= 0.85 * strongest;
+            }
             bool dup = false;
             for (int c = 0; c < n_cand; ++c)
                 if (fabs (1200.0 * log2 (hz / cand_hz[c])) < 70.0)
                     dup = true;
-            if (! dup && n_cand < AE_POLY_MAX_NOTES)
+            if (tonal && ! dup && n_cand < AE_POLY_MAX_NOTES)
             {
                 cand_hz[n_cand] = hz;
                 cand_lv[n_cand] = best_s;
@@ -340,6 +401,46 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
     {
         if (used[c])
             continue;
+        /* Birth guards, against the two ghosts a hard attack manufactures
+           (both were measured stealing the strike from a real re-strum):
+           - NEIGHBOURHOOD: a candidate within ~110 cents of a LIVING
+             note is that note smeared by the transient (parabolic peak
+             fits perturbed), not a new note. The tolerance is wide
+             because the SMEAR CUTS BOTH WAYS -- the measured failure had
+             the track dragged 30 cents sharp while its double went 60
+             flat, 91 cents apart. A held minor-second cluster pays the
+             price (its second note waits for the first to die), which on
+             a strummed guitar is the far rarer event than a hard attack.
+           - HARMONIC GHOST: a candidate near an integer multiple of a
+             living note (within 50 cents -- the parent's own track
+             smears too) and MUCH quieter than it is that note's own
+             upper partials resurfacing (subtraction leaves 12%, and
+             harmonics past the 10th are never subtracted). A real note
+             played AT a harmonic (octave, twelfth over a ring) arrives
+             at comparable level and passes the level test. */
+        bool owned = false;
+        for (int k = 0; k < AE_POLY_MAX_NOTES && ! owned; ++k)
+        {
+            if (! t->notes[k].active)
+                continue;
+            if (fabs (1200.0 * log2 (cand_hz[c] / t->notes[k].hz)) < 110.0)
+            {
+                owned = true;
+                break;
+            }
+            for (int h = 2; h <= 8; ++h)
+            {
+                const double hf = t->notes[k].hz * (double) h;
+                if (fabs (1200.0 * log2 (cand_hz[c] / hf)) < 50.0
+                    && cand_lv[c] < 0.35 * t->notes[k].level)
+                {
+                    owned = true;
+                    break;
+                }
+            }
+        }
+        if (owned)
+            continue;
         /* find a pending slot already watching this pitch */
         int slot = -1;
         for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
@@ -355,7 +456,12 @@ void ae_polyf0_process (AePolyF0 *t, const float *frame)
             continue;
         t->cand_hz[slot] = cand_hz[c];
         t->cand_lv[slot] = cand_lv[c];
-        if (++t->seen[slot] >= 2)
+        /* Two sightings normally; ONE while the caller vouches for a
+           physical attack (fast_birth): the onset transient is the second
+           witness, and the note reaches the sampler a frame sooner. A
+           wrong early guess is already handled downstream (young notes
+           corrected or dying young crossfade out in 6 ms). */
+        if (++t->seen[slot] >= (t->fast_birth ? 1 : 2))
         {
             t->notes[slot].active = true;
             t->notes[slot].hz     = cand_hz[c];

@@ -347,6 +347,11 @@ typedef struct
        then folded in -- accents survive, artefacts are tamed. Below
        -900 = no verdict yet (the first note is taken as played). */
     double vel_ema_db;
+    /* Onset generation counter: bumped on every onset pulse. Sample
+       strikes stamp it into their slot (epoch above the slot struct) so
+       the verdict's refinement can tell "struck at this onset" from
+       "still ringing from an earlier one". */
+    unsigned vel_epoch;
     /* sampleMatch: 0 = the relative velocity map alone, 1 = SOURCE
        PARITY (the sample's body lands at the level the note was played,
        measured against the bank's normalisation), in between a dB-domain
@@ -391,6 +396,16 @@ typedef struct
     {
         const AeSampleRec *rec;
         double pos, rate, gain, gain_t, fade, norm;
+        double wrel;      /* the strike's RELATIVE weight inside its event
+                             (a chord member's share of the strum; 1.0 for
+                             a lone note) -- the velocity verdict's
+                             refinement scales through it, so refining the
+                             strum's level never flattens the chord */
+        unsigned epoch;   /* the onset generation this strike belongs to
+                             (vel_epoch at strike time): the verdict
+                             refines ONLY the slots its window measured --
+                             an old ringing note must not jump levels
+                             because a new one was struck */
         int    gen;
         bool   retiring;  /* damp-on-repitch: this slot is on its way out
                              across the 6 ms fade. Never set under let-ring,
@@ -437,6 +452,20 @@ typedef struct
                                frozen baseline, not a one-run check. */
     double   poly_base_raw[AE_POLY_MAX_NOTES]; /* baseline at the onset */
     bool     poly_refired[AE_POLY_MAX_NOTES];  /* one shot per row/onset */
+    int      poly_fb;       /* the onset's ANSWER DEADLINE (samples): an
+                               onset the sampler never answers -- no birth,
+                               no per-note restrike -- within ~70 ms is a
+                               re-strum the salience test could not
+                               attribute (a still-loud ring buries the
+                               jump). The player audibly attacked; the
+                               notes provably sounding get re-struck. A
+                               retrigger of pitches already validated
+                               cannot be a wrong note, so the docs' false-
+                               positive asymmetry does not bite here --
+                               silence on a real attack was the field
+                               failure. Any attributed strike disarms it. */
+    bool     poly_fb_due;   /* the deadline passed unanswered; the next
+                               tracker frame performs the fallback strike */
     int      poly_prev_id[AE_POLY_MAX_NOTES];
     int      poly_cap;      /* polyNotes: strike at most this many */
     _Atomic int poly_active_out; /* live note count, for the panel */

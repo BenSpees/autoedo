@@ -1330,6 +1330,72 @@ static void test_polyf0_tracker (void)
             ++active;
     CHECK (active == 0, "polyf0: silence kills every note (%d left)", active);
 
+    /* QUIET playing must still track (field: "randomly produces no
+       output"). The same triad at ~-40 dBFS window RMS -- above the
+       engine's noise gate, below the old absolute gate that silently
+       swallowed it. */
+    for (int f = 0; f < 10; ++f)
+    {
+        for (int i = 0; i < t.win_size; ++i)
+        {
+            double v = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                ph[k] += 2.0 * M_PI * notes[k] / 48000.0;
+                v += sin (ph[k]) + 0.30 * sin (2.0 * ph[k])
+                                 + 0.15 * sin (3.0 * ph[k]);
+            }
+            frame[i] = (float) (0.008 * v);
+        }
+        ae_polyf0_process (&t, frame);
+    }
+    active = 0;
+    for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+        if (t.notes[k].active)
+            ++active;
+    CHECK (active == 3,
+           "polyf0: a QUIET triad still tracks -- the gate rides the noise "
+           "gate, not an absolute (got %d)", active);
+
+    memset (frame, 0, (size_t) t.win_size * sizeof (float));
+    for (int f = 0; f < 6; ++f)
+        ae_polyf0_process (&t, frame);
+
+    /* A low note with a WEAK FUNDAMENTAL -- a guitar low E through a
+       typical pickup arrives with the fundamental ~20 dB under the 2nd
+       partial. The missing-fundamental guard must not erase it (its bar
+       relaxes below ~160 Hz), and the octave guard must still land it at
+       E2, not E3. */
+    {
+        const double e2 = 82.41;
+        double phe = 0.0;
+        for (int f = 0; f < 10; ++f)
+        {
+            for (int i = 0; i < t.win_size; ++i)
+            {
+                phe += 2.0 * M_PI * e2 / 48000.0;
+                frame[i] = (float) (0.05 * (0.10 * sin (phe)
+                                          + 1.00 * sin (2.0 * phe)
+                                          + 0.60 * sin (3.0 * phe)
+                                          + 0.30 * sin (4.0 * phe)
+                                          + 0.25 * sin (5.0 * phe)));
+            }
+            ae_polyf0_process (&t, frame);
+        }
+        active = 0;
+        double got_hz = 0.0;
+        for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+            if (t.notes[k].active)
+            {
+                ++active;
+                got_hz = t.notes[k].hz;
+            }
+        CHECK (active == 1
+               && fabs (1200.0 * log2 (got_hz / e2)) < 20.0,
+               "polyf0: a weak-fundamental low E tracks at E2, not erased "
+               "or an octave up (%d notes, %.1f Hz)", active, got_hz);
+    }
+
     ae_polyf0_free (&t);
     free (frame);
 }
@@ -1634,6 +1700,106 @@ static void test_poly_onset_response (void)
     CHECK (pre > 0.0 && post > 1.45 * pre,
            "re-strum: the fresh strike is audible over the ring "
            "(ratio %.2f)", pre > 0.0 ? post / pre : -1.0);
+
+    ae_corrector_free (p);
+    free (p); free (buf);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* The re-strum the salience test CANNOT attribute: a pick attack on a
+   chord whose ring is still at full level. The onset detector hears the
+   transient, but no note's salience rises 15% (the Hann window centre-
+   weights old audio and the ring saturates the jump) -- the case that
+   played as "very finicky and randomly produces no output". The ANSWER
+   DEADLINE covers it: an onset unanswered after ~70 ms re-strikes every
+   sounding row -- pitches already validated, so no wrong note is
+   possible. */
+static void test_poly_restrum_fallback (void)
+{
+    const char *root = "/tmp/ae-smp-fb";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "restrum fallback: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000; /* sustained sine: no decay skew */
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                          AE_SHIFT_QUALITY_BALANCED
+                          | AE_SHIFT_QUALITY_POLY_FLAG);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    char err[256] = "";
+    CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+           "restrum fallback: bank loads (%s)", err);
+    {
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+    }
+    ae_corrector_set_sample (p, 1.0, 0.9, true);
+    ae_corrector_set_lead_env (p, 5.0, 400.0);
+
+    /* A chord that NEVER decays; at t1 a pick transient (one block of
+       broadband noise) lands on top. The ring's own level is unchanged,
+       so no per-note salience jump exists to attribute the onset to. */
+    const double notes[3] = { 130.81, 164.81, 196.0 };
+    const int t1 = 512 * 150, total = 512 * 220;
+    float *buf = calloc ((size_t) total, sizeof (float));
+    double ph[3] = { 0.0, 0.3, 0.7 };
+    unsigned rng = 1u;
+    for (int i = 0; i < total; ++i)
+    {
+        double v = 0.0;
+        for (int k = 0; k < 3; ++k)
+        {
+            ph[k] += 2.0 * M_PI * notes[k] / 48000.0;
+            v += sin (ph[k]) + 0.35 * sin (2.0 * ph[k]);
+        }
+        double x = 0.15 * v;
+        if (i >= t1 && i < t1 + 512) /* the pick: broadband, one block */
+        {
+            rng = rng * 1664525u + 1013904223u;
+            x += 2.0 * ((double) (rng >> 8) / 16777216.0 - 0.5);
+        }
+        buf[i] = (float) x;
+    }
+
+    int live_pre = 0, live_post = 0;
+    for (int off = 0; off < total; off += 512)
+    {
+        ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        if (off == t1 - 512 * 4 || off == t1 + 512 * 16)
+        {
+            int live = 0;
+            for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+                for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                    if (p->smp[k][sl].rec != NULL)
+                        ++live;
+            if (off < t1) live_pre = live; else live_post = live;
+        }
+    }
+
+    CHECK (live_pre == 3,
+           "restrum fallback: the held chord rings one slot per tone "
+           "before the pick (got %d)", live_pre);
+    CHECK (live_post >= 5,
+           "restrum fallback: an onset the salience test cannot attribute "
+           "still re-strikes the sounding chord (got %d live)", live_post);
 
     ae_corrector_free (p);
     free (p); free (buf);
@@ -4510,6 +4676,7 @@ int main (void)
     test_polyf0_tracker();
     test_poly_detect_export();
     test_poly_onset_response();
+    test_poly_restrum_fallback();
     test_chord_sampler();
     test_follow_link();
     test_detection_lock_time();

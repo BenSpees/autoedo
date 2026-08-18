@@ -591,6 +591,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
         p->poly_fill     = 0;
         p->poly_burst    = 0;
         p->poly_restrike = 0;
+        p->poly_fb       = 0;
+        p->poly_fb_due   = false;
         if (p->poly_cap <= 0 || p->poly_cap > AE_POLY_MAX_NOTES)
             p->poly_cap = AE_POLY_MAX_NOTES;
     }
@@ -1249,7 +1251,12 @@ static double strike_gain (const AeCorrector *p, double level, double hz)
    fractional rate. The OLD slot is left ringing on a 6 ms fade rather than
    cut, which is the sampler equivalent of Xentar's node-swap retrigger --
    never interrupt a live voice, crossfade past it. */
-static void sample_strike (AeCorrector *p, int v, double hz, double vel)
+/* `wrel` is the strike's relative weight inside its event -- a chord
+   member's share of the strum (already folded into `vel` by the caller),
+   1.0 for a lone note. It travels with the slot so the velocity verdict's
+   refinement can re-scale the EVENT's level without flattening the chord. */
+static void sample_strike (AeCorrector *p, int v, double hz, double vel,
+                           double wrel)
 {
     const int live = atomic_load_explicit (&p->smp_live, memory_order_acquire);
     if (live < 0 || hz <= 0.0)
@@ -1309,6 +1316,8 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel)
        ringing from the previous instrument keeps ITS normalisation. */
     p->smp[v][nxt].norm   = bank->norm;
     p->smp[v][nxt].fade = 1.0;
+    p->smp[v][nxt].wrel  = wrel > 0.0 ? wrel : 1.0;
+    p->smp[v][nxt].epoch = p->vel_epoch;
     p->smp[v][nxt].retiring  = false;
     p->smp[v][nxt].releasing = false;
     p->smp[v][nxt].renv      = 1.0;
@@ -1581,6 +1590,8 @@ static void detect_onset (AeCorrector *p, int num_samples)
         && p->atk_fast > 2.5 * slow_prev)
     {
         p->onset_pulse = true;
+        ++p->vel_epoch; /* strikes from here belong to THIS onset; the
+                           verdict below refines only these */
         /* A new energy edge is a new event: the detector's octave-
            continuity hysteresis (a raised bar for CHANGING octave
            mid-note) is a claim about the note that just ended, and
@@ -1657,8 +1668,20 @@ static void detect_onset (AeCorrector *p, int num_samples)
                 const double g = strike_gain (p, lvl,
                                               (double) ae_corrector_detected_hz (p))
                                * (p->smp_trim > 0.0 ? p->smp_trim : 1.0);
+                /* Only slots struck AT THIS ONSET (epoch match): a note
+                   still ringing from an earlier strike was not what this
+                   window measured, and re-scaling it is an audible level
+                   jump mid-ring (poly rows hold independent notes, so
+                   this was routine there). The slot's relative weight
+                   rides along -- refining the strum's level must not
+                   flatten the chord. */
                 for (int v = 0; v <= AE_HARM_VOICES; ++v)
-                    p->smp[v][p->smp_cur[v]].gain_t = g;
+                {
+                    const int cur = p->smp_cur[v];
+                    if (p->smp[v][cur].rec != NULL
+                        && p->smp[v][cur].epoch == p->vel_epoch)
+                        p->smp[v][cur].gain_t = g * p->smp[v][cur].wrel;
+                }
             }
         }
     }
@@ -2820,7 +2843,7 @@ static void render_sample_harmony (AeCorrector *p, float *harm_l, float *harm_r,
                 p->smp_pending[v] = false;
             else if ((gate || p->h_glide_valid[v]) && hz > 0.0)
             {
-                sample_strike (p, v, hz, vel);
+                sample_strike (p, v, hz, vel, 1.0);
                 p->smp_pending[v] = false;
             }
         }
@@ -2967,6 +2990,17 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                 p->poly_base_raw[k] = p->polyf0.notes[k].raw;
                 p->poly_refired[k]  = ! p->polyf0.notes[k].active;
             }
+            /* ...and start the ANSWER DEADLINE: an onset the sampler has
+               not answered ~70 ms from now (no birth, no attributed
+               restrike) was a re-strum whose salience jump drowned in a
+               still-loud ring -- the per-note 1.3x test's blind spot,
+               which played as "randomly produces no output". The notes
+               provably sounding get re-struck then; a retrigger of
+               already-validated pitches cannot be a wrong note. 70 ms
+               gives the burst-rate tracker ~6 frames to attribute the
+               onset properly first. */
+            p->poly_fb     = (int) (0.070 * p->fs);
+            p->poly_fb_due = false;
         }
     }
     p->poly_fill += num_samples;
@@ -2975,6 +3009,12 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
         p->poly_burst -= num_samples;
     if (p->poly_restrike > 0)
         p->poly_restrike -= num_samples;
+    if (p->poly_fb > 0)
+    {
+        p->poly_fb -= num_samples;
+        if (p->poly_fb <= 0)
+            p->poly_fb_due = true; /* deadline passed unanswered */
+    }
     if (p->poly_fill >= hop
         && p->in_write >= (long long) p->polyf0.win_size)
     {
@@ -2982,11 +3022,30 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
         const long long start = p->in_write - p->polyf0.win_size;
         for (int i = 0; i < p->polyf0.win_size; ++i)
             p->frame[i] = p->in_buf[(start + i) & p->buf_mask];
+        /* The tracker's energy gate mirrors the engine's own (an absolute
+           gate left a 20 dB dead zone where the engine was voiced and the
+           tracker mute), and births confirm on a single sighting while
+           the onset burst vouches for a physical attack. */
+        p->polyf0.gate_rms   = GATE (p);
+        p->polyf0.fast_birth = p->poly_burst > 0;
         ae_polyf0_process (&p->polyf0, p->frame);
 
         const double ref = p->ref_hz > 0.0 ? p->ref_hz
                                            : AE_REFERENCE_C0_HZ;
         const double base_level = body_level_now (p);
+        /* If the answer deadline just passed but a SUBSTANTIAL birth fires
+           this very frame, the onset was that new note (a hammer-on adding
+           to the ring, a late-confirming chord tone) -- stand the fallback
+           down rather than re-strike the whole ring on top of it. The
+           level bar matters: a weak birth (a transient remnant that slipped
+           the harmonicity gate) must NOT count as the onset's answer, or a
+           ghost blip eats the re-strum. */
+        if (p->poly_fb_due && chord_sampler)
+            for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+                if (p->polyf0.notes[k].active && k < p->poly_cap
+                    && p->polyf0.notes[k].id != p->poly_prev_id[k]
+                    && p->polyf0.notes[k].level >= 0.35)
+                { p->poly_fb_due = false; break; }
         int active = 0;
         for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
         {
@@ -3022,13 +3081,27 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                    the corrective Mellotron */
                 out_hz = ae_degree_hz (deg + p->lead_shift,
                                        p->edo, ref, period);
+            /* A chord member's share of the strum: salience-relative,
+               COMPRESSED (sqrt) -- raw relative salience spread members
+               by up to 14 dB, which the ear read as notes randomly
+               missing from the chord. sqrt halves the dB spread; the
+               verdict's refinement preserves it via the slot's wrel. */
+            const double w_note = on ? sqrt (note->level) : 0.0;
             if (on && note->id != p->poly_prev_id[k])
             {
                 /* birth: a new note on this row strikes fresh -- and
                    owns the row for this onset (no restrike on top) */
                 sample_strike (p, k, out_hz,
                                strike_gain (p, base_level, note->hz)
-                                   * note->level);
+                                   * w_note,
+                               w_note);
+                if (note->level >= 0.35)
+                {
+                    /* a substantial new note answers the onset; a weak
+                       one (transient remnant) must not eat the re-strum */
+                    p->poly_fb = 0;
+                    p->poly_fb_due = false;
+                }
                 /* A superseded note that only sounded a moment is a
                    CORRECTION (the onset burst's early birth settling on
                    its true pitch), not a note the player meant to let
@@ -3048,7 +3121,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                 p->poly_refired[k] = true;
             }
             else if (on && p->poly_restrike > 0 && ! p->poly_refired[k]
-                     && note->raw > 1.3 * p->poly_base_raw[k])
+                     && note->raw > 1.15 * p->poly_base_raw[k])
             {
                 /* re-pluck: the note never died (same id), but an onset
                    landed and THIS note's own salience rose past its
@@ -3056,13 +3129,34 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                    Without this a re-strum of a ringing chord is silent.
                    The raw (un-normalised) salience is the tell; the
                    relative level cannot be, because a new loud note
-                   renormalises everyone. 1.3x: a slow strum's ring has
-                   decayed enough to clear it; fast strumming under a
-                   still-loud ring deliberately does NOT re-fire -- the
-                   pad sustains, which is the pedal behaviour. */
+                   renormalises everyone. 1.15x: a modest rise is enough
+                   -- the Hann window centre-weights old audio, so even a
+                   hard re-pluck under a loud ring shows as a small jump
+                   at first (1.3x sat out too many real re-strums; the
+                   ones it still misses fall to the deadline fallback
+                   below). */
                 sample_strike (p, k, out_hz,
                                strike_gain (p, base_level, note->hz)
-                                   * note->level);
+                                   * w_note,
+                               w_note);
+                p->poly_refired[k] = true;
+                p->poly_fb = 0; /* the onset is answered */
+                p->poly_fb_due = false;
+            }
+            else if (on && p->poly_fb_due && ! p->poly_refired[k])
+            {
+                /* The answer deadline passed with the onset unattributed:
+                   the player audibly attacked and nothing struck -- the
+                   re-strum case a still-loud ring hides from the salience
+                   test. Re-strike what is provably sounding; the pitch is
+                   already validated, so the worst case is a doubled pad
+                   swell, never a wrong note. (The field failure this
+                   answers: "very finicky and randomly produces no
+                   output".) */
+                sample_strike (p, k, out_hz,
+                               strike_gain (p, base_level, note->hz)
+                                   * w_note,
+                               w_note);
                 p->poly_refired[k] = true;
             }
             else if (on)
@@ -3089,6 +3183,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                 p->poly_prev_id[k] = -1;
             }
         }
+        p->poly_fb_due = false; /* the fallback fires on one frame only */
         atomic_store_explicit (&p->poly_active_out, active,
                                memory_order_relaxed);
     }
@@ -3312,7 +3407,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->smp_pending[L] = false;
             else if (hz > 0.0)
             {
-                sample_strike (p, L, hz, vel);
+                sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false;
                 p->smp_guard = (int) (0.040 * p->fs);
             }
@@ -3350,7 +3445,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->att_seq_seen = p->att_seq;
             if (want && p->smp_guard <= 0 && hz > 0.0)
             {
-                sample_strike (p, L, hz, vel);
+                sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false; /* this event is served */
                 p->smp_guard = (int) (0.040 * p->fs);
             }

@@ -49,6 +49,24 @@ typedef struct
     double *mag0;       /* pristine spectrum (refinement reads this) */
     float  *win;        /* Hann window */
 
+    /* The frame's energy gate, as an input RMS (amplitude, not power).
+       Frames whose windowed power falls below ~2x this yield no
+       candidates -- silence must not birth noise-floor ghosts. The
+       CALLER owns the value (the corrector mirrors its own noise gate
+       here): an absolute gate was the field failure "randomly produces
+       no output" -- it sat ~20 dB above the engine's own gate, so quiet
+       playing was voiced to every other subsystem and invisible to this
+       one. Prepare defaults it to the engine's default gate. */
+    double gate_rms;
+
+    /* Births normally need two consecutive sightings (one glitchy frame
+       is not a note). While the CALLER knows a physical attack just
+       happened (its onset detector fired), one sighting is enough: the
+       transient is the corroborating witness, and waiting a second frame
+       is pure latency on the commonest event there is. The caller sets
+       this while its onset burst runs. */
+    bool   fast_birth;
+
     /* Tracker state */
     AePolyNote notes[AE_POLY_MAX_NOTES];
     int    miss[AE_POLY_MAX_NOTES];  /* consecutive frames unseen */
