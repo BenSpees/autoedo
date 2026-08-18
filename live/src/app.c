@@ -175,12 +175,15 @@ static const struct { const char *name; double min_hz, max_hz; } k_ranges[] = {
     { "tenor",      80.0,  600.0 },
     { "alto",      100.0,  800.0 },
     { "soprano",   130.0, 1200.0 },
-    /* Guitar in standard tuning: low E is 82.4 Hz and the top string's
-       12th fret is 659, so 78..1400 covers the instrument with a little
-       room either side. The tight bottom is the point -- every subharmonic
-       of a note the guitar can actually play falls outside the window, so
-       the detector cannot chase one even before the octave guard votes. */
-    { "guitar",     78.0, 1400.0 },
+    /* Guitar, sized for THIS RIG's tuning: the bottom string goes down to
+       D2 (73.4 Hz -- drop-D and the D-based tunings), so the floor sits a
+       third of a semitone under that; standard-tuning low E (82.4) rides
+       inside it either way. The tight bottom is still the point -- every
+       subharmonic of a note the guitar can actually play falls outside
+       the window, so the detector cannot chase one even before the octave
+       guard votes. (78 Hz previously: sized for low E, which silently
+       ERASED the low D -- the detector cannot see below its window.) */
+    { "guitar",     70.0, 1400.0 },
     { "instrument", 65.0, 1600.0 },
     { "wide",       40.0, 2000.0 },
 };
