@@ -237,6 +237,15 @@ int main (void)
            && strstr (status, "\"melPreset\":\"strings\"") != NULL,
            "config echo: MEL section follows writes");
     ae_embed_config (inst, "{\"melMix\":0,\"melPreset\":\"footage\"}");
+    CHECK (strstr (status, "\"steelMode\":false") != NULL
+           && strstr (status, "\"steelLevelDb\":-3") != NULL,
+           "config echo: STEEL defaults (off, -3 dB)");
+    ae_embed_config (inst, "{\"steelMode\":true,\"steelLevelDb\":-6}");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"steelMode\":true") != NULL
+           && strstr (status, "\"steelLevelDb\":-6") != NULL,
+           "config echo: STEEL follows writes");
+    ae_embed_config (inst, "{\"steelMode\":false,\"steelLevelDb\":-3}");
     ae_embed_config (inst,
         "{\"leadSource\":\"voice\",\"sampleMix\":1,"
         "\"sampleLevelDb\":0,\"sampleToneDb\":0}");

@@ -1937,6 +1937,157 @@ static void test_mel_layer (void)
     if (system (cmd) != 0) { /* best effort */ }
 }
 
+/* STEEL mode: while the lead is voiced, a root drone sounds at the root
+   class nearest BELOW the played note. Bank is a pure C4 sine; play E3 in
+   12-EDO with root C -- any output energy at C3 (130.8) had to be the
+   drone (the lead sample sits at E3, the input's partials at E3/E4). Run
+   once per lead source family: sample (bank drone) and voice (synth
+   drone). */
+static void test_steel_mode (void)
+{
+    const char *root = "/tmp/ae-smp-steel";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "steel: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    for (int mode = 0; mode < 2; ++mode) /* 0 = sample lead, 1 = voice lead */
+    {
+        double c3[2] = { 0.0, 0.0 };
+        for (int steel = 0; steel < 2; ++steel)
+        {
+            AeCorrector *p = calloc (1, sizeof (AeCorrector));
+            ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                                  AE_SHIFT_QUALITY_BALANCED);
+            ae_corrector_set_edo (p, 12);
+            ae_corrector_set_retune_ms (p, 0.0);
+            ae_corrector_set_transition_ms (p, 0.0);
+            char err[256] = "";
+            CHECK (ae_corrector_load_samples (p, root, "piano", NULL,
+                                              err, sizeof (err)),
+                   "steel: bank loads (%s)", err);
+            {
+                int srcs[AE_HARM_VOICES];
+                for (int v = 0; v < AE_HARM_VOICES; ++v)
+                    srcs[v] = AE_HARM_SRC_DEFAULT;
+                ae_corrector_set_voice_sources (p, srcs,
+                    mode == 0 ? AE_HARM_SRC_SAMPLE : AE_HARM_SRC_DEFAULT);
+            }
+            ae_corrector_set_sample (p, 1.0, 0.9, true);
+            ae_corrector_set_steel (p, steel != 0, 0 /* root C */, 1.0);
+
+            const int total = 512 * 280; /* ~3 s */
+            float *buf = calloc ((size_t) total, sizeof (float));
+            double ph = 0.0;
+            for (int i = 0; i < total; ++i)
+            {
+                ph += 2.0 * M_PI * 164.81 / 48000.0; /* E3 */
+                buf[i] = (float) (0.2 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+            }
+            for (int off = 0; off < total; off += 512)
+                ae_corrector_process (p, buf + off, NULL, NULL, 512);
+            c3[steel] = goertzel (buf + total - 48000, 48000, 130.81, 48000.0);
+            ae_corrector_free (p);
+            free (p); free (buf);
+        }
+        CHECK (c3[1] > 5.0 * c3[0] && c3[1] > 1e-3,
+               "steel (%s lead): the root drone sounds below the note "
+               "(C3 %.4g on vs %.4g off)",
+               mode == 0 ? "sample" : "voice", c3[1], c3[0]);
+    }
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* Physical bend-follow on a sample lead: a +-25 cent vibrato (well inside
+   one degree) must ride the sample's playback rate -- before this the
+   sample sat pinned to the snapped degree and every bend was a stair. */
+static void test_sample_bend_follow (void)
+{
+    const char *root = "/tmp/ae-smp-bend";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "bend: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+    char err[256] = "";
+    CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+           "bend: bank loads (%s)", err);
+    {
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+    }
+    ae_corrector_set_sample (p, 1.0, 0.9, true);
+
+    const int total = 512 * 280;
+    float *buf = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        /* A3 with a 4 Hz, +-25 cent vibrato: fast against the expression
+           centre, small against the degree grid. */
+        const double cents = 25.0 * sin (2.0 * M_PI * 4.0 * i / 48000.0);
+        ph += 2.0 * M_PI * 220.0 * pow (2.0, cents / 1200.0) / 48000.0;
+        buf[i] = (float) (0.2 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+    }
+    double r_min = 1e9, r_max = 0.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        ae_corrector_process (p, buf + off, NULL, NULL, 512);
+        if (off > total / 2) /* past warm-up and the strike's settle */
+        {
+            const int L = AE_HARM_VOICES;
+            const double r = p->smp[L][p->smp_cur[L]].rate;
+            if (r > 0.0)
+            {
+                if (r < r_min) r_min = r;
+                if (r > r_max) r_max = r;
+            }
+        }
+    }
+    CHECK (r_min < 1e9 && r_max / r_min > pow (2.0, 25.0 / 1200.0),
+           "bend-follow: the vibrato rides the sample rate "
+           "(swing %.2f cents; pinned would be 0)",
+           1200.0 * log2 (r_max / r_min));
+
+    ae_corrector_free (p);
+    free (p); free (buf);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_follow_link (void)
 {
     /* encode: identity inside range, class-preserving fold outside */
@@ -4809,6 +4960,8 @@ int main (void)
     test_poly_restrum_fallback();
     test_chord_sampler();
     test_mel_layer();
+    test_steel_mode();
+    test_sample_bend_follow();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();

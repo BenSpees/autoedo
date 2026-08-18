@@ -196,6 +196,15 @@ typedef struct
                                         preset only) */
     double   mel_attack_ms;          /* melAttackMs: the swell */
     double   mel_release_ms;         /* melReleaseMs: the tail ceiling */
+    /* STEEL mode: pedal-steel dyad on the instrument itself -- while the
+       lead is voiced, a root drone (the chart root's class, nearest pitch
+       below the played note) sounds in the lead's own source family and
+       holds until the playing ends. The player supplies the bend. */
+    bool     steel_mode;             /* steelMode: the dyad on/off */
+    double   steel_level_db;         /* steelLevelDb: drone vs the lead */
+    int      steel_root_deg;         /* DERIVED (config_sync): rootNote
+                                        mapped into engine degrees,
+                                        round(edo * root / 12) */
     int      synth_patch;            /* index into the engine's patch table */
     double   ensemble_depth;         /* 0..1 */
     double   synth_vowel;            /* 0..1 formant transfer */

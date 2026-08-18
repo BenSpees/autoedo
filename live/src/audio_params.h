@@ -99,6 +99,9 @@ typedef struct
     _Atomic double   mel_oct_lin;
     _Atomic double   mel_attack_ms;
     _Atomic double   mel_release_ms;
+    _Atomic bool     steel_on;
+    _Atomic int      steel_root_deg;
+    _Atomic double   steel_level_lin;
     _Atomic int      poly_notes;
     _Atomic double   gate_rms;
     _Atomic double   sample_trim_lin;
@@ -261,6 +264,10 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
                            pow (10.0, p->mel_oct_db / 20.0), memory_order_relaxed);
     atomic_store_explicit (&a->mel_attack_ms,   p->mel_attack_ms,   memory_order_relaxed);
     atomic_store_explicit (&a->mel_release_ms,  p->mel_release_ms,  memory_order_relaxed);
+    atomic_store_explicit (&a->steel_on,        p->steel_mode,      memory_order_relaxed);
+    atomic_store_explicit (&a->steel_root_deg,  p->steel_root_deg,  memory_order_relaxed);
+    atomic_store_explicit (&a->steel_level_lin,
+                           pow (10.0, p->steel_level_db / 20.0), memory_order_relaxed);
     atomic_store_explicit (&a->poly_notes,      p->poly_notes,      memory_order_relaxed);
     atomic_store_explicit (&a->gate_rms,
                            p->gate_db < 0.0 ? pow (10.0, p->gate_db / 20.0)
@@ -391,6 +398,10 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->mel_attack_ms, memory_order_relaxed),
                           atomic_load_explicit (&a->mel_release_ms, memory_order_relaxed),
                           atomic_load_explicit (&a->mel_preset, memory_order_relaxed));
+    ae_corrector_set_steel (ps,
+                          atomic_load_explicit (&a->steel_on, memory_order_relaxed),
+                          atomic_load_explicit (&a->steel_root_deg, memory_order_relaxed),
+                          atomic_load_explicit (&a->steel_level_lin, memory_order_relaxed));
     ae_corrector_set_poly_notes (ps,
                           atomic_load_explicit (&a->poly_notes, memory_order_relaxed));
     ae_corrector_set_gate (ps,

@@ -298,6 +298,9 @@ static void config_defaults (App *app)
     c->params.mel_oct_db      = -6.0; /* the 4' footage under the 8' dry */
     c->params.mel_attack_ms   = 150.0; /* the swell IS the identity */
     c->params.mel_release_ms  = 400.0;
+    c->params.steel_mode      = false; /* the dyad is asked for, never on */
+    c->params.steel_level_db  = -3.0;  /* the drone sits under the melody */
+    c->params.steel_root_deg  = 0;     /* derived in config_sync */
     c->params.gate_db         = 0.0;  /* 0 = the built-in -56 dBFS floor */
     app->tap_url[0]  = '\0';
     app->tap_content = AE_SEND_WET;
@@ -358,6 +361,11 @@ static void config_sync (App *app)
     c->params.ref_hz = app->ref_a4
                      * pow (2.0, ((double) app->ref_note - 9.0) / 12.0) / 16.0;
     c->params.period_cents = 1200.0 + app->stretch_cents;
+    /* STEEL's root class, mapped into engine degrees the same way the
+       rig maps chart roots: round(edo * rootNote / 12). */
+    c->params.steel_root_deg = c->params.edo > 0
+        ? (int) ((long) (c->params.edo * app->root_note + 6) / 12 % c->params.edo)
+        : 0;
     /* the CURRENT instrument's sampleGainDb trim rides into params */
     c->params.sample_trim_db = 0.0;
     for (int i = 0; i < app->sample_trim_n; ++i)
@@ -526,6 +534,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"sampleLevelDb\":%.4g,\"sampleToneDb\":%.4g,"
               "\"melMix\":%.4g,\"melPreset\":\"%s\",\"melOctDb\":%.4g,"
               "\"melAttackMs\":%.4g,\"melReleaseMs\":%.4g,"
+              "\"steelMode\":%s,\"steelLevelDb\":%.4g,"
               "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
               "\"polyMode\":%s,\"polyNotes\":%d,\"gateDb\":%.4g,"
               "\"sampleVelRefDb\":%s,"
@@ -556,6 +565,8 @@ static void config_json (const App *app, char *out, size_t cap)
                   : "footage",
               c->params.mel_oct_db,
               c->params.mel_attack_ms, c->params.mel_release_ms,
+              c->params.steel_mode ? "true" : "false",
+              c->params.steel_level_db,
               c->follow_url, app->follow_hold ? "true" : "false",
               c->params.follow_env,
               c->poly_mode ? "true" : "false",
@@ -903,6 +914,10 @@ static bool config_apply_json (App *app, const char *json)
         c->params.mel_attack_ms = num_clamp (num, 0.0, 5000.0);
     if (ae_json_get_number (json, "melReleaseMs", &num))
         c->params.mel_release_ms = num_clamp (num, 5.0, 10000.0);
+    if (ae_json_get_bool (json, "steelMode", &b))
+        c->params.steel_mode = b;
+    if (ae_json_get_number (json, "steelLevelDb", &num))
+        c->params.steel_level_db = num_clamp (num, -60.0, 12.0);
     /* FOLLOW link. followUrl aims THIS instance's corrected degree and
        envelope at another instance ("" = off); followHold keeps the last
        note held through this instance's silence; followEnv is the

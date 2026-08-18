@@ -597,12 +597,16 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
         p->poly_restrike = 0;
         p->poly_fb       = 0;
         p->poly_fb_due   = false;
+        for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+            p->poly_dev_ema[k] = 0.0;
         if (p->poly_cap <= 0 || p->poly_cap > AE_POLY_MAX_NOTES)
             p->poly_cap = AE_POLY_MAX_NOTES;
     }
     atomic_store_explicit (&p->poly_active_out, 0, memory_order_relaxed);
     for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
         atomic_store_explicit (&p->poly_note_out[k], 0, memory_order_relaxed);
+    p->steel_deg = AE_HARM_DEG_OFF; /* calloc's 0 is a real degree */
+    p->steel_env = 0.0;
 
     ae_corrector_free_shifters (p);
     p->shifter = ae_shifter_create (p->fs, p->block_samples);
@@ -645,6 +649,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->lead_wet  = calloc ((size_t) p->max_block, sizeof (float));
     free (p->mel_sum);
     p->mel_sum   = calloc ((size_t) p->max_block, sizeof (float));
+    free (p->steel_buf);
+    p->steel_buf = calloc ((size_t) p->max_block, sizeof (float));
     free (p->lpc_res);
     p->lpc_res   = calloc ((size_t) p->max_block, sizeof (float));
 
@@ -931,6 +937,8 @@ void ae_corrector_free (AeCorrector *p)
     p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
     free (p->mel_sum);
     p->mel_sum = NULL;
+    free (p->steel_buf);
+    p->steel_buf = NULL;
     free (p->lpc_res);
     p->lpc_res = NULL;
     free (p->sus_buf);
@@ -1081,7 +1089,7 @@ void ae_corrector_set_sample (AeCorrector *p, double mix, double velocity,
        retire them the way a strike would, so the switch is heard as the
        damper coming down rather than as nothing until the next note. */
     if (p->smp_ring && ! ring)
-        for (int v = 0; v <= AE_HARM_VOICES; ++v)
+        for (int v = 0; v <= AE_HARM_VOICES + 1; ++v)
             for (int k = 0; k < AE_SMP_SLOTS; ++k)
                 if (k != p->smp_cur[v] && p->smp[v][k].rec != NULL)
                     p->smp[v][k].retiring = true;
@@ -1188,6 +1196,14 @@ void ae_corrector_set_mel (AeCorrector *p, double mix, double oct_lin,
     p->mel_rel_ms = rel_ms < 5.0 ? 5.0 : (rel_ms > 10000.0 ? 10000.0 : rel_ms);
     p->mel_preset = preset < 0 ? 0
                   : (preset >= ae_corrector_mel_presets () ? 0 : preset);
+}
+
+void ae_corrector_set_steel (AeCorrector *p, bool on, int root_deg,
+                             double level_lin)
+{
+    p->steel_on    = on;
+    p->steel_root  = root_deg < 0 ? 0 : root_deg;
+    p->steel_level = level_lin < 0.0 ? 0.0 : (level_lin > 4.0 ? 4.0 : level_lin);
 }
 
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin)
@@ -1760,7 +1776,7 @@ static void detect_onset (AeCorrector *p, int num_samples)
                    this was routine there). The slot's relative weight
                    rides along -- refining the strum's level must not
                    flatten the chord. */
-                for (int v = 0; v <= AE_HARM_VOICES; ++v)
+                for (int v = 0; v <= AE_HARM_VOICES + 1; ++v)
                 {
                     const int cur = p->smp_cur[v];
                     if (p->smp[v][cur].rec != NULL
@@ -2222,6 +2238,23 @@ static void run_detection (AeCorrector *p)
         const double out_expr = p->out_cents + p->expr_cents * p->expression;
         p->shift_semitones = dclamp ((out_expr + lead_shift_c - detected_cents) / 100.0,
                                      -36.0, 36.0);
+        /* The corrected pitch WITH the playing on top -- what the shifter
+           aims at, exported so a sample lead can ride a physical bend
+           instead of stair-stepping the snapped grid. */
+        atomic_store_explicit (&p->corr_hz_out,
+                               (float) (ref * pow (2.0, (out_expr + lead_shift_c)
+                                                        / 1200.0)),
+                               memory_order_relaxed);
+        /* Bend-vs-jump: a hammer-on moves a step in one hop, a bend
+           creeps. Peak-hold (~25 ms at the 5 ms hop) so the block-rate
+           reader downstream still sees the jump hop. */
+        {
+            const double dsl = p->prev_pair_valid
+                ? fabs (detected_cents - p->prev_det_cents) : 0.0;
+            p->det_slope_hold *= 0.8;
+            if (dsl > p->det_slope_hold)
+                p->det_slope_hold = dsl;
+        }
 
         p->primed = true;
         atomic_store_explicit (&p->shift_st_out, (float) p->shift_semitones,
@@ -3006,6 +3039,111 @@ static void apply_harm_master (AeCorrector *p, float *harm_l, float *harm_r,
     p->harm_master_cur = fabs (target - g) < 1e-6 ? target : g;
 }
 
+/* STEEL mode: the pedal-steel dyad on the guitar itself. While the lead
+   is voiced, a ROOT DRONE sounds under the playing -- the root class at
+   the nearest degree BELOW the audible lead (an equave down when the
+   note IS the root, so the pair is never a unison). The player bends
+   their own string over it; the drone holds until the playing ends,
+   then decays under the lead release. A sample lead drones the loaded
+   bank on its own row; synth and shifted leads drone the synth patch on
+   a dedicated voice (the chart's droneOn rank stays untouched). Renders
+   the block into steel_buf; the caller adds it to the lead bus, so the
+   lead IR sculpts it too. */
+static void steel_process (AeCorrector *p, bool voiced, long lead_deg,
+                           bool sample_src, int num_samples)
+{
+    const int S = AE_HARM_VOICES + 1;
+    if (p->steel_buf == NULL)
+        return;
+    memset (p->steel_buf, 0, (size_t) num_samples * sizeof (float));
+    if (! p->steel_on && p->steel_deg == AE_HARM_DEG_OFF
+        && p->steel_env < 1e-4 && sample_voice_idle (p, S))
+        return; /* fully idle: nothing rings, nothing to do */
+
+    const double period = p->period_cents > 0.0 ? p->period_cents : 1200.0;
+    const double ref    = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
+    const int    edo    = p->edo > 0 ? p->edo : 12;
+
+    long deg = AE_HARM_DEG_OFF;
+    if (p->steel_on && voiced && lead_deg != AE_HARM_DEG_OFF)
+    {
+        const long root = ((long) p->steel_root % edo + edo) % edo;
+        const long cls  = ((lead_deg % edo) + edo) % edo;
+        long diff = ((cls - root) % edo + edo) % edo;
+        if (diff == 0)
+            diff = edo; /* on the root: drop an equave, never a unison */
+        deg = lead_deg - diff;
+    }
+
+    const bool sample_live = sample_src
+        && atomic_load_explicit (&p->smp_live, memory_order_acquire) >= 0;
+    if (deg != p->steel_deg)
+    {
+        if (deg == AE_HARM_DEG_OFF)
+        {
+            /* the playing ended: the ringing drone closes under the
+               release ceiling (the envelope below carries the synth) */
+            for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
+                if (p->smp[S][sl].rec != NULL)
+                    p->smp[S][sl].releasing = true;
+        }
+        else
+        {
+            p->steel_hz = ae_degree_hz (deg, edo, ref, period);
+            if (sample_live)
+                sample_strike (p, S, p->steel_hz,
+                               strike_gain (p, body_level_now (p), p->steel_hz)
+                                   * p->steel_level,
+                               1.0);
+        }
+        p->steel_deg = deg;
+    }
+
+    const double la  = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
+    const double lr  = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
+    const double atk = 1.0 - exp (-1.0 / (la * 0.001 * p->fs));
+    const double rel = 1.0 - exp (-1.0 / (lr * 0.001 * p->fs));
+    const double tgt = deg != AE_HARM_DEG_OFF ? 1.0 : 0.0;
+    double g_dry_u, g_smp;
+    sample_layer_gains (p->smp_mix, &g_dry_u, &g_smp);
+    (void) g_dry_u;
+
+    double env = p->steel_env;
+    if (sample_live || ! sample_voice_idle (p, S))
+    {
+        /* sample drone: the row rings under the lead's release ceiling,
+           through the section's tone and gains like every sample voice */
+        const double fade_step = 1.0 / (0.006 * p->fs);
+        for (int i = 0; i < num_samples; ++i)
+        {
+            env += (tgt - env) * (tgt > env ? atk : rel);
+            double x = sample_mix_slots (p, S, fade_step, rel);
+            x = sample_tone_tick (p, S, x);
+            p->steel_buf[i] = (float) (x * env * g_smp * p->smp_level);
+        }
+    }
+    else if (p->steel_hz > 0.0 && (tgt > 0.0 || env > 1e-4))
+    {
+        /* synth drone: the patch held at the drone pitch, volume-matched
+           to the playing like every synth voice, under the same section */
+        const AeSynthPatch *pat = &k_synth_patches[p->synth_patch];
+        synth_render_voice (p, pat, p->steel_hz, p->steel_phase,
+                            p->steel_lfo, &p->steel_lp,
+                            p->steel_buf, num_samples);
+        const double match = dclamp (p->in_level / synth_patch_rms (pat),
+                                     0.0, 4.0)
+                           * p->smp_level * g_smp * p->steel_level;
+        for (int i = 0; i < num_samples; ++i)
+        {
+            env += (tgt - env) * (tgt > env ? atk : rel);
+            p->steel_buf[i] = (float) (sample_tone_tick (p, S,
+                                           (double) p->steel_buf[i])
+                                       * env * match);
+        }
+    }
+    p->steel_env = env;
+}
+
 /* POLY mode: the whole (chordal) input through fixed-ratio shifters --
    the pedal "poly" contract. No detection, no snapping, no per-note
    anything: leadShiftSteps moves the chord, each harmony voice is its
@@ -3032,6 +3170,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     atomic_store_explicit (&p->voiced_out, gate, memory_order_relaxed);
     atomic_store_explicit (&p->detected_hz_out, 0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->target_hz_out,   0.0f, memory_order_relaxed);
+    atomic_store_explicit (&p->corr_hz_out,     0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->lead_deg_out, AE_HARM_DEG_OFF,
                            memory_order_relaxed);
 
@@ -3198,6 +3337,10 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                                strike_gain (p, base_level, note->hz)
                                    * w_note,
                                w_note);
+                /* bend-follow centre, seeded at birth: the note STARTS
+                   exactly corrected; deviation from here is expression */
+                p->poly_dev_ema[k] = 1200.0
+                    * log2 (note->hz / ae_degree_hz (deg, p->edo, ref, period));
                 if (note->level >= 0.35)
                 {
                     /* a substantial new note answers the onset; a weak
@@ -3263,7 +3406,24 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                 p->poly_refired[k] = true;
             }
             else if (on)
-                sample_repitch (p, k, out_hz);
+            {
+                /* Physical BEND-FOLLOW (research batch, "correct the
+                   centre, keep the modulation"): the note's deviation from
+                   its snapped degree rides the sample rate, scaled by
+                   EXPRESS, minus a slow per-row centre (~0.7 s) -- a bend
+                   or vibrato passes through continuously while a sustained
+                   detune is still corrected away. Clamped to one EDO step:
+                   past that the tracker re-snaps the degree anyway, and a
+                   glitched frame must not fling the pitch. */
+                const double step_c = period / (double) (p->edo > 0 ? p->edo : 12);
+                double dev = 1200.0
+                    * log2 (note->hz / ae_degree_hz (deg, p->edo, ref, period));
+                p->poly_dev_ema[k] += (dev - p->poly_dev_ema[k]) * 0.03;
+                double bend = (dev - p->poly_dev_ema[k]) * p->expression;
+                if (bend >  step_c) bend =  step_c;
+                if (bend < -step_c) bend = -step_c;
+                sample_repitch (p, k, out_hz * pow (2.0, bend / 1200.0));
+            }
             else if (p->poly_prev_id[k] != -1)
             {
                 /* death: the row's slots decay under the release
@@ -3417,6 +3577,24 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     }
     else
         p->mel_fed = false;
+    /* STEEL in poly: the drone sits under the LOWEST tracked note --
+       polyphony only has to prove a note exists; the drone is always the
+       root. Sample drone with the chord sampler, synth drone otherwise. */
+    {
+        long low = AE_HARM_DEG_OFF;
+        for (int k = 0; k < AE_POLY_MAX_NOTES; ++k)
+        {
+            const uint64_t w = atomic_load_explicit (&p->poly_note_out[k],
+                                                     memory_order_relaxed);
+            if (ae_poly_note_hz (w) > 0.0f)
+            {
+                const long d = (long) ae_poly_note_deg (w) + p->lead_shift;
+                if (low == AE_HARM_DEG_OFF || d < low)
+                    low = d;
+            }
+        }
+        steel_process (p, gate, low, chord_sampler, num_samples);
+    }
     if (chord_sampler)
     {
         const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
@@ -3481,7 +3659,8 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                            + (mel_on
                                   ? p->mel_mix * m_env
                                         * (mp->g_dry * dry + p->mel_sum[i])
-                                  : 0.0));
+                                  : 0.0)
+                           + p->steel_buf[i]);
     }
     p->v_gain = v_gain; p->lead_env = l_env; p->follow_gain_cur = f_g;
     p->mel_env = m_env;
@@ -3672,7 +3851,19 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             bool want = false;
             if (hz > 0.0 && ldeg != AE_HARM_DEG_OFF)
             {
-                if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg)
+                /* Bend-vs-jump (research batch): a degree change reached by
+                   a JUMP is a new note and strikes; one reached by a CREEP
+                   is the player bending, and the ringing sample follows it
+                   via the continuous repitch below instead of being
+                   re-picked at every degree line. The detector smears even
+                   an instant legato step across the analysis frame (~5
+                   hops), so a semitone hammer-on reads ~20-40 c/hop; a
+                   real bend measures under ~6 c/hop even played fast. 15
+                   splits them -- the cost is that a ONE-step legato in a
+                   fine EDO (54 c in 22) glides rather than re-picks, which
+                   is the pedal-steel reading of that gesture anyway. */
+                if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg
+                    && p->det_slope_hold > 15.0)
                     want = true;
                 if (p->att_seq != p->att_seq_seen
                     && p->atk_fast > 1.3 * p->atk_slow)
@@ -3690,7 +3881,15 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->smp_guard = (int) (0.040 * p->fs);
             }
         }
-        sample_repitch (p, L, hz);
+        /* Continuous repitch: the corrected pitch WITH the playing's own
+           deviation (EXPRESS) on top -- a physical bend rides the
+           recording. Falls back to the snapped target on builds/paths
+           that have not published a corrected pitch this block. */
+        {
+            const double ch = (double) atomic_load_explicit (
+                &p->corr_hz_out, memory_order_relaxed);
+            sample_repitch (p, L, ch > 0.0 ? ch : hz);
+        }
         const double fade_step = 1.0 / (0.006 * p->fs);
         /* The LEAD's ceiling is its own release, not the harmony's. */
         const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
@@ -3751,6 +3950,13 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                    p->formant_hold, p->formant_st);
         ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
     }
+
+    /* The STEEL drone rides under whatever the lead is (its render is a
+       no-op while the mode is off and nothing rings). */
+    steel_process (p, p->voiced,
+                   (long) atomic_load_explicit (&p->lead_deg_out,
+                                                memory_order_relaxed),
+                   lead_sample, num_samples);
 
     /* 3. Deliver the corrected voice against the latency-matched dry path.
        A synth lead has no dry component: its "unvoiced" is silence, not the
@@ -3821,7 +4027,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             wet_out[i] = (float) wet_only;
         p->smp_dry_g += (g_dry_lead - p->smp_dry_g) * gain_alpha;
         mono[i] = (float) (wet_only + (1.0 - v_gain) * dry
-                           + p->smp_dry_g * p->in_block[i]);
+                           + p->smp_dry_g * p->in_block[i]
+                           + p->steel_buf[i]);
     }
     p->v_gain = v_gain;
     p->lead_env = l_env;

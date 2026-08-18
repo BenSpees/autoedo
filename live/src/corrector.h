@@ -376,7 +376,7 @@ typedef struct
     double smp_level;
     double smp_tone_db;
     double smp_tone_db_cur, smp_tone_g_lo, smp_tone_g_hi;
-    double smp_tone_lp[AE_HARM_VOICES + 1];
+    double smp_tone_lp[AE_HARM_VOICES + 2];
     double smp_dry_g;
     /* MEL layer (experimental): a polyphonic SPECTRAL REMODELLER layered
        under the chord sampler -- the EHX 9-series architecture, not a
@@ -408,6 +408,44 @@ typedef struct
     bool   poly_shift_fed; /* the lead shifter is being fed (poly): false
                               while the chord sampler runs, so leaving
                               sampler mode resets stale state */
+
+    /* STEEL mode (field: pedal-steel dyad on the guitar itself): while
+       the lead is voiced, a ROOT DRONE sounds under the playing -- the
+       chart root's degree class at the nearest pitch BELOW the played
+       note (an equave down when the note IS the root, so the pair is
+       never a unison). The player bends their own string over it; the
+       drone holds until the playing ends, then decays under the lead
+       release. Sample leads drone the loaded bank (its own row above);
+       synth and shifted leads drone the synth patch (its own oscillator
+       state below, so the chart's droneOn rank stays independent). */
+    bool   steel_on;
+    int    steel_root;      /* root degree CLASS, 0..edo-1 (engine map) */
+    double steel_level;     /* steelLevelDb as linear */
+    long   steel_deg;       /* the drone's current absolute degree, or
+                               AE_HARM_DEG_OFF while nothing sounds */
+    double steel_env;       /* the drone's own envelope */
+    double steel_hz;        /* last drone pitch (the release rings on it) */
+    double steel_phase[AE_SYNTH_PARTIALS]; /* synth drone voice state -- */
+    double steel_lfo[AE_SYNTH_PARTIALS];   /* its own, so the chart's    */
+    double steel_lp;                       /* droneOn rank stays free    */
+    float *steel_buf;       /* per-block render staging */
+
+    /* Physical BEND-FOLLOW for a sample lead (mono): the sample follows
+       the corrected pitch WITH the playing's own deviation on top
+       (out_cents + expr_cents * expression -- the same pitch the shifter
+       aims at), not the bare snapped degree, so a real bend rides the
+       recording instead of stair-stepping the grid. corr_hz_out exports
+       it; det_slope_hold tells a bend from a legato jump (a hammer-on
+       moves a step in a hop, a bend creeps), so the degree-change
+       re-strike only fires on jumps. */
+    _Atomic float corr_hz_out;
+    double det_prev_cents;  /* last hop's detected pitch */
+    double det_slope_hold;  /* per-hop delta, peak-held ~25 ms */
+    /* POLY bend-follow: each tracked note's deviation from its snapped
+       degree passes to the sample rate (scaled by `expression`), minus a
+       slow per-row centre (seeded at birth, ~0.7 s) -- the centre is
+       corrected, the modulation is kept. */
+    double poly_dev_ema[AE_POLY_MAX_NOTES];
     /* The velocity REFERENCE: "how hard this player plays when playing
        hard". A rolling peak that decays over ~20 s, so the map follows the
        rig's actual headroom instead of assuming the signal reaches full
@@ -450,15 +488,17 @@ typedef struct
                              old notes under every new one, which the ear
                              reads as mud, not as sustain. */
         double renv;      /* the ceiling's own envelope, 1 -> 0 */
-    } smp[AE_HARM_VOICES + 1][AE_SMP_SLOTS];
-    /* [AE_HARM_VOICES] = the lead. Slots are a ring, not a pair: under
+    } smp[AE_HARM_VOICES + 2][AE_SMP_SLOTS];
+    /* [AE_HARM_VOICES] = the lead; [AE_HARM_VOICES + 1] = the STEEL DRONE
+       row (its own row so it collides with neither the lead, the ghosts,
+       nor the poly tracker's six). Slots are a ring, not a pair: under
        let-ring every strike needs its own, because the old one is still
        sounding rather than being faded past. */
-    int    smp_cur[AE_HARM_VOICES + 1];
-    bool   smp_pending[AE_HARM_VOICES + 1]; /* an onset is waiting for a
+    int    smp_cur[AE_HARM_VOICES + 2];
+    bool   smp_pending[AE_HARM_VOICES + 2]; /* an onset is waiting for a
                                                pitch to strike at */
-    int    smp_wait[AE_HARM_VOICES + 1];    /* samples it may keep waiting */
-    double smp_env[AE_HARM_VOICES + 1];
+    int    smp_wait[AE_HARM_VOICES + 2];    /* samples it may keep waiting */
+    double smp_env[AE_HARM_VOICES + 2];
 
     /* POLY sample mode (MEL9-style): the tracker's notes strike the
        loaded bank, EDO-snapped -- play a chord, hear the library play it.
@@ -804,6 +844,11 @@ void ae_corrector_set_mel (AeCorrector *p, double mix, double oct_lin,
                            double atk_ms, double rel_ms, int preset);
 int  ae_corrector_mel_presets (void);            /* table size */
 const char *ae_corrector_mel_preset_name (int i); /* NULL past the end */
+
+/* STEEL mode (steelMode / steelLevelDb; root class in ENGINE degrees,
+   0..edo-1 -- the caller maps the 12-TET rootNote). Live; any thread. */
+void ae_corrector_set_steel (AeCorrector *p, bool on, int root_deg,
+                             double level_lin);
 
 /* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
    between blocks. */
