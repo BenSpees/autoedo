@@ -2716,6 +2716,9 @@ static void harm_env_coeffs (const AeCorrector *p, double *atk, double *rel)
     *rel = 1.0 - exp (-1.0 / (rel_ms * 0.001 * p->fs));
 }
 
+static double sample_tone_tick (AeCorrector *p, int s, double x);
+static void   sample_layer_gains (double mix, double *g_dry, double *g_smp);
+
 /* 4b. Synth harmony: oscillator ghosts at the same target degrees the
    shifter voices would sing, each through the shared attack/release
    envelope. Unlike the shifter path there is no voiced crossfade -- a
@@ -2727,10 +2730,14 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
 {
     const AeSynthPatch *pat = &k_synth_patches[p->synth_patch];
     /* Volume-match to the singer: drive the patch to the sung RMS (capped
-       against a pathological match on near-silent gated input). */
+       against a pathological match on near-silent gated input) -- then the
+       consolidated SYNTH/SAMPLE section's fader and tone, exactly as the
+       sample voices wear them (field: synth sounds lost their level control
+       when leadSoundGainDb retired -- "not working or very quiet"). */
     const double level = (p->harm_hold && p->hold_latched) ? p->hold_level
                                                            : p->in_level;
-    const double match = dclamp (level / synth_patch_rms (pat), 0.0, 4.0);
+    const double match = dclamp (level / synth_patch_rms (pat), 0.0, 4.0)
+                       * p->smp_level;
     double atk_a, rel_a;
     harm_env_coeffs (p, &atk_a, &rel_a);
     /* Note-to-note glide, stepped once per block (~25 ms time constant). */
@@ -2765,10 +2772,16 @@ static void render_synth_harmony (AeCorrector *p, float *harm_l, float *harm_r,
         const double gl = p->h_gl[v], gr = p->h_gr[v];
         const double want = gate ? 1.0 : 0.0;
         const double a = gate ? atk_a : rel_a;
+        /* the section's mix taper and tone, exactly as sample ghosts wear
+           them -- one SYNTH/SAMPLE section, one law */
+        double g_dry_u, g_smp;
+        sample_layer_gains (p->smp_mix, &g_dry_u, &g_smp);
+        (void) g_dry_u;
         for (int i = 0; i < num_samples; ++i)
         {
             env += (want - env) * a;
-            const double s = buf[i] * env * match;
+            const double s = sample_tone_tick (p, v, buf[i])
+                           * env * match * g_smp;
             harm_l[i] += (float) (gl * s);
             harm_r[i] += (float) (gr * s);
         }
@@ -3060,6 +3073,11 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     if (p->onset_pulse)
     {
         p->poly_burst = (int) (0.150 * p->fs);
+        /* The MEL swell re-triggers PER ONSET (the Super Ego half of the
+           9-series lineage): a partial dip, so each attack blooms without
+           pumping the pad under a ringing chord. Sampler or not -- the
+           layer is poly's instrument either way. */
+        p->mel_env *= 1.0 - k_mel_presets[p->mel_preset].retrig;
         if (chord_sampler)
         {
             /* Arm the re-strum window: freeze each row's raw salience as
@@ -3086,12 +3104,6 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                onset properly first. */
             p->poly_fb     = (int) (0.070 * p->fs);
             p->poly_fb_due = false;
-            /* The MEL swell re-triggers PER ONSET (the Super Ego half of
-               the 9-series lineage): a partial dip, so each attack blooms
-               without pumping the pad under a ringing chord. Without this
-               the swell only ever fired after silence, and continuous
-               playing passed every pick straight through. */
-            p->mel_env *= 1.0 - k_mel_presets[p->mel_preset].retrig;
         }
     }
     p->poly_fill += num_samples;
@@ -3318,7 +3330,12 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
        sum under shared tape wow/flutter. Saturation and the bandwidth
        rolloff run in a second pass; the swell scales it at delivery. */
     const AeMelPresetSpec *mp = &k_mel_presets[p->mel_preset];
-    const bool mel_on = chord_sampler && p->mel_mix > 0.001
+    /* POLY is the only requirement (field: "turned on Poly but the Mel
+       control remained grayed") -- with its own shifter bank the layer no
+       longer borrows anything from the chord sampler, so it serves as the
+       pure 9-series voice with no bank loaded at all, or layers under the
+       sampler when one is up. */
+    const bool mel_on = p->mel_mix > 0.001
                      && p->mel_shifter[0] != NULL && p->mel_sum != NULL;
     if (mel_on)
     {
@@ -3706,10 +3723,20 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->wet_buf[i] = 0.0f;
         /* Volume-matched like the ghosts, and given the singer's vowel when
            the transfer is up -- a synth lead that tracks the mouth is the
-           point of pointing it at the lead. */
-        const double match = dclamp (p->in_level / synth_patch_rms (pat), 0.0, 4.0);
+           point of pointing it at the lead. Then the consolidated
+           SYNTH/SAMPLE section: fader, mix taper and tone, the same law
+           the sample lead wears (the synth lead had NO level control after
+           leadSoundGainDb retired -- the "not working or very quiet"). */
+        double g_dry_s, g_smp_s;
+        sample_layer_gains (p->smp_mix, &g_dry_s, &g_smp_s);
+        (void) g_dry_s; /* the dry side is mixed at delivery, latency-free */
+        const double match = dclamp (p->in_level / synth_patch_rms (pat),
+                                     0.0, 4.0)
+                           * p->smp_level * g_smp_s;
         for (int i = 0; i < num_samples; ++i)
-            p->wet_buf[i] = (float) (p->wet_buf[i] * match);
+            p->wet_buf[i] = (float) (sample_tone_tick (p, AE_HARM_VOICES,
+                                                       p->wet_buf[i])
+                                     * match);
         if (p->synth_vowel > 0.0)
         {
             if (p->vowel_mode == AE_VOWEL_MODE_LPC)
@@ -3766,13 +3793,13 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     const double f_a   = 1.0 - exp (-1.0 / (0.010 * p->fs));
     double f_g = p->follow_gain_cur;
 
-    /* The sample mix's DRY side (a sample lead only): the CURRENT input
+    /* The mix's DRY side (a sample OR synth lead): the CURRENT input
        block at the taper's dry gain -- the hands wait on the hardware
        buffer and nothing else, never on the detector's pipeline. By
        config INTENT, not bank state: a library that failed to load must
        not silence the player. */
     double g_dry_lead = 0.0;
-    if (lead_sample)
+    if (lead_sample || lead_synth)
     {
         double g_smp_unused;
         sample_layer_gains (p->smp_mix, &g_dry_lead, &g_smp_unused);
