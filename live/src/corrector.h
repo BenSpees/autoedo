@@ -441,6 +441,12 @@ typedef struct
     _Atomic float corr_hz_out;
     double det_prev_cents;  /* last hop's detected pitch */
     double det_slope_hold;  /* per-hop delta, peak-held ~25 ms */
+    bool   rel_collapse;    /* this hop's level is COLLAPSING (a damp, not
+                               a ring) -- the release slope-freeze verdict,
+                               shared: ghosts hold their pitch, the sample
+                               repitch holds the exported corrected pitch,
+                               and the degree-change strike stands down
+                               (a dying string's pitch dive is not a run) */
     /* POLY bend-follow: each tracked note's deviation from its snapped
        degree passes to the sample rate (scaled by `expression`), minus a
        slow per-row centre (seeded at birth, ~0.7 s) -- the centre is

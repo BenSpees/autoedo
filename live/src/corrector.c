@@ -2252,13 +2252,43 @@ static void run_detection (AeCorrector *p)
         const double out_expr = p->out_cents + p->expr_cents * p->expression;
         p->shift_semitones = dclamp ((out_expr + lead_shift_c - detected_cents) / 100.0,
                                      -36.0, 36.0);
+        /* The release slope-freeze verdict, decided HERE so the exported
+           pitch can honour it too (its full story sits at the harmony
+           freeze below). */
+        {
+            const int rb  = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
+            const int rbl = (p->rel_pos + AE_REL_RING - 15) % AE_REL_RING;
+            /* Three faces of a release (field, precise: "when I stop
+               pressing the string down but keep my finger on it, it
+               bends down; a right-hand mute doesn't"):
+               - a DAMP: level collapses fast (~110 dB/s over 40 ms);
+               - a slow damp: the same collapse read over 75 ms;
+               - a FINGER-LIFT: the string genuinely detunes FLAT as the
+                 fret grip eases while the level falls only gently --
+                 flat of centre while clearly decaying is a lift, never
+                 a bend (an intentional bend sustains its level, and an
+                 upward bend is never flat). */
+            const bool fast_c = p->rel_rms[rb] > 0.0f
+                             && rms < 0.6 * (double) p->rel_rms[rb];
+            const bool slow_c = p->rel_rms[rbl] > 0.0f
+                             && rms < 0.55 * (double) p->rel_rms[rbl];
+            const bool lift_c = p->rel_rms[rbl] > 0.0f
+                             && rms < 0.85 * (double) p->rel_rms[rbl]
+                             && p->expr_cents < -12.0;
+            p->rel_collapse = fast_c || slow_c || lift_c;
+        }
         /* The corrected pitch WITH the playing on top -- what the shifter
            aims at, exported so a sample lead can ride a physical bend
-           instead of stair-stepping the snapped grid. */
-        atomic_store_explicit (&p->corr_hz_out,
-                               (float) (ref * pow (2.0, (out_expr + lead_shift_c)
-                                                        / 1200.0)),
-                               memory_order_relaxed);
+           instead of stair-stepping the snapped grid. HELD through a
+           collapse: a damped string's pitch dives while still reading
+           voiced, and a ringing sample that followed it bent audibly
+           down on every release (field, with the pitch trace to prove
+           it). The freeze the ghosts always had, extended to the export. */
+        if (! p->rel_collapse)
+            atomic_store_explicit (&p->corr_hz_out,
+                                   (float) (ref * pow (2.0, (out_expr + lead_shift_c)
+                                                            / 1200.0)),
+                                   memory_order_relaxed);
         /* Bend-vs-jump: a hammer-on moves a step in one hop, a bend
            creeps. Peak-hold (~25 ms at the 5 ms hop) so the block-rate
            reader downstream still sees the jump hop. */
@@ -2298,11 +2328,8 @@ static void run_detection (AeCorrector *p)
            stable the whole time it was held must not change at the moment
            it is let go -- so while the level is collapsing, the ghosts
            keep the pitch they had and the rewind ring stops recording. */
-        {
-            const int rb = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
-            if (p->rel_rms[rb] > 0.0f && rms < 0.6 * (double) p->rel_rms[rb])
-                goto harmony_done;
-        }
+        if (p->rel_collapse)
+            goto harmony_done;
 
         /* HOLD: the ghosts are frozen where they were, so none of the
            retargeting below runs. The LEAD above still tracked normally --
@@ -3894,6 +3921,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                        slope reads zero, and the gate swallowed the
                        strike). */
                     if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg
+                        && ! p->rel_collapse
                         && (p->det_slope_hold > 15.0
                             || llabs (dstep) >= half_oct))
                         want = true;
