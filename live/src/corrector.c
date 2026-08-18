@@ -3621,9 +3621,10 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                                memory_order_relaxed);
     }
 
-    /* The chord sampler no longer layers the SHIFTED chord under itself:
-       the mix's other side is the latency-free dry (below), which covers
-       the onset better than a delayed shift ever did.
+    /* A sample lead no longer layers the SHIFTED chord under itself --
+       with a bank loaded or not: the mix's other side is the latency-free
+       dry (below), which covers the onset better than a delayed shift
+       ever did.
 
        The MEL layer (experimental, the EHX 9-series move) is the OTHER
        use of the shifter this mode frees up: pointed one clean octave up
@@ -3636,7 +3637,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
        attack; the swell blooms the transform in to own the sustain --
        which also makes the shifter's poly latency read as intent. */
     set_shift (p->shifter, lead_st, 220.0, p->formant_hold, p->formant_st);
-    if (! chord_sampler)
+    if (p->lead_source != AE_HARM_SRC_SAMPLE)
     {
         if (! p->poly_shift_fed)
         {
@@ -3649,6 +3650,13 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     }
     else
     {
+        /* Sample lead, bank loaded OR NOT: the wet slot stays silent.
+           With a bank the sampler rows own the strike; without one the
+           mix's latency-free dry side alone carries the instrument --
+           mono's rule exactly.  Running the shifted (unison) chord under
+           that same dry summed two copies of one signal ~100 ms apart:
+           a comb that measured -2 dB overall with the top octaves nulled
+           (field: "quieter than with autoedo off... missing high end"). */
         p->poly_shift_fed = false;
         memset (p->wet_buf, 0, (size_t) num_samples * sizeof (float));
     }

@@ -1587,6 +1587,63 @@ static void test_chord_sampler (void)
     if (system (cmd) != 0) { /* best effort */ }
 }
 
+/* A sample lead with NO bank loaded, in poly: the mix's latency-free dry
+   side alone carries the instrument -- mono's rule.  The regression this
+   pins (field: "dry guitar to loops via Sample mix at 50% comes out
+   quieter... missing high end"): the lead shifter used to render the
+   shifted (unison) chord into the wet slot whenever the chord sampler
+   was off, summing a ~100 ms-late resynthesized copy of the signal with
+   the dry -- a comb filter that measured ~-2 dB overall with the top
+   octaves nulled.  The output must be the input, bit-for-bit. */
+static void test_poly_sample_lead_no_bank (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                          AE_SHIFT_QUALITY_BALANCED
+                          | AE_SHIFT_QUALITY_POLY_FLAG);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    {
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+    }
+    ae_corrector_set_sample (p, 0.5, 0.9, true); /* mix 50: dry side full */
+
+    const int total = 512 * 200; /* ~2.1 s: gain smoothing fully settled */
+    float *in  = calloc ((size_t) total, sizeof (float));
+    float *out = calloc ((size_t) total, sizeof (float));
+    double ph1 = 0.0, ph2 = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        ph1 += 2.0 * M_PI * 220.0 / 48000.0;
+        ph2 += 2.0 * M_PI * 6000.0 / 48000.0;
+        /* the 6 kHz partial is the canary: the comb nulled it outright */
+        in[i] = (float) (0.30 * sin (ph1) + 0.06 * sin (ph2));
+    }
+    memcpy (out, in, (size_t) total * sizeof (float));
+    for (int off = 0; off < total; off += 512)
+        ae_corrector_process (p, out + off, NULL, NULL, 512);
+
+    double maxdiff = 0.0;
+    for (int i = total - 48000; i < total; ++i)
+    {
+        const double d = fabs ((double) out[i] - (double) in[i]);
+        if (d > maxdiff) maxdiff = d;
+    }
+    const double hi_in  = goertzel (in  + total - 48000, 48000, 6000.0, 48000.0);
+    const double hi_out = goertzel (out + total - 48000, 48000, 6000.0, 48000.0);
+    CHECK (maxdiff < 1e-3,
+           "poly sample lead, no bank: output IS the dry "
+           "(max deviation %.6f)", maxdiff);
+    CHECK (hi_out > 0.8 * hi_in,
+           "poly sample lead, no bank: high end survives "
+           "(6 kHz %.4f in, %.4f out)", hi_in, hi_out);
+
+    ae_corrector_free (p);
+    free (p); free (in); free (out);
+}
+
 /* Onset-first staging in the chord sampler (research batch 2026-08):
    an onset doubles the tracker rate for 150 ms (fresh chords commit a
    frame sooner) and arms a re-strum window -- a still-tracked note whose
@@ -5015,6 +5072,7 @@ int main (void)
     test_poly_onset_response();
     test_poly_restrum_fallback();
     test_chord_sampler();
+    test_poly_sample_lead_no_bank();
     test_mel_layer();
     test_mel_auto_analysis();
     test_steel_mode();
