@@ -1856,7 +1856,7 @@ static void test_mel_layer (void)
         }
         ae_corrector_set_sample (p, 1.0, 0.9, true);
         if (mel)
-            ae_corrector_set_mel (p, 1.0, 0.5, 150.0, 400.0);
+            ae_corrector_set_mel (p, 1.0, 0.5, 150.0, 400.0, 0);
 
         const int total = 512 * 280; /* ~3 s: shifter + swell fully in */
         float *buf = calloc ((size_t) total, sizeof (float));
@@ -1879,6 +1879,59 @@ static void test_mel_layer (void)
            "mel layer: the transform carries the playing's own timbre "
            "under the sampler (3rd harmonic %.4g on vs %.4g off)",
            h3[1], h3[0]);
+
+    /* The REMODELLER presets manufacture partials the input never had:
+       feed a PURE SINE and ask for "organ" -- the 3:1 footage (+19.02 st)
+       must appear at 3x the fundamental. The footage preset (dry + oct)
+       cannot put anything there, which is the whole distinction between
+       a footage stack and a spectral remodeller. */
+    {
+        double h3x[2] = { 0.0, 0.0 };
+        for (int organ = 0; organ < 2; ++organ)
+        {
+            AeCorrector *p = calloc (1, sizeof (AeCorrector));
+            ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                                  AE_SHIFT_QUALITY_BALANCED
+                                  | AE_SHIFT_QUALITY_POLY_FLAG);
+            ae_corrector_set_edo (p, 12);
+            ae_corrector_set_retune_ms (p, 0.0);
+            ae_corrector_set_transition_ms (p, 0.0);
+            char err[256] = "";
+            CHECK (ae_corrector_load_samples (p, root, "piano", NULL,
+                                              err, sizeof (err)),
+                   "mel preset: bank loads (%s)", err);
+            {
+                int srcs[AE_HARM_VOICES];
+                for (int v = 0; v < AE_HARM_VOICES; ++v)
+                    srcs[v] = AE_HARM_SRC_DEFAULT;
+                ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+            }
+            ae_corrector_set_sample (p, 1.0, 0.9, true);
+            ae_corrector_set_mel (p, 1.0, 0.5, 20.0, 400.0,
+                                  organ ? 1 : 0); /* organ vs footage */
+
+            const int total = 512 * 280;
+            float *buf = calloc ((size_t) total, sizeof (float));
+            double ph = 0.0;
+            for (int i = 0; i < total; ++i)
+            {
+                ph += 2.0 * M_PI * f0 / 48000.0;
+                buf[i] = (float) (0.2 * sin (ph)); /* PURE: no partials */
+            }
+            for (int off = 0; off < total; off += 512)
+                ae_corrector_process (p, buf + off, NULL, NULL, 512);
+
+            /* organ wow is +-1.2 cents: a short window (2 Hz bins)
+               rides the drift */
+            h3x[organ] = goertzel (buf + total - 24000, 24000,
+                                   3.0 * f0, 48000.0);
+            ae_corrector_free (p);
+            free (p); free (buf);
+        }
+        CHECK (h3x[1] > 5.0 * h3x[0] && h3x[1] > 1e-3,
+               "mel preset: organ MANUFACTURES the 3:1 partial from a pure "
+               "sine (%.4g organ vs %.4g footage)", h3x[1], h3x[0]);
+    }
 
     snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
     if (system (cmd) != 0) { /* best effort */ }

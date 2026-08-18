@@ -185,8 +185,15 @@ typedef struct
        2:1 is still 22-EDO). The sampler's fast strikes cover the attack;
        this layer blooms in and owns the sustain. Poly + sample lead only. */
     double   mel_mix;                /* melMix 0..1: layer level; 0 = off */
+    int      mel_preset;             /* melPreset: index into the engine's
+                                        preset table (0 = "footage", the
+                                        plain dry+octave stack; the rest
+                                        are spectral-remodeller
+                                        instruments -- organ, flute,
+                                        strings, brass, choir) */
     double   mel_oct_db;             /* melOctDb -60..+12: the 4' footage's
-                                        gain against the 8' dry */
+                                        gain against the 8' dry (footage
+                                        preset only) */
     double   mel_attack_ms;          /* melAttackMs: the swell */
     double   mel_release_ms;         /* melReleaseMs: the tail ceiling */
     int      synth_patch;            /* index into the engine's patch table */

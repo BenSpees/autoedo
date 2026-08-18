@@ -378,18 +378,36 @@ typedef struct
     double smp_tone_db_cur, smp_tone_g_lo, smp_tone_g_hi;
     double smp_tone_lp[AE_HARM_VOICES + 1];
     double smp_dry_g;
-    /* MEL layer (experimental): a fixed-ratio transform layered under the
-       chord sampler -- latency-matched dry + the chord shifted one clean
-       octave (the lead shifter, otherwise idle in chord-sampler mode),
-       under its own swell/tail envelope. See audio.h for the why. */
+    /* MEL layer (experimental): a polyphonic SPECTRAL REMODELLER layered
+       under the chord sampler -- the EHX 9-series architecture, not a
+       sampler: several resynthesized copies of the input spectrum (a
+       dedicated shifter bank, including a UNISON copy, so even the 8'
+       is no longer the raw guitar), each under its own spectral shape,
+       the sum under shared tape wow/flutter, saturation, bandwidth
+       rolloff, and a per-onset swell. Presets are tiny parameter tables
+       (ratios, gains, cutoffs, artifact depths) -- the instrument is
+       the parameters, not stored audio. Preset 0 ("footage") keeps the
+       original dry+octave behaviour exactly. */
+    int    mel_preset;   /* index into k_mel_presets (0 = footage) */
     double mel_mix;      /* 0..1, 0 = off */
-    double mel_oct_g;    /* linear gain of the 2:1 footage */
+    double mel_oct_g;    /* linear gain of the 2:1 footage (footage preset) */
     double mel_atk_ms;   /* swell */
     double mel_rel_ms;   /* tail ceiling */
     double mel_env;      /* the layer's own envelope state */
+    AeShifter *mel_shifter[3]; /* unison-resynth / +oct / preset third
+                                  (allocated in prepare, poly only) */
+    bool   mel_fed;      /* the bank is being fed; reset stale state on
+                            re-engage */
+    double mel_lp[3];    /* per-layer one-pole LP states */
+    double mel_mlp;      /* master rolloff state */
+    double mel_wow;      /* tape wow: random-walk cents, shared by every
+                            layer (one tape, one capstan) */
+    double mel_flut_ph;  /* flutter phase */
+    unsigned mel_rng;    /* the wow's own LCG */
+    float *mel_sum;      /* the summed layer, staged per block */
     bool   poly_shift_fed; /* the lead shifter is being fed (poly): false
-                              while the chord sampler runs without the MEL
-                              layer, so re-engaging resets stale state */
+                              while the chord sampler runs, so leaving
+                              sampler mode resets stale state */
     /* The velocity REFERENCE: "how hard this player plays when playing
        hard". A rolling peak that decays over ~20 s, so the map follows the
        rig's actual headroom instead of assuming the signal reaches full
@@ -780,10 +798,12 @@ void ae_corrector_set_sample_level (AeCorrector *p, double lin);
 /* sampleToneDb tilt in dB (see smp_tone_db). Live; any thread. */
 void ae_corrector_set_sample_tone (AeCorrector *p, double db);
 
-/* The MEL layer (melMix / melOctDb / melAttackMs / melReleaseMs -- see
-   the field block). Live; any thread. */
+/* The MEL layer (melMix / melOctDb / melAttackMs / melReleaseMs /
+   melPreset -- see the field block). Live; any thread. */
 void ae_corrector_set_mel (AeCorrector *p, double mix, double oct_lin,
-                           double atk_ms, double rel_ms);
+                           double atk_ms, double rel_ms, int preset);
+int  ae_corrector_mel_presets (void);            /* table size */
+const char *ae_corrector_mel_preset_name (int i); /* NULL past the end */
 
 /* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
    between blocks. */

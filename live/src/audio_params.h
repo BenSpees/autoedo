@@ -95,6 +95,7 @@ typedef struct
     _Atomic double   sample_match;
     _Atomic double   sample_tilt;
     _Atomic double   mel_mix;
+    _Atomic int      mel_preset;
     _Atomic double   mel_oct_lin;
     _Atomic double   mel_attack_ms;
     _Atomic double   mel_release_ms;
@@ -255,6 +256,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->sample_match,    p->sample_match,    memory_order_relaxed);
     atomic_store_explicit (&a->sample_tilt,     p->sample_tilt,     memory_order_relaxed);
     atomic_store_explicit (&a->mel_mix,         p->mel_mix,         memory_order_relaxed);
+    atomic_store_explicit (&a->mel_preset,      p->mel_preset,      memory_order_relaxed);
     atomic_store_explicit (&a->mel_oct_lin,
                            pow (10.0, p->mel_oct_db / 20.0), memory_order_relaxed);
     atomic_store_explicit (&a->mel_attack_ms,   p->mel_attack_ms,   memory_order_relaxed);
@@ -387,7 +389,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->mel_mix, memory_order_relaxed),
                           atomic_load_explicit (&a->mel_oct_lin, memory_order_relaxed),
                           atomic_load_explicit (&a->mel_attack_ms, memory_order_relaxed),
-                          atomic_load_explicit (&a->mel_release_ms, memory_order_relaxed));
+                          atomic_load_explicit (&a->mel_release_ms, memory_order_relaxed),
+                          atomic_load_explicit (&a->mel_preset, memory_order_relaxed));
     ae_corrector_set_poly_notes (ps,
                           atomic_load_explicit (&a->poly_notes, memory_order_relaxed));
     ae_corrector_set_gate (ps,

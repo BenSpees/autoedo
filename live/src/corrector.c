@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define AE_PI       3.14159265358979323846
 #define AE_SQRT2    1.41421356237309504880
 #define AE_MIN_FREQ 65.0    /* default lowest detectable pitch (Hz) */
@@ -604,6 +608,12 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->shifter = ae_shifter_create (p->fs, p->block_samples);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         p->h_shifter[v] = ae_shifter_create (p->fs, p->block_samples);
+    if (p->poly)
+        /* the MEL remodeller's bank: unison resynth + two footages.
+           Poly only -- the layer is the chord sampler's companion. Idle
+           layers cost nothing (skipped below zero gain). */
+        for (int l = 0; l < 3; ++l)
+            p->mel_shifter[l] = ae_shifter_create (p->fs, p->block_samples);
 
     p->latency = p->shifter != NULL ? ae_shifter_latency (p->shifter)
                                     : p->block_samples;
@@ -633,6 +643,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->voice_buf = calloc ((size_t) p->max_block, sizeof (float));
     free (p->lead_wet);
     p->lead_wet  = calloc ((size_t) p->max_block, sizeof (float));
+    free (p->mel_sum);
+    p->mel_sum   = calloc ((size_t) p->max_block, sizeof (float));
     free (p->lpc_res);
     p->lpc_res   = calloc ((size_t) p->max_block, sizeof (float));
 
@@ -899,6 +911,11 @@ void ae_corrector_free_shifters (AeCorrector *p)
         ae_shifter_destroy (p->h_shifter[v]);
         p->h_shifter[v] = NULL;
     }
+    for (int l = 0; l < 3; ++l)
+    {
+        ae_shifter_destroy (p->mel_shifter[l]);
+        p->mel_shifter[l] = NULL;
+    }
 }
 
 void ae_corrector_free (AeCorrector *p)
@@ -912,6 +929,8 @@ void ae_corrector_free (AeCorrector *p)
     free (p->lead_wet);
     p->lead_wet = NULL;
     p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
+    free (p->mel_sum);
+    p->mel_sum = NULL;
     free (p->lpc_res);
     p->lpc_res = NULL;
     free (p->sus_buf);
@@ -1105,13 +1124,70 @@ void ae_corrector_set_sample_tone (AeCorrector *p, double db)
     p->smp_tone_db = db < -12.0 ? -12.0 : (db > 12.0 ? 12.0 : db);
 }
 
+/* The MEL preset table: each "instrument" is a parameter set, never
+   stored audio -- ratios and gains of the resynthesized copies, a
+   spectral shape per copy (one-pole LP), artifact depths (shared tape
+   wow, flutter, saturation drive, master bandwidth) and how hard a new
+   onset re-swells the envelope. The unison copy goes THROUGH the
+   shifter bank at ratio 1: resynthesis smears the pick transient, which
+   is most of why the layer stops sounding like the guitar. Ratios are
+   harmonic (2:1, 3:1), so any tuning survives them; the tiny detunes
+   (strings, choir) are ensemble, not temperament. */
+typedef struct { double st, gain, lp_hz; bool sweep; } AeMelLayerSpec;
+typedef struct
+{
+    const char    *name;
+    double         g_dry;      /* the RAW latency-matched dry's share */
+    AeMelLayerSpec layer[3];
+    double         wow_c;      /* tape wow depth, cents (random walk) */
+    double         flut_c;     /* flutter depth, cents (~6.3 Hz) */
+    double         drive;      /* soft saturation amount */
+    double         master_lp;  /* bandwidth rolloff Hz; 0 = none */
+    double         retrig;     /* onset re-swell: env *= (1 - retrig) */
+} AeMelPresetSpec;
+
+static const AeMelPresetSpec k_mel_presets[] = {
+    /* gain -1 in the octave slot = "use melOctDb" (the footage knob) */
+    { "footage", 1.0, { { 0.0,  0.0,    0, false },
+                        { 12.0, -1.0,   0, false },
+                        { 0.0,  0.0,    0, false } }, 0.0, 0.0, 0.0,    0, 0.0 },
+    { "organ",   0.0, { { 0.0,   1.0, 7000, false },
+                        { 12.0,  0.5, 7000, false },
+                        { 19.02, 0.35, 6000, false } }, 1.2, 0.4, 0.20, 7500, 0.35 },
+    { "flute",   0.0, { { 0.0,   1.0, 1600, false },
+                        { 12.0,  0.18, 2500, false },
+                        { 0.0,   0.0,    0, false } }, 3.5, 0.9, 0.15, 5000, 0.50 },
+    { "strings", 0.0, { { 0.0,   0.9, 5200, false },
+                        { 12.0,  0.45, 5200, false },
+                        { 0.18,  0.55, 4500, false } }, 2.5, 0.7, 0.20, 6500, 0.55 },
+    { "brass",   0.0, { { 0.0,   1.0, 3800, true  },
+                        { -12.0, 0.35, 2500, false },
+                        { 12.0,  0.25, 3800, false } }, 1.5, 1.0, 0.35, 6000, 0.60 },
+    { "choir",   0.0, { { 0.0,   0.9, 3400, false },
+                        { 12.0,  0.4, 3000, false },
+                        { -0.22, 0.6, 3400, false } }, 4.0, 0.5, 0.15, 5000, 0.45 },
+};
+
+int ae_corrector_mel_presets (void)
+{
+    return (int) (sizeof (k_mel_presets) / sizeof (k_mel_presets[0]));
+}
+
+const char *ae_corrector_mel_preset_name (int i)
+{
+    return i >= 0 && i < ae_corrector_mel_presets () ? k_mel_presets[i].name
+                                                     : NULL;
+}
+
 void ae_corrector_set_mel (AeCorrector *p, double mix, double oct_lin,
-                           double atk_ms, double rel_ms)
+                           double atk_ms, double rel_ms, int preset)
 {
     p->mel_mix    = mix < 0.0 ? 0.0 : (mix > 1.0 ? 1.0 : mix);
     p->mel_oct_g  = oct_lin < 0.0 ? 0.0 : (oct_lin > 4.0 ? 4.0 : oct_lin);
     p->mel_atk_ms = atk_ms < 0.0 ? 0.0 : (atk_ms > 5000.0 ? 5000.0 : atk_ms);
     p->mel_rel_ms = rel_ms < 5.0 ? 5.0 : (rel_ms > 10000.0 ? 10000.0 : rel_ms);
+    p->mel_preset = preset < 0 ? 0
+                  : (preset >= ae_corrector_mel_presets () ? 0 : preset);
 }
 
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin)
@@ -3010,6 +3086,12 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                onset properly first. */
             p->poly_fb     = (int) (0.070 * p->fs);
             p->poly_fb_due = false;
+            /* The MEL swell re-triggers PER ONSET (the Super Ego half of
+               the 9-series lineage): a partial dip, so each attack blooms
+               without pumping the pad under a ringing chord. Without this
+               the swell only ever fired after silence, and continuous
+               playing passed every pick straight through. */
+            p->mel_env *= 1.0 - k_mel_presets[p->mel_preset].retrig;
         }
     }
     p->poly_fill += num_samples;
@@ -3211,26 +3293,113 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
        missing or wrong notes. The sampler's fast strikes cover the
        attack; the swell blooms the transform in to own the sustain --
        which also makes the shifter's poly latency read as intent. */
-    const bool mel_on = chord_sampler && p->mel_mix > 0.001;
-    set_shift (p->shifter, mel_on ? lead_st + 12.0 : lead_st, 220.0,
-               p->formant_hold, p->formant_st);
-    if (! chord_sampler || mel_on)
+    set_shift (p->shifter, lead_st, 220.0, p->formant_hold, p->formant_st);
+    if (! chord_sampler)
     {
         if (! p->poly_shift_fed)
         {
-            /* the shifter sat unfed while the sampler ran alone; its
-               state is stale audio -- start clean */
+            /* the shifter sat unfed while the sampler ran; its state is
+               stale audio -- start clean */
             ae_shifter_reset (p->shifter);
             p->poly_shift_fed = true;
         }
-        /* voice_buf is free until the ghosts run (after delivery) */
-        ae_shifter_process (p->shifter, p->in_block,
-                            mel_on ? p->voice_buf : p->wet_buf, num_samples);
+        ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
     }
     else
+    {
         p->poly_shift_fed = false;
-    if (chord_sampler)
         memset (p->wet_buf, 0, (size_t) num_samples * sizeof (float));
+    }
+
+    /* The MEL remodeller: up to three resynthesized copies of the input
+       spectrum through the dedicated bank -- including the UNISON copy,
+       whose resynthesis smears the pick transient (the single strongest
+       "this is a guitar" cue) -- each under its own spectral shape, the
+       sum under shared tape wow/flutter. Saturation and the bandwidth
+       rolloff run in a second pass; the swell scales it at delivery. */
+    const AeMelPresetSpec *mp = &k_mel_presets[p->mel_preset];
+    const bool mel_on = chord_sampler && p->mel_mix > 0.001
+                     && p->mel_shifter[0] != NULL && p->mel_sum != NULL;
+    if (mel_on)
+    {
+        if (! p->mel_fed)
+        {
+            for (int l = 0; l < 3; ++l)
+            {
+                ae_shifter_reset (p->mel_shifter[l]);
+                p->mel_lp[l] = 0.0;
+            }
+            p->mel_mlp = 0.0;
+            p->mel_fed = true;
+        }
+        /* One tape, one capstan: a single wow walk detunes every layer
+           together, plus a faster flutter. Per block is plenty. */
+        p->mel_rng = p->mel_rng * 1664525u + 1013904223u;
+        const double r01 = (double) (p->mel_rng >> 8) / 16777216.0;
+        p->mel_wow += (r01 - 0.5) * mp->wow_c * 0.2;
+        if (p->mel_wow >  mp->wow_c) p->mel_wow =  mp->wow_c;
+        if (p->mel_wow < -mp->wow_c) p->mel_wow = -mp->wow_c;
+        p->mel_flut_ph += 6.3 * 2.0 * M_PI * num_samples / p->fs;
+        if (p->mel_flut_ph > 2.0 * M_PI)
+            p->mel_flut_ph -= 2.0 * M_PI;
+        const double wob_st = (p->mel_wow
+                               + mp->flut_c * sin (p->mel_flut_ph)) / 100.0;
+
+        memset (p->mel_sum, 0, (size_t) num_samples * sizeof (float));
+        const double env_now = p->mel_env; /* for the brass filter sweep */
+        for (int l = 0; l < 3; ++l)
+        {
+            const double g = mp->layer[l].gain < 0.0 ? p->mel_oct_g
+                                                     : mp->layer[l].gain;
+            if (g <= 0.001)
+                continue;
+            set_shift (p->mel_shifter[l],
+                       lead_st + mp->layer[l].st + wob_st, 220.0,
+                       p->formant_hold, p->formant_st);
+            /* voice_buf is free until the ghosts run (after delivery) */
+            ae_shifter_process (p->mel_shifter[l], p->in_block,
+                                p->voice_buf, num_samples);
+            double fc = mp->layer[l].lp_hz;
+            if (mp->layer[l].sweep)
+                /* the brass move: the swell IS a filter sweep -- the
+                   spectral trajectory, not just a fade */
+                fc *= 0.2 + 0.8 * env_now;
+            if (fc > 0.0)
+            {
+                const double a = 1.0 - exp (-2.0 * M_PI * fc / p->fs);
+                double s = p->mel_lp[l];
+                for (int i = 0; i < num_samples; ++i)
+                {
+                    s += ((double) p->voice_buf[i] - s) * a;
+                    p->mel_sum[i] += (float) (g * s);
+                }
+                p->mel_lp[l] = s;
+            }
+            else
+                for (int i = 0; i < num_samples; ++i)
+                    p->mel_sum[i] += (float) (g * p->voice_buf[i]);
+        }
+        /* Tape character on the sum: soft saturation, then the bandwidth
+           rolloff -- the deliberate Mellotron ugliness, kept modest. */
+        if (mp->drive > 0.0 || mp->master_lp > 0.0)
+        {
+            const double d = mp->drive;
+            const double a = mp->master_lp > 0.0
+                ? 1.0 - exp (-2.0 * M_PI * mp->master_lp / p->fs) : 1.0;
+            double s = p->mel_mlp;
+            for (int i = 0; i < num_samples; ++i)
+            {
+                double x = p->mel_sum[i];
+                if (d > 0.0)
+                    x = x * (1.0 + d) / (1.0 + d * fabs (x));
+                s += (x - s) * a;
+                p->mel_sum[i] = (float) s;
+            }
+            p->mel_mlp = s;
+        }
+    }
+    else
+        p->mel_fed = false;
     if (chord_sampler)
     {
         const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
@@ -3288,12 +3457,13 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                                   ? 0.0
                                   : (1.0 - v_gain) * dry)
                            + p->smp_dry_g * p->in_block[i]
-                           /* the MEL layer: 8' latency-matched dry + 4'
-                              octave footage, swelled -- both sit at the
-                              shifter's latency, mutually phase-honest */
+                           /* the MEL layer: the preset's share of raw dry
+                              (footage only) plus the remodelled sum --
+                              everything at the shifter's latency, mutually
+                              phase-honest -- under the swell */
                            + (mel_on
                                   ? p->mel_mix * m_env
-                                        * (dry + p->mel_oct_g * p->voice_buf[i])
+                                        * (mp->g_dry * dry + p->mel_sum[i])
                                   : 0.0));
     }
     p->v_gain = v_gain; p->lead_env = l_env; p->follow_gain_cur = f_g;

@@ -294,6 +294,7 @@ static void config_defaults (App *app)
     c->params.sample_vel_ref  = -1.0; /* observe the reference, "auto" */
     c->params.poly_notes      = 6;    /* chord sampler polyphony cap */
     c->params.mel_mix         = 0.0;  /* MEL layer off until asked for */
+    c->params.mel_preset      = 0;    /* "footage": the plain stack */
     c->params.mel_oct_db      = -6.0; /* the 4' footage under the 8' dry */
     c->params.mel_attack_ms   = 150.0; /* the swell IS the identity */
     c->params.mel_release_ms  = 400.0;
@@ -515,7 +516,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
               "\"sampleMatch\":%.4g,\"strikeTilt\":%.4g,"
               "\"sampleLevelDb\":%.4g,\"sampleToneDb\":%.4g,"
-              "\"melMix\":%.4g,\"melOctDb\":%.4g,"
+              "\"melMix\":%.4g,\"melPreset\":\"%s\",\"melOctDb\":%.4g,"
               "\"melAttackMs\":%.4g,\"melReleaseMs\":%.4g,"
               "\"followUrl\":\"%s\",\"followHold\":%s,\"followEnv\":%.4g,"
               "\"polyMode\":%s,\"polyNotes\":%d,\"gateDb\":%.4g,"
@@ -541,7 +542,11 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.sample_ring ? "true" : "false",
               c->params.sample_match, c->params.sample_tilt,
               c->params.sample_level_db, c->params.sample_tone_db,
-              c->params.mel_mix, c->params.mel_oct_db,
+              c->params.mel_mix,
+              ae_corrector_mel_preset_name (c->params.mel_preset) != NULL
+                  ? ae_corrector_mel_preset_name (c->params.mel_preset)
+                  : "footage",
+              c->params.mel_oct_db,
               c->params.mel_attack_ms, c->params.mel_release_ms,
               c->follow_url, app->follow_hold ? "true" : "false",
               c->params.follow_env,
@@ -875,6 +880,15 @@ static bool config_apply_json (App *app, const char *json)
         c->params.sample_tone_db = num_clamp (num, -12.0, 12.0);
     if (ae_json_get_number (json, "melMix", &num))
         c->params.mel_mix = num_clamp (num, 0.0, 1.0);
+    if (ae_json_get_string (json, "melPreset", str, sizeof (str)))
+    {
+        for (int i = 0; ae_corrector_mel_preset_name (i) != NULL; ++i)
+            if (strcmp (str, ae_corrector_mel_preset_name (i)) == 0)
+            {
+                c->params.mel_preset = i;
+                break;
+            }
+    }
     if (ae_json_get_number (json, "melOctDb", &num))
         c->params.mel_oct_db = num_clamp (num, -60.0, 12.0);
     if (ae_json_get_number (json, "melAttackMs", &num))
