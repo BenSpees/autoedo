@@ -378,6 +378,18 @@ typedef struct
     double smp_tone_db_cur, smp_tone_g_lo, smp_tone_g_hi;
     double smp_tone_lp[AE_HARM_VOICES + 1];
     double smp_dry_g;
+    /* MEL layer (experimental): a fixed-ratio transform layered under the
+       chord sampler -- latency-matched dry + the chord shifted one clean
+       octave (the lead shifter, otherwise idle in chord-sampler mode),
+       under its own swell/tail envelope. See audio.h for the why. */
+    double mel_mix;      /* 0..1, 0 = off */
+    double mel_oct_g;    /* linear gain of the 2:1 footage */
+    double mel_atk_ms;   /* swell */
+    double mel_rel_ms;   /* tail ceiling */
+    double mel_env;      /* the layer's own envelope state */
+    bool   poly_shift_fed; /* the lead shifter is being fed (poly): false
+                              while the chord sampler runs without the MEL
+                              layer, so re-engaging resets stale state */
     /* The velocity REFERENCE: "how hard this player plays when playing
        hard". A rolling peak that decays over ~20 s, so the map follows the
        rig's actual headroom instead of assuming the signal reaches full
@@ -767,6 +779,11 @@ void ae_corrector_set_sample_level (AeCorrector *p, double lin);
 
 /* sampleToneDb tilt in dB (see smp_tone_db). Live; any thread. */
 void ae_corrector_set_sample_tone (AeCorrector *p, double db);
+
+/* The MEL layer (melMix / melOctDb / melAttackMs / melReleaseMs -- see
+   the field block). Live; any thread. */
+void ae_corrector_set_mel (AeCorrector *p, double mix, double oct_lin,
+                           double atk_ms, double rel_ms);
 
 /* gateDb as linear RMS; <= 0 restores the built-in default. Audio thread,
    between blocks. */

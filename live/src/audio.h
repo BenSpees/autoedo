@@ -176,6 +176,19 @@ typedef struct
                                         this many simultaneous notes (1..6).
                                         Live; only meaningful with polyMode
                                         on and leadSource "sample" */
+    /* MEL layer (experimental, the EHX 9-series move): a fixed-ratio
+       TRANSFORM of the playing itself, layered under the chord sampler --
+       the latency-matched dry (8') plus the whole chord shifted a clean
+       octave (4'), swelled in under its own envelope. Zero decisions in
+       the layer: detection errors degrade as timbre, never as wrong
+       notes, and a harmonic ratio is tuning-agnostic (a 22-EDO chord at
+       2:1 is still 22-EDO). The sampler's fast strikes cover the attack;
+       this layer blooms in and owns the sustain. Poly + sample lead only. */
+    double   mel_mix;                /* melMix 0..1: layer level; 0 = off */
+    double   mel_oct_db;             /* melOctDb -60..+12: the 4' footage's
+                                        gain against the 8' dry */
+    double   mel_attack_ms;          /* melAttackMs: the swell */
+    double   mel_release_ms;         /* melReleaseMs: the tail ceiling */
     int      synth_patch;            /* index into the engine's patch table */
     double   ensemble_depth;         /* 0..1 */
     double   synth_vowel;            /* 0..1 formant transfer */

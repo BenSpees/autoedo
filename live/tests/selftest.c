@@ -1807,6 +1807,83 @@ static void test_poly_restrum_fallback (void)
     if (system (cmd) != 0) { /* best effort */ }
 }
 
+/* The MEL layer (experimental): a fixed-ratio transform -- latency-matched
+   dry (8') + the chord shifted one clean octave (4') -- swelled in UNDER
+   the chord sampler. The discriminator is the input's 3rd harmonic: the
+   bank is a pure sine (contributes nothing there), so any energy at 3x the
+   played fundamental came through the transform layer. Off = absent (the
+   chord sampler suppresses the input); on = present. */
+static void test_mel_layer (void)
+{
+    const char *root = "/tmp/ae-smp-mel";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "mel layer: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    const double f0 = 130.81; /* C3: its 3rd harmonic (392.4) is no
+                                 partial of the C4 sine the bank plays */
+    double h3[2] = { 0.0, 0.0 };
+    for (int mel = 0; mel < 2; ++mel)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED
+                              | AE_SHIFT_QUALITY_POLY_FLAG);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        ae_corrector_set_transition_ms (p, 0.0);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+               "mel layer: bank loads (%s)", err);
+        {
+            int srcs[AE_HARM_VOICES];
+            for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+            ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        }
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        if (mel)
+            ae_corrector_set_mel (p, 1.0, 0.5, 150.0, 400.0);
+
+        const int total = 512 * 280; /* ~3 s: shifter + swell fully in */
+        float *buf = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * f0 / 48000.0;
+            buf[i] = (float) (0.15 * (sin (ph) + 0.35 * sin (2.0 * ph)
+                                              + 0.20 * sin (3.0 * ph)));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+
+        h3[mel] = goertzel (buf + total - 48000, 48000, 3.0 * f0, 48000.0);
+
+        ae_corrector_free (p);
+        free (p); free (buf);
+    }
+    CHECK (h3[1] > 5.0 * h3[0] && h3[1] > 1e-3,
+           "mel layer: the transform carries the playing's own timbre "
+           "under the sampler (3rd harmonic %.4g on vs %.4g off)",
+           h3[1], h3[0]);
+
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_follow_link (void)
 {
     /* encode: identity inside range, class-preserving fold outside */
@@ -4678,6 +4755,7 @@ int main (void)
     test_poly_onset_response();
     test_poly_restrum_fallback();
     test_chord_sampler();
+    test_mel_layer();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();

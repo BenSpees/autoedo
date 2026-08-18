@@ -1105,6 +1105,15 @@ void ae_corrector_set_sample_tone (AeCorrector *p, double db)
     p->smp_tone_db = db < -12.0 ? -12.0 : (db > 12.0 ? 12.0 : db);
 }
 
+void ae_corrector_set_mel (AeCorrector *p, double mix, double oct_lin,
+                           double atk_ms, double rel_ms)
+{
+    p->mel_mix    = mix < 0.0 ? 0.0 : (mix > 1.0 ? 1.0 : mix);
+    p->mel_oct_g  = oct_lin < 0.0 ? 0.0 : (oct_lin > 4.0 ? 4.0 : oct_lin);
+    p->mel_atk_ms = atk_ms < 0.0 ? 0.0 : (atk_ms > 5000.0 ? 5000.0 : atk_ms);
+    p->mel_rel_ms = rel_ms < 5.0 ? 5.0 : (rel_ms > 10000.0 ? 10000.0 : rel_ms);
+}
+
 void ae_corrector_set_vel_ref (AeCorrector *p, double ref_lin)
 {
     p->vel_ref_fixed = ref_lin < 0.0 ? -1.0 : (ref_lin > 1.0 ? 1.0 : ref_lin);
@@ -3188,13 +3197,39 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                                memory_order_relaxed);
     }
 
-    set_shift (p->shifter, lead_st, 220.0, p->formant_hold, p->formant_st);
     /* The chord sampler no longer layers the SHIFTED chord under itself:
        the mix's other side is the latency-free dry (below), which covers
-       the onset better than a delayed shift ever did. */
-    if (! chord_sampler)
-        ae_shifter_process (p->shifter, p->in_block, p->wet_buf, num_samples);
+       the onset better than a delayed shift ever did.
+
+       The MEL layer (experimental, the EHX 9-series move) is the OTHER
+       use of the shifter this mode frees up: pointed one clean octave up
+       (a 2:1 harmonic ratio stays in tune in ANY tuning -- no grid in the
+       path), its output is stacked with the latency-matched dry at
+       delivery below, under the layer's own swell. Zero decisions live
+       in it: when the tracker drops a note mid-chord, this layer still
+       carries it, so detection errors degrade as timbre, never as
+       missing or wrong notes. The sampler's fast strikes cover the
+       attack; the swell blooms the transform in to own the sustain --
+       which also makes the shifter's poly latency read as intent. */
+    const bool mel_on = chord_sampler && p->mel_mix > 0.001;
+    set_shift (p->shifter, mel_on ? lead_st + 12.0 : lead_st, 220.0,
+               p->formant_hold, p->formant_st);
+    if (! chord_sampler || mel_on)
+    {
+        if (! p->poly_shift_fed)
+        {
+            /* the shifter sat unfed while the sampler ran alone; its
+               state is stale audio -- start clean */
+            ae_shifter_reset (p->shifter);
+            p->poly_shift_fed = true;
+        }
+        /* voice_buf is free until the ghosts run (after delivery) */
+        ae_shifter_process (p->shifter, p->in_block,
+                            mel_on ? p->voice_buf : p->wet_buf, num_samples);
+    }
     else
+        p->poly_shift_fed = false;
+    if (chord_sampler)
         memset (p->wet_buf, 0, (size_t) num_samples * sizeof (float));
     if (chord_sampler)
     {
@@ -3220,6 +3255,15 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
         &p->follow_level_in, memory_order_relaxed);
     const double f_tgt = (1.0 - p->follow_amt) + p->follow_amt * f_lvl;
     const double f_a   = 1.0 - exp (-1.0 / (0.010 * p->fs));
+    /* The MEL layer's own envelope: the swell is the instrument identity
+       (an onset that BLOOMS reads as bowed/brass/tape, and buries the
+       shifter's poly latency); the release is a tail ceiling like the
+       lead's. Gated on energy alone -- no decisions. */
+    const double m_atk = 1.0 - exp (-1.0 /
+        ((p->mel_atk_ms > 5.0 ? p->mel_atk_ms : 5.0) * 0.001 * p->fs));
+    const double m_rel = 1.0 - exp (-1.0 /
+        ((p->mel_rel_ms > 5.0 ? p->mel_rel_ms : 5.0) * 0.001 * p->fs));
+    double m_env = p->mel_env;
     double v_gain = p->v_gain, l_env = p->lead_env, f_g = p->follow_gain_cur;
     const long long block_start = p->in_write - num_samples;
     for (int i = 0; i < num_samples; ++i)
@@ -3228,6 +3272,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
         v_gain += (target - v_gain) * gain_alpha;
         l_env  += (target - l_env) * (gate ? l_atk : l_rel);
         f_g    += (f_tgt - f_g) * f_a;
+        m_env  += (target - m_env) * (gate ? m_atk : m_rel);
         const long long t_out = block_start + i - p->latency;
         const float dry = t_out < 0 ? 0.0f : p->in_buf[t_out & p->buf_mask];
         const double wet_only = v_gain * l_env * f_g * p->wet_buf[i];
@@ -3242,9 +3287,17 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                            + (p->lead_source == AE_HARM_SRC_SAMPLE
                                   ? 0.0
                                   : (1.0 - v_gain) * dry)
-                           + p->smp_dry_g * p->in_block[i]);
+                           + p->smp_dry_g * p->in_block[i]
+                           /* the MEL layer: 8' latency-matched dry + 4'
+                              octave footage, swelled -- both sit at the
+                              shifter's latency, mutually phase-honest */
+                           + (mel_on
+                                  ? p->mel_mix * m_env
+                                        * (dry + p->mel_oct_g * p->voice_buf[i])
+                                  : 0.0));
     }
     p->v_gain = v_gain; p->lead_env = l_env; p->follow_gain_cur = f_g;
+    p->mel_env = m_env;
 
     if (p->ir_lead != NULL)
         irc_point_process (p->ir_lead, mono, mono, num_samples);

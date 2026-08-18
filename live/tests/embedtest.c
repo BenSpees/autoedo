@@ -222,6 +222,17 @@ int main (void)
     CHECK (strstr (status, "\"sampleLevelDb\":-6") != NULL
            && strstr (status, "\"sampleToneDb\":4") != NULL,
            "config echo: sample section follows writes");
+    CHECK (strstr (status, "\"melMix\":0,") != NULL,
+           "config echo: MEL layer defaults off");
+    ae_embed_config (inst, "{\"melMix\":0.4,\"melOctDb\":-3,"
+                           "\"melAttackMs\":250,\"melReleaseMs\":600}");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"melMix\":0.4") != NULL
+           && strstr (status, "\"melOctDb\":-3") != NULL
+           && strstr (status, "\"melAttackMs\":250") != NULL
+           && strstr (status, "\"melReleaseMs\":600") != NULL,
+           "config echo: MEL section follows writes");
+    ae_embed_config (inst, "{\"melMix\":0}");
     ae_embed_config (inst,
         "{\"leadSource\":\"voice\",\"sampleMix\":1,"
         "\"sampleLevelDb\":0,\"sampleToneDb\":0}");
