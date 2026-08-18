@@ -3832,7 +3832,10 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         if (p->onset_pulse)
         {
             p->smp_pending[L] = true;
-            p->smp_wait[L] = (int) (0.20 * p->fs);
+            /* 400 ms, doubled: a post-silence OCTAVE change can hold the
+               detector's vote past 200, and a window that expires before
+               the pitch lands eats the note outright. */
+            p->smp_wait[L] = (int) (0.40 * p->fs);
         }
         if (p->smp_pending[L])
         {
@@ -3877,9 +3880,24 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                    splits them -- the cost is that a ONE-step legato in a
                    fine EDO (54 c in 22) glides rather than re-picks, which
                    is the pedal-steel reading of that gesture anyway. */
-                if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg
-                    && p->det_slope_hold > 15.0)
-                    want = true;
+                {
+                    const long long dstep =
+                        (long long) ldeg - (long long) p->smp_lead_deg;
+                    const long long half_oct =
+                        (long long) ((p->edo > 0 ? p->edo : 12) / 2);
+                    /* The slope gate is a claim about BENDS, and a bend
+                       cannot creep half an octave inside one hop -- an
+                       octave-scale degree change is a new note however
+                       steady the pitch reads (field: "play a note, stop,
+                       play an octave higher -- it gets eaten": the
+                       detector re-locks CLEAN on the new octave, the
+                       slope reads zero, and the gate swallowed the
+                       strike). */
+                    if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg
+                        && (p->det_slope_hold > 15.0
+                            || llabs (dstep) >= half_oct))
+                        want = true;
+                }
                 if (p->att_seq != p->att_seq_seen
                     && p->atk_fast > 1.3 * p->atk_slow)
                     want = true;
