@@ -822,6 +822,9 @@ void ae_corrector_reset (AeCorrector *p)
     p->rel_latch       = false;
     p->rel_latch_cents = 0.0;
     p->rel_latch_att   = 0;
+    p->slide_run       = 0;
+    p->slide_dir       = 0.0;
+    p->slide_on        = false;
     p->atk_armed = true;
     p->hold_latched    = false;
     p->hold_level      = 0.0;
@@ -2537,6 +2540,44 @@ static void run_detection (AeCorrector *p)
             if (dsl > p->det_slope_hold)
                 p->det_slope_hold = dsl;
         }
+        /* SLIDE detection (see the header note): a finger travelling on
+           the string moves 6-45 cents per hop -- 5 semitones in half a
+           second reads ~25 c/hop, and a hand cannot go much past 40
+           without the gesture being a jump anyway. A LEGATO STEP is the
+           imposter to beat: the detector smears even an instant hammer-on
+           across the analysis frame, several same-direction hops -- but at
+           the INTERVAL'S rate (a 5-semitone hammer smears at ~100 c/hop),
+           far past any finger. So a hop inside the band feeds the run, a
+           hop at jump rate KILLS it, and four fed hops (~20 ms of genuine
+           travel) open the slide. The one deliberate concession is the
+           small-interval hammer whose smear rate falls inside the band: a
+           single-step legato reads as a glide -- the pedal-steel reading
+           the strike gate already chose for fine EDOs. The run DECAYS
+           rather than clearing, so a fret's hesitation mid-slide does not
+           hand the landing back to the strike gate. */
+        {
+            const double dd = p->prev_pair_valid
+                ? detected_cents - p->prev_det_cents : 0.0;
+            const double add = fabs (dd);
+            if (add >= 45.0)
+            {
+                p->slide_run = 0; /* jump-rate motion: a strike's business */
+                p->slide_dir = 0.0;
+            }
+            else if (add > 6.0 && dd * p->slide_dir > 0.0)
+            {
+                if (p->slide_run < 100)
+                    ++p->slide_run;
+            }
+            else if (add > 6.0)
+            {
+                p->slide_dir = dd > 0.0 ? 1.0 : -1.0;
+                p->slide_run = 1;
+            }
+            else if (p->slide_run > 0)
+                --p->slide_run;
+            p->slide_on = p->slide_run >= 4;
+        }
 
         p->primed = true;
         atomic_store_explicit (&p->shift_st_out, (float) p->shift_semitones,
@@ -2795,6 +2836,11 @@ harmony_done: ;
            hop is a new note's, and it must track from its first sample. */
         p->rel_latch = false;
         p->rel_collapse = false;
+        /* The slide ended with the note; motion across the silence is a
+           new gesture, never this one's momentum. */
+        p->slide_run = 0;
+        p->slide_dir = 0.0;
+        p->slide_on  = false;
     }
 
     /* Pitch-trace ring: one point per detection (~200/s), packed into a
@@ -4180,8 +4226,15 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                        detector re-locks CLEAN on the new octave, the
                        slope reads zero, and the gate swallowed the
                        strike). */
+                    /* ...and a SLIDE strikes nothing at all: the degree
+                       crossings are the glissando's rungs, and the ringing
+                       note glides through them via the continuous repitch
+                       below (at the GLIDE time), which is what the finger
+                       is asking for. A new PICK mid-slide still strikes --
+                       the energy path below does not consult slide_on. */
                     if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg
                         && ! p->rel_collapse
+                        && ! p->slide_on
                         && (p->det_slope_hold > 15.0
                             || llabs (dstep) >= half_oct))
                         want = true;

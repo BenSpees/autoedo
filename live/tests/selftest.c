@@ -2128,6 +2128,137 @@ static void test_steel_mode (void)
 /* Physical bend-follow on a sample lead: a +-25 cent vibrato (well inside
    one degree) must ride the sample's playback rate -- before this the
    sample sat pinned to the snapped degree and every bend was a stair. */
+/* SLIDE vs STAIRCASE (field, with the pitch trace: "if I slide my finger
+   down a string while it's sounding, it really prefers to make a staircase
+   of notes instead of gliding between"). The bend-vs-jump gate reads every
+   degree crossing of a glissando as a jump, so the sample restruck at each
+   rung -- worked "1 in 5 tries" only when the finger moved slowly enough to
+   read as a bend. Sustained same-direction motion is now a SLIDE: strikes
+   stand down and the ringing note repitches through the crossings. A
+   hammer-on -- one move, then stillness -- must still strike. */
+static void test_slide_glides_not_staircases (void)
+{
+    const char *root = "/tmp/ae-smp-slide";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "slide: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    /* Count strikes by watching slot playback positions: a strike resets
+       one slot's pos to the top, so any pos that went BACKWARDS between
+       blocks is a fresh strike. */
+    /* 5 semitones in 150 ms ~= 17 c/hop: fast enough that the bend gate
+       reads every crossing as a jump (the staircase), squarely inside the
+       slide band. The half-second version of the same gesture already
+       read as a bend and glided BEFORE this fix -- that was the "1 in 5
+       tries" that worked. */
+    const int hold1 = 48000, slide = 7200, hold2 = 48000;
+    const int total = hold1 + slide + hold2;
+    int strikes[2]; /* [0] the slide, [1] the hammer-on control */
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 10.0);
+        ae_corrector_set_transition_ms (p, 300.0);
+        {
+            int srcs[AE_HARM_VOICES];
+            for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+            ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        }
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+               "slide: bank loads (%s)", err);
+
+        float *in = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            double hz;
+            if (c == 0)
+            {
+                /* the SLIDE: A3 held, then a smooth fall to E3 across
+                   half a second (~7 c/ms peak -- way past the bend gate),
+                   then held. */
+                if (i < hold1) hz = 220.0;
+                else if (i < hold1 + slide)
+                {
+                    const double w = (double) (i - hold1) / slide;
+                    hz = 220.0 * pow (2.0, -5.0 * w / 12.0);
+                }
+                else hz = 220.0 * pow (2.0, -5.0 / 12.0);
+            }
+            else
+            {
+                /* the CONTROL: the same five semitones at JUMP rate --
+                   30 ms, ~83 c/hop, past the 45 c/hop finger ceiling.
+                   The rate band must kill the slide run so the strike
+                   gate keeps this one (realistic hammer-on coverage
+                   lives in test_sample_triggering, with real plucks). */
+                const int fast = 1440;
+                if (i < hold1) hz = 220.0;
+                else if (i < hold1 + fast)
+                {
+                    const double w = (double) (i - hold1) / fast;
+                    hz = 220.0 * pow (2.0, -5.0 * w / 12.0);
+                }
+                else hz = 220.0 * pow (2.0, -5.0 / 12.0);
+            }
+            ph += 2.0 * M_PI * hz / 48000.0;
+            in[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+
+        double prev_pos[AE_SMP_SLOTS];
+        for (int k = 0; k < AE_SMP_SLOTS; ++k) prev_pos[k] = -1.0;
+        int count = 0;
+        const int L = AE_HARM_VOICES;
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, NULL, NULL, n);
+            if (off < hold1 - 4800 || off > hold1 + slide + 9600)
+            { /* count only around the gesture, past the birth strike */
+                for (int k = 0; k < AE_SMP_SLOTS; ++k)
+                    prev_pos[k] = p->smp[L][k].rec ? p->smp[L][k].pos : -1.0;
+                continue;
+            }
+            for (int k = 0; k < AE_SMP_SLOTS; ++k)
+            {
+                const double pos = p->smp[L][k].rec ? p->smp[L][k].pos : -1.0;
+                if (pos >= 0.0 && (prev_pos[k] < 0.0 || pos < prev_pos[k]))
+                    ++count; /* slot (re)started = a strike landed */
+                prev_pos[k] = pos;
+            }
+        }
+        strikes[c] = count;
+        ae_corrector_free (p);
+        free (p); free (in);
+    }
+    CHECK (strikes[0] <= 1,
+           "a SLIDE glides: at most one strike across five crossed degrees "
+           "(got %d; the staircase was one per degree)", strikes[0]);
+    CHECK (strikes[1] >= 1,
+           "jump-rate motion is NOT a slide: the strike gate keeps it "
+           "(got %d)", strikes[1]);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_sample_bend_follow (void)
 {
     const char *root = "/tmp/ae-smp-bend";
@@ -5337,6 +5468,7 @@ int main (void)
     test_mel_auto_analysis();
     test_steel_mode();
     test_sample_bend_follow();
+    test_slide_glides_not_staircases();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();

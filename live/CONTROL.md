@@ -234,7 +234,7 @@ UI behavior you may want to replicate).
 | Key | Type / range | Applies | Meaning |
 |---|---|---|---|
 | `retuneMs` | float 0–400 | live | within-note retune speed (0 = hard snap) |
-| `transitionMs` | float 0–200 | live | glide between *different* target degrees |
+| `transitionMs` | float 0–1000 | live | glide between *different* target degrees. This is also the glissando rate of a **slide**: sustained same-direction motion (a finger travelling down the string) stands the degree-change strike down and the ringing note repitches through the transition-glided pitch instead of restriking a staircase of notes |
 | `amount` | float 0–1 | live | partial correction (1 = full) |
 | `toleranceCents` | float 0–50 | live | dead zone around the target; preserves vibrato |
 | `stickiness` | float 0–1 | live | hysteresis past the midpoint before re-snapping. **Engine does not auto-raise it** — the built-in UI raises it to `min(0.7, (edo−24)/48)` when edo > 41; do the same if you care about high-EDO flicker |

@@ -637,6 +637,17 @@ typedef struct
                                     struck with (like the bank's norm) */
     long long smp_lead_deg;      /* lead sampler: last degree struck/heard */
     bool   smp_lead_deg_valid;
+    /* SLIDE: sustained same-direction pitch motion, hop after hop -- a
+       finger travelling down (or up) the string. The bend-vs-jump gate
+       reads each degree crossing of a slide as a JUMP (the slope is way
+       past 15 c/hop), so a glissando restruck the sample at every degree:
+       "a staircase of notes instead of gliding between" (field, with the
+       pitch trace). While slide_on, degree-change strikes stand down and
+       the ringing note repitches through the transition-glided corrected
+       pitch -- the glissando the GLIDE control describes. */
+    int    slide_run;            /* consecutive moving hops (decays) */
+    double slide_dir;            /* +1 rising, -1 falling, 0 unknown */
+    bool   slide_on;
     int    smp_guard;            /* samples until another lead strike may
                                     fire (de-dupes onset + degree + re-attack
                                     triggers landing on one event) */

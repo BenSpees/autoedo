@@ -683,7 +683,7 @@ static bool config_apply_json (App *app, const char *json)
     if (ae_json_get_number (json, "retuneMs", &num))
         c->params.retune_ms = num_clamp (num, 0.0, 400.0);
     if (ae_json_get_number (json, "transitionMs", &num))
-        c->params.transition_ms = num_clamp (num, 0.0, 200.0);
+        c->params.transition_ms = num_clamp (num, 0.0, 1000.0); /* a one-second glissando is a musical ask (field), not a runaway */
     if (ae_json_get_number (json, "amount", &num))
         c->params.amount = num_clamp (num, 0.0, 1.0);
     if (ae_json_get_number (json, "toleranceCents", &num))
