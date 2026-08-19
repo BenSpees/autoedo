@@ -86,6 +86,16 @@ typedef struct
        applied to the whole bank, which is what preserves the soft layer's
        deliberate peak-match to it (a timbre swap, never a level change). */
     double norm;
+    /* The soft pool's OWN normalisation to the same -22 dBFS reference.
+       The soft layer used to "ride its mastered relationship" -- but the
+       strike gain already encodes how hard the hand played, so a soft
+       recording mastered 6-12 dB under the mains double-quieted every
+       pick below the layer threshold and STEPPED audibly when a passage
+       straddled it (field: "certain sample notes will unexpectedly be
+       much louder sometimes"). One reference for both pools makes the
+       gain the single level authority and the layer a timbre choice.
+       Falls back to `norm` for a bank with no soft layer. */
+    double soft_norm;
     double meas_rms;  /* what was measured, for the read-out */
     int    clipped;   /* recordings that reach full scale. A properly
                          mastered set peaks BELOW 0 dBFS, so a file sitting

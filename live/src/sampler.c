@@ -483,24 +483,59 @@ static int load_from_manifest (AeSampleBank *b, const char *manifest,
 static void measure_bank (AeSampleBank *b)
 {
     b->norm = 1.0;
+    b->soft_norm = 1.0;
     b->meas_rms = 0.0;
     if (b->n_recs == 0)
         return;
 
-    double rms[AE_SMP_MAX_RECS];
-    int n = 0;
+    double rms[AE_SMP_MAX_RECS], soft_rms[AE_SMP_MAX_RECS];
+    int n = 0, sn = 0;
     const int win = (int) (0.300 * (b->rate > 0.0 ? b->rate : 48000.0));
     for (int i = 0; i < b->n_recs; ++i)
     {
-        if (b->recs[i].soft)
-            continue; /* the soft layer rides its mastered relationship */
         const int len = b->recs[i].len < win ? b->recs[i].len : win;
         if (len <= 0)
             continue;
         double sq = 0.0;
         for (int k = 0; k < len; ++k)
             sq += (double) b->recs[i].pcm[k] * b->recs[i].pcm[k];
-        rms[n++] = sqrt (sq / len);
+        /* Each pool measures its own median: the strike gain is the one
+           level authority, so a soft pick must land at the same reference
+           as a main pick and differ in TIMBRE only (see soft_norm). */
+        if (b->recs[i].soft)
+            soft_rms[sn++] = sqrt (sq / len);
+        else
+            rms[n++] = sqrt (sq / len);
+    }
+    if (sn > 0)
+    {
+        for (int i = 1; i < sn; ++i)
+            for (int j = i; j > 0 && soft_rms[j] < soft_rms[j - 1]; --j)
+            {
+                const double t = soft_rms[j];
+                soft_rms[j] = soft_rms[j - 1];
+                soft_rms[j - 1] = t;
+            }
+        const double med = soft_rms[sn / 2];
+        if (med > 1e-6)
+        {
+            b->soft_norm = 0.0794328 / med; /* 10^(-22/20) */
+            if (b->soft_norm < 0.1)  b->soft_norm = 0.1;
+            if (b->soft_norm > 10.0) b->soft_norm = 10.0;
+            double speak = 0.0;
+            for (int i = 0; i < b->n_recs; ++i)
+            {
+                if (! b->recs[i].soft)
+                    continue;
+                for (int j = 0; j < b->recs[i].len; ++j)
+                {
+                    const double a = fabs ((double) b->recs[i].pcm[j]);
+                    if (a > speak) speak = a;
+                }
+            }
+            if (speak > 1e-6 && b->soft_norm * speak > 0.708)
+                b->soft_norm = 0.708 / speak; /* -3 dBFS ceiling */
+        }
     }
     if (n == 0)
         return;
@@ -537,6 +572,17 @@ static void measure_bank (AeSampleBank *b)
         if (peak > 1e-6 && b->norm * peak > 0.708)
             b->norm = 0.708 / peak; /* -3 dBFS ceiling */
     }
+    if (b->soft_norm == 1.0 && b->norm != 1.0)
+    {
+        /* No soft pool measured: the field simply mirrors the bank's,
+           so the strike-time pick never needs a special case. */
+        int has_soft = 0;
+        for (int i = 0; i < b->n_recs; ++i)
+            if (b->recs[i].soft)
+                has_soft = 1;
+        if (! has_soft)
+            b->soft_norm = b->norm;
+    }
 }
 
 bool ae_sampler_load (AeSampleBank *bank, const char *root,
@@ -554,6 +600,7 @@ bool ae_sampler_load (AeSampleBank *bank, const char *root,
     bank->rate   = engine_rate;
     bank->octave = octave_for (instrument, octave_override);
     bank->norm   = 1.0;
+    bank->soft_norm = 1.0;
 
     char dir[1100];
     snprintf (dir, sizeof (dir), "%s/%s", root, instrument);

@@ -1586,7 +1586,16 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel,
 
     const int midi = (int) lround (12.0 * log2 (hz / 440.0) + 69.0);
     const int zone = ae_sampler_zone (bank, midi);
-    const AeSampleRec *rec = ae_sampler_pick (bank, zone, vel, p->smp_rr, &p->smp_rng);
+    /* The LAYER choice reads a true 0..1 velocity -- how hard the hand
+       actually played -- never the blended strike GAIN, which under the
+       default parity match is an unbounded level ratio: a passage
+       hovering near the reference used to flip soft/main recordings
+       mastered several dB apart on near-equal gains. */
+    const double pick_vel = p->smp_vel_fixed >= 0.0
+        ? p->smp_vel_fixed
+        : vel_from_peak (p, body_level_now (p));
+    const AeSampleRec *rec =
+        ae_sampler_pick (bank, zone, pick_vel, p->smp_rr, &p->smp_rng);
     if (rec == NULL)
         return;
 
@@ -1633,7 +1642,7 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel,
     p->smp[v][nxt].gain_t = vel * trim;
     /* The bank's measured level travels with the strike, so a slot still
        ringing from the previous instrument keeps ITS normalisation. */
-    p->smp[v][nxt].norm   = bank->norm;
+    p->smp[v][nxt].norm   = rec->soft ? bank->soft_norm : bank->norm;
     p->smp[v][nxt].fade = 1.0;
     p->smp[v][nxt].wrel  = wrel > 0.0 ? wrel : 1.0;
     p->smp[v][nxt].epoch = p->vel_epoch;
@@ -1812,7 +1821,7 @@ static inline double atk_rand01 (AeCorrector *p) /* LCG: RT-safe, seedable */
 static void attack_trigger (AeCorrector *p)
 {
     p->atk_active = p->atk_mode;
-    p->atk_amp    = p->atk_fast;
+    p->atk_amp    = vel_clamp_level (p, p->atk_fast);
     p->atk_jit    = 1.0 + (atk_rand01 (p) - 0.5) * 2.0 * 0.26;
     p->atk_smp    = NULL;
 
@@ -2044,8 +2053,12 @@ static void attack_process (AeCorrector *p, float *harm_l, float *harm_r,
        plays: at trigger time the note is a millisecond old and its RMS
        still climbing, and a pick that tracked only that first reading
        would whisper under every hard note. */
-    if (p->atk_fast > p->atk_amp)
-        p->atk_amp += (p->atk_fast - p->atk_amp) * 0.5;
+    /* Ratchet toward the CLAMPED level (AE_VEL_CLAMP_DB, the same
+       strike-to-strike bound every velocity verdict wears): the hit still
+       tracks dynamics, but one hot pick can no longer leap it. */
+    const double atk_t = vel_clamp_level (p, p->atk_fast);
+    if (atk_t > p->atk_amp)
+        p->atk_amp += (atk_t - p->atk_amp) * 0.5;
 
     const double g = p->atk_amp * p->atk_jit * p->atk_gain;
 
@@ -2236,6 +2249,128 @@ static void run_detection (AeCorrector *p)
         }
         p->expr_cents = detected_cents - p->centre_cents;
 
+        /* The release slope-freeze verdict, decided BEFORE the QUANTIZER
+           runs: a latched release used to freeze only the audible shift
+           while cand, the published target and the synth lead kept
+           re-voting off the drooping centre -- the graph and every
+           degree-keyed consumer re-picked notes the player never played
+           at the exact moment the note ended. Decided here, the verdict
+           can hold the DEGREE too (see the freeze at the quantizer).
+           Its full story sits at the harmony freeze below. */
+        {
+            const int rb  = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
+            const int rbl = (p->rel_pos + AE_REL_RING - 15) % AE_REL_RING;
+            /* Three faces of a release (field, precise: "when I stop
+               pressing the string down but keep my finger on it, it
+               bends down; a right-hand mute doesn't"):
+               - a DAMP: level collapses fast (~110 dB/s over 40 ms);
+               - a slow damp: the same collapse read over 75 ms;
+               - a FINGER-LIFT: the string genuinely detunes FLAT as the
+                 fret grip eases while the level falls only gently --
+                 flat of centre while clearly decaying is a lift, never
+                 a bend (an intentional bend sustains its level, and an
+                 upward bend is never flat). */
+            const bool fast_c = p->rel_rms[rb] > 0.0f
+                             && rms < 0.6 * (double) p->rel_rms[rb];
+            const bool slow_c = p->rel_rms[rbl] > 0.0f
+                             && rms < 0.55 * (double) p->rel_rms[rbl];
+            /* -6, not -12: the freeze used to wait for 12 cents of droop
+               before believing the lift, and those 12 cents were audible
+               on every single note end. 6 is under the JND for a decaying
+               guitar note and still twice a vibrato hop's typical read. */
+            const bool lift_c = p->rel_rms[rbl] > 0.0f
+                             && rms < 0.85 * (double) p->rel_rms[rbl]
+                             && p->expr_cents < -6.0;
+            /* The fourth face, the one no rate-of-fall window can see: a
+               DROOP. The pitch keeps easing flat -- read over the release
+               ring's own 75 ms horizon, because per-hop deltas on a
+               gentle tail sit under every arming floor -- while the level
+               never rises and the note reads flat of centre. Persistence
+               is the vibrato filter: a descending vibrato half spends at
+               most ~60 ms below centre before it turns, so 140 ms of
+               consecutive droop-shaped hops is a dying note, never music
+               (a guitar cannot be bent BELOW its fretted pitch). A crawl,
+               not a slide: real slides fall far faster over 75 ms and a
+               standing slide keeps its gesture. Field, third round:
+               "continuing to bend up or down at the very end of notes"
+               -- the gentle tails trip nothing above and used to ride
+               out through EXPRESSION. */
+            {
+                const float d15 = p->rel_det[rbl];
+                const double fall75 = d15 > 0.0f
+                    ? detected_cents - 1200.0 * log2 ((double) d15 / ref)
+                    : 0.0;
+                if (p->attack_hold <= 0
+                    && ! p->slide_on
+                    && fall75 < -6.0 && fall75 > -50.0
+                    && p->expr_cents < -6.0
+                    && p->rel_rms[rbl] > 0.0f
+                    && rms < 1.05 * (double) p->rel_rms[rbl])
+                    ++p->droop_run;
+                else
+                    p->droop_run = 0;
+            }
+            const bool droop_c = p->droop_run >= 28;
+            const bool inst = fast_c || slow_c || lift_c || droop_c;
+            /* LATCHED until the note actually ends. The windows above are
+               verdicts about the level's RATE of fall, and a lifted string
+               settles: after the first collapse the ratios drift back over
+               the thresholds while the pitch is still flat and dying, and
+               every hop they released leaked a burst of the droop (field:
+               "still bending on note ends like I described before"). Once
+               a release has begun it does not un-begin -- the latch opens
+               only for a genuinely NEW event:
+               - the gate closing (cleared at the unvoiced transition);
+               - the pitch RISING well clear of where the droop started
+                 (a re-fret or hammer-on -- a dying string never rises);
+               - a fresh attack-hold ARMING edge with the envelope
+                 actually rising (the same test the re-pluck strike
+                 trusts): a new pick, whatever its pitch. */
+            if (inst && ! p->rel_latch)
+            {
+                p->rel_latch       = true;
+                p->rel_latch_cents = detected_cents;
+                p->rel_latch_att   = p->att_seq;
+                /* A droop-flavoured latch frees itself on a much smaller
+                   rise: a dying string never rises at all, but a slow
+                   deep vibrato caught in a trough must get its note back
+                   at the next peak instead of staying flattened. */
+                p->rel_latch_droop = droop_c && ! fast_c && ! slow_c
+                                     && ! lift_c;
+            }
+            else if (p->rel_latch
+                     && (detected_cents > p->rel_latch_cents
+                                          + (p->rel_latch_droop ? 30.0 : 60.0)
+                         || (p->att_seq != p->rel_latch_att
+                             && p->atk_fast > 1.3 * p->atk_slow)))
+            {
+                /* The RISE breaks the latch only when it persists: one
+                   octave-flavoured tail glitch used to un-freeze the
+                   release and dump the followed droop in a single hop.
+                   A real re-fret holds its new pitch, so waiting one hop
+                   costs 5 ms and buys the tail its silence. */
+                const bool rise_only =
+                    ! (p->att_seq != p->rel_latch_att
+                       && p->atk_fast > 1.3 * p->atk_slow);
+                if (! rise_only || p->rel_rise_pend)
+                {
+                    p->rel_latch     = false;
+                    p->rel_rise_pend = false;
+                }
+                else
+                    p->rel_rise_pend = true;
+            }
+            else
+                p->rel_rise_pend = false;
+            p->rel_collapse = inst || p->rel_latch;
+            /* ...and it closes a slide that is already open. Gating only
+               the REFRESH left a standing slide riding straight through a
+               release, following the dying string down and then dumping
+               the whole followed droop when the latch broke. */
+            if (p->rel_collapse)
+                p->slide_hold = 0;
+        }
+
         /* The DEGREE is chosen from the centre, not the instantaneous
            pitch. A vibrato wider than half a step would otherwise flip the
            target back and forth -- in 22-EDO a step is 54.5 cents, which a
@@ -2406,6 +2541,15 @@ static void run_detection (AeCorrector *p)
                     cand = hj;
             }
         }
+        /* A LATCHED release freezes the DEGREE too: the centre keeps
+           chasing the droop, and letting cand re-vote off it re-picked
+           notes the player never played at the exact moment the note
+           ended -- the published target, the pitch graph, the synth lead
+           and the steel drone all key off this. A begun release stays
+           frozen until the note ends; the latch's own breaks (a real
+           rise, a new attack) reopen it. */
+        if (p->rel_collapse && p->target_valid)
+            cand = p->target_j;
 
         const double target_hz    = ae_degree_hz ((long) cand, p->edo, ref, period);
         const double target_cents = 1200.0 * log2 (target_hz / ref);
@@ -2461,122 +2605,6 @@ static void run_detection (AeCorrector *p)
             p->att_hold_recent = (int) (0.150 * p->fs);
         }
 
-        /* The release slope-freeze verdict, decided BEFORE the shifter
-           aims so the audible shift and the exported pitch can both
-           honour it (its full story sits at the harmony freeze below). */
-        {
-            const int rb  = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
-            const int rbl = (p->rel_pos + AE_REL_RING - 15) % AE_REL_RING;
-            /* Three faces of a release (field, precise: "when I stop
-               pressing the string down but keep my finger on it, it
-               bends down; a right-hand mute doesn't"):
-               - a DAMP: level collapses fast (~110 dB/s over 40 ms);
-               - a slow damp: the same collapse read over 75 ms;
-               - a FINGER-LIFT: the string genuinely detunes FLAT as the
-                 fret grip eases while the level falls only gently --
-                 flat of centre while clearly decaying is a lift, never
-                 a bend (an intentional bend sustains its level, and an
-                 upward bend is never flat). */
-            const bool fast_c = p->rel_rms[rb] > 0.0f
-                             && rms < 0.6 * (double) p->rel_rms[rb];
-            const bool slow_c = p->rel_rms[rbl] > 0.0f
-                             && rms < 0.55 * (double) p->rel_rms[rbl];
-            /* -6, not -12: the freeze used to wait for 12 cents of droop
-               before believing the lift, and those 12 cents were audible
-               on every single note end. 6 is under the JND for a decaying
-               guitar note and still twice a vibrato hop's typical read. */
-            const bool lift_c = p->rel_rms[rbl] > 0.0f
-                             && rms < 0.85 * (double) p->rel_rms[rbl]
-                             && p->expr_cents < -6.0;
-            /* The fourth face, the one no rate-of-fall window can see: a
-               DROOP. The pitch keeps easing flat -- read over the release
-               ring's own 75 ms horizon, because per-hop deltas on a
-               gentle tail sit under every arming floor -- while the level
-               never rises and the note reads flat of centre. Persistence
-               is the vibrato filter: a descending vibrato half spends at
-               most ~60 ms below centre before it turns, so 140 ms of
-               consecutive droop-shaped hops is a dying note, never music
-               (a guitar cannot be bent BELOW its fretted pitch). A crawl,
-               not a slide: real slides fall far faster over 75 ms and a
-               standing slide keeps its gesture. Field, third round:
-               "continuing to bend up or down at the very end of notes"
-               -- the gentle tails trip nothing above and used to ride
-               out through EXPRESSION. */
-            {
-                const float d15 = p->rel_det[rbl];
-                const double fall75 = d15 > 0.0f
-                    ? detected_cents - 1200.0 * log2 ((double) d15 / ref)
-                    : 0.0;
-                if (p->attack_hold <= 0
-                    && ! p->slide_on
-                    && fall75 < -6.0 && fall75 > -50.0
-                    && p->expr_cents < -6.0
-                    && p->rel_rms[rbl] > 0.0f
-                    && rms < 1.05 * (double) p->rel_rms[rbl])
-                    ++p->droop_run;
-                else
-                    p->droop_run = 0;
-            }
-            const bool droop_c = p->droop_run >= 28;
-            const bool inst = fast_c || slow_c || lift_c || droop_c;
-            /* LATCHED until the note actually ends. The windows above are
-               verdicts about the level's RATE of fall, and a lifted string
-               settles: after the first collapse the ratios drift back over
-               the thresholds while the pitch is still flat and dying, and
-               every hop they released leaked a burst of the droop (field:
-               "still bending on note ends like I described before"). Once
-               a release has begun it does not un-begin -- the latch opens
-               only for a genuinely NEW event:
-               - the gate closing (cleared at the unvoiced transition);
-               - the pitch RISING well clear of where the droop started
-                 (a re-fret or hammer-on -- a dying string never rises);
-               - a fresh attack-hold ARMING edge with the envelope
-                 actually rising (the same test the re-pluck strike
-                 trusts): a new pick, whatever its pitch. */
-            if (inst && ! p->rel_latch)
-            {
-                p->rel_latch       = true;
-                p->rel_latch_cents = detected_cents;
-                p->rel_latch_att   = p->att_seq;
-                /* A droop-flavoured latch frees itself on a much smaller
-                   rise: a dying string never rises at all, but a slow
-                   deep vibrato caught in a trough must get its note back
-                   at the next peak instead of staying flattened. */
-                p->rel_latch_droop = droop_c && ! fast_c && ! slow_c
-                                     && ! lift_c;
-            }
-            else if (p->rel_latch
-                     && (detected_cents > p->rel_latch_cents
-                                          + (p->rel_latch_droop ? 30.0 : 60.0)
-                         || (p->att_seq != p->rel_latch_att
-                             && p->atk_fast > 1.3 * p->atk_slow)))
-            {
-                /* The RISE breaks the latch only when it persists: one
-                   octave-flavoured tail glitch used to un-freeze the
-                   release and dump the followed droop in a single hop.
-                   A real re-fret holds its new pitch, so waiting one hop
-                   costs 5 ms and buys the tail its silence. */
-                const bool rise_only =
-                    ! (p->att_seq != p->rel_latch_att
-                       && p->atk_fast > 1.3 * p->atk_slow);
-                if (! rise_only || p->rel_rise_pend)
-                {
-                    p->rel_latch     = false;
-                    p->rel_rise_pend = false;
-                }
-                else
-                    p->rel_rise_pend = true;
-            }
-            else
-                p->rel_rise_pend = false;
-            p->rel_collapse = inst || p->rel_latch;
-            /* ...and it closes a slide that is already open. Gating only
-               the REFRESH left a standing slide riding straight through a
-               release, following the dying string down and then dumping
-               the whole followed droop when the latch broke. */
-            if (p->rel_collapse)
-                p->slide_hold = 0;
-        }
         /* SLIDE detection (see the header note): accumulated one-direction
            travel with a 10 c drawdown belt, because a finger's rate and a
            vibrato's overlap completely -- only PERSISTENCE separates them.
@@ -2820,7 +2848,22 @@ static void run_detection (AeCorrector *p)
            it is let go -- so while the level is collapsing, the ghosts
            keep the pitch they had and the rewind ring stops recording. */
         if (p->rel_collapse)
+        {
+            /* Frozen PITCH, not frozen ratio: the ghosts are fixed-ratio
+               shifters over the LIVE input, so holding h_semitones while
+               the input droops moved every ghost down with the dying
+               string -- the lead sat frozen and its choir bent under it.
+               The targets (h_cents_cur) stay where they were; only the
+               compensation term is recomputed each hop against what the
+               string is actually doing, exactly the mechanism the lead's
+               own rel_out_expr freeze uses. */
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+                if (p->h_active[v])
+                    p->h_semitones[v] = dclamp (
+                        (p->h_cents_cur[v] - detected_cents) / 100.0,
+                        -36.0, 36.0);
             goto harmony_done;
+        }
 
         /* HOLD: the ghosts are frozen where they were, so none of the
            retargeting below runs. The LEAD above still tracked normally --
@@ -3002,8 +3045,13 @@ harmony_done: ;
            an entry written during the damp would be exactly the artifact
            the rewind exists to skip. */
         const int rb = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
-        const bool releasing = p->rel_rms[rb] > 0.0f
-                            && rms < 0.6 * (double) p->rel_rms[rb];
+        /* The LATCHED verdict counts too: a slow lift trips lift_c/droop_c
+           at a fall the local fast window cannot see, and every hop
+           recorded during it handed the rewind exactly the drooped pitch
+           it exists to skip. */
+        const bool releasing = p->rel_collapse
+                            || (p->rel_rms[rb] > 0.0f
+                                && rms < 0.6 * (double) p->rel_rms[rb]);
         if (! releasing)
         {
             p->last_voiced_hz = res.frequency_hz;
@@ -3639,10 +3687,16 @@ static void steel_process (AeCorrector *p, bool voiced, long lead_deg,
         {
             p->steel_hz = ae_degree_hz (deg, edo, ref, period);
             if (sample_live)
+                /* steel_level rides in wrel TOO (the poly-strum
+                   convention): the 120 ms velocity-verdict refinement
+                   rewrites gain_t = g * wrel, and with wrel at 1.0 it
+                   ERASED the drone's level -- a +12 dB surge on every
+                   note that moved the drone (field: "much louder
+                   sometimes, regardless of pinned velocity"). */
                 sample_strike (p, S, p->steel_hz,
                                strike_gain (p, body_level_now (p), p->steel_hz)
                                    * p->steel_level,
-                               1.0);
+                               p->steel_level);
         }
         p->steel_deg = deg;
     }
@@ -4394,12 +4448,16 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->smp_wait[L] -= num_samples;
             if (p->smp_wait[L] <= 0)
                 p->smp_pending[L] = false;
-            else if (hz > 0.0 && p->voiced)
+            else if (hz > 0.0 && p->voiced && p->smp_guard <= 0)
             {
                 /* ...and only once the detector has actually VOTED on
                    this note. Striking the moment a pitch existed served
                    the note before it -- a stale target, often an equave
-                   out -- which is the wrong-octave note start. */
+                   out -- which is the wrong-octave note start. The guard
+                   DEFERS rather than drops (pending stays set, the wait
+                   keeps counting): a pick 20 ms after a hammer-on used to
+                   land a second full-gain copy inside the guard window,
+                   two near-identical slots summing ~+6 dB. */
                 sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false;
                 p->smp_guard = (int) (0.040 * p->fs);
