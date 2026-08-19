@@ -2338,6 +2338,158 @@ static void test_slide_portamento_follows_finger (void)
    EXPRESSION up the collapse used to ride straight through
    shift_semitones while the graph sat frozen and innocent. Field: "more
    notes bending down at end", third report of the same droop. */
+/* A DYING string is never a gesture: the tail droop of an ordinary note
+   (slow natural decay, pitch easing flat) must NOT be followed. The slide
+   refuses it (travel under a degree), and the DROOP release face -- the
+   75 ms ring horizon with 140 ms of persistence -- freezes the shifter
+   before the fall grows audible, then HOLDS to the end. Field, third
+   round: "continuing to bend up or down at the very end of notes". */
+static void test_tail_droop_is_not_a_slide (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 10.0);
+    ae_corrector_set_transition_ms (p, 300.0);
+    ae_corrector_set_expression (p, 1.0);
+
+    const int hold = 57600, tail = 19200, total = hold + tail;
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        double hz = 220.0, amp = 0.4;
+        if (i >= hold)
+        {
+            const double w = (double) (i - hold) / tail;
+            /* STEPPED, like a real tail reads off the detector: ~5 c
+               increments between flat stretches. 12 x 5 c = 60 c. */
+            const double steps = floor (w * 12.0);
+            hz  = 220.0 * pow (2.0, -5.0 * steps / 1200.0);
+            amp = 0.4 * pow (10.0, -6.0 * (0.4 * w) / 20.0); /* -6 dB/s */
+        }
+        ph += 2.0 * M_PI * hz / 48000.0;
+        in[i] = (float) (amp * (sin (ph) + 0.3 * sin (2.0 * ph)));
+    }
+
+    double pre = 0.0;
+    int    pre_n = 0;
+    double worst = 0.0, last = 0.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        const float det = ae_corrector_detected_hz (p);
+        if (det <= 0.0f) continue;
+        const double out_c = 1200.0 * log2 ((double) det / 220.0)
+                           + 100.0 * p->shift_semitones;
+        if (off >= hold - 4800 && off < hold) { pre += out_c; ++pre_n; }
+        if (off >= hold + 4800 && pre_n > 0)
+        {
+            const double dev = fabs (out_c - pre / pre_n);
+            if (dev > worst) worst = dev;
+            last = dev; /* the terminal reading: where the note ENDED */
+        }
+    }
+    CHECK (pre_n > 0, "tail-droop: the held note was heard at all");
+    /* 18 c is the persistence window's honest price: ~140 ms of a
+       150 c/s droop leaks through EXPRESSION before anything can be SURE
+       it is not a vibrato half. What matters is that it then FREEZES:
+       the old behaviour followed the whole 60 c down and ended there. */
+    CHECK (worst <= 18.0,
+           "a tail droop is not a gesture: output within 18 c of the held "
+           "pitch while the note dies 60 c flat (worst %.1f c)", worst);
+    CHECK (last <= 18.0,
+           "...and the note ENDS held, not followed down (terminal %.1f c; "
+           "unfrozen it ends tens of cents flat)", last);
+    ae_corrector_free (p);
+    free (p); free (in);
+}
+
+/* An OCTAVE RE-VOTE is a relabeling, not a note: when the detector flips
+   register on a fully voiced, amplitude-continuous note (here: a 4 ms
+   crossfade of harmonic balance that lands the equave inside one hop),
+   the sample lead must NOT lay a second, wrong-register copy over the
+   one still ringing. Pins the strike gate's revote_hold suppression.
+   Field: "certain sample notes will unexpectedly be much louder
+   sometimes, regardless of pinned velocity settings". */
+static void test_octave_revote_does_not_restrike (void)
+{
+    const char *root = "/tmp/ae-smp-revote";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "revote: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    {
+        int srcs[AE_HARM_VOICES];
+        for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+        ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+    }
+    ae_corrector_set_sample (p, 1.0, 0.9, true);
+    char err[256] = "";
+    CHECK (ae_corrector_load_samples (p, root, "piano", NULL, err, sizeof (err)),
+           "revote: bank loads (%s)", err);
+
+    const int hold1 = 48000, hold2 = 48000, total = hold1 + hold2;
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        const double w = i < hold1 ? 0.0
+                       : (i - hold1 < 192 ? (double) (i - hold1) / 192.0 : 1.0);
+        ph += 2.0 * M_PI * 220.0 / 48000.0;
+        const double lo = sin (ph) + 0.3 * sin (2.0 * ph);
+        const double hi = sin (2.0 * ph) + 0.3 * sin (4.0 * ph);
+        in[i] = (float) (0.4 * ((1.0 - w) * lo + w * hi));
+    }
+
+    double prev_pos[AE_SMP_SLOTS];
+    for (int k = 0; k < AE_SMP_SLOTS; ++k) prev_pos[k] = -1.0;
+    int strikes = 0;
+    const int L = AE_HARM_VOICES;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        if (off < hold1 - 4800)
+        { /* the birth strike is the note's own business */
+            for (int k = 0; k < AE_SMP_SLOTS; ++k)
+                prev_pos[k] = p->smp[L][k].rec ? p->smp[L][k].pos : -1.0;
+            continue;
+        }
+        for (int k = 0; k < AE_SMP_SLOTS; ++k)
+        {
+            const double pos = p->smp[L][k].rec ? p->smp[L][k].pos : -1.0;
+            if (pos >= 0.0 && (prev_pos[k] < 0.0 || pos < prev_pos[k]))
+                ++strikes;
+            prev_pos[k] = pos;
+        }
+    }
+    CHECK (strikes == 0,
+           "an octave re-vote is a relabeling, not a note: no re-strike "
+           "across the voiced register flip (got %d)", strikes);
+    ae_corrector_free (p);
+    free (p); free (in);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_release_freeze_holds_live_shifter (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -5604,6 +5756,8 @@ int main (void)
     test_slide_glides_not_staircases();
     test_slide_portamento_follows_finger();
     test_release_freeze_holds_live_shifter();
+    test_tail_droop_is_not_a_slide();
+    test_octave_revote_does_not_restrike();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();

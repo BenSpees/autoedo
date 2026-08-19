@@ -245,8 +245,14 @@ AeYinResult ae_yin_process (AeYin *y, const float *frame, int num_samples)
                the corrector an equave-sized re-vote. */
             const bool matches_last = y->last_best_tau > 0
                 && abs (c - y->last_best_tau) <= y->last_best_tau / 8;
-            const double need = (y->last_best_tau <= 0 || matches_last)
-                                    ? 0.90 : 0.95;
+            /* A CLEARED history is the least reliable frame there is --
+               the pluck itself, where a guitar's second harmonic is often
+               the loudest thing in the frame -- so it must meet the same
+               clearly-better bar an octave CHANGE does, not the lax one.
+               Letting the fresh-note case in at 0.90 is how a note started
+               an octave high and stayed there (a genuine subharmonic fix
+               dips near-equal, ~0.98, and still passes 0.95). */
+            const double need = matches_last ? 0.90 : 0.95;
             if (1.0 - y->cumulative[c] >= need * q_best)
             {
                 best_tau = c;

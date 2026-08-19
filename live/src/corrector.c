@@ -823,14 +823,22 @@ void ae_corrector_reset (AeCorrector *p)
     p->rel_latch_cents = 0.0;
     p->rel_latch_att   = 0;
     p->rel_out_expr    = 0.0;
+    p->rel_rise_pend   = false;
+    p->rel_latch_droop = false;
+    p->droop_run       = 0;
     p->slide_dir       = 0.0;
     p->slide_ref       = 0.0;
     p->slide_ext       = 0.0;
     p->slide_age       = 0;
     p->slide_hold      = 0;
     p->slide_off       = 0.0;
+    p->slide_det0      = 0.0;
+    p->slide_out0      = 0.0;
+    p->slide_jump_pend = false;
+    p->slide_prejump   = 0.0;
     p->slide_on        = false;
     p->slide_was       = false;
+    p->revote_hold     = 0;
     p->atk_armed = true;
     p->hold_latched    = false;
     p->hold_level      = 0.0;
@@ -2205,6 +2213,25 @@ static void run_detection (AeCorrector *p)
                 p->centre_cents += dd; /* the note moved; follow it at once */
                 p->out_cents    += dd; /* and keep the correction continuous */
                 p->in_transition = false;
+                /* A re-vote RELABELS the note: every stored pitch label
+                   has to move with it or it now describes a note an
+                   equave away. The frozen release aim was the loud one --
+                   a re-vote during a tail left rel_out_expr an octave
+                   behind the detection it is subtracted from, and the
+                   shifter jumped 12 semitones at the note's end. */
+                p->rel_out_expr   += dd;
+                p->rel_latch_cents += dd;
+                p->att_hist[0]    += dd;
+                p->att_hist[1]    += dd;
+                p->att_hist[2]    += dd;
+                p->slide_ref      += dd;
+                p->slide_ext      += dd;
+                p->slide_det0     += dd;
+                p->slide_prejump  += dd;
+                /* ...and for 30 ms the degree change it just caused is
+                   NOT a new note: the sample lead must not strike on it
+                   (see the strike gate). */
+                p->revote_hold = (int) (0.030 * p->fs);
             }
         }
         p->expr_cents = detected_cents - p->centre_cents;
@@ -2461,7 +2488,37 @@ static void run_detection (AeCorrector *p)
             const bool lift_c = p->rel_rms[rbl] > 0.0f
                              && rms < 0.85 * (double) p->rel_rms[rbl]
                              && p->expr_cents < -6.0;
-            const bool inst = fast_c || slow_c || lift_c;
+            /* The fourth face, the one no rate-of-fall window can see: a
+               DROOP. The pitch keeps easing flat -- read over the release
+               ring's own 75 ms horizon, because per-hop deltas on a
+               gentle tail sit under every arming floor -- while the level
+               never rises and the note reads flat of centre. Persistence
+               is the vibrato filter: a descending vibrato half spends at
+               most ~60 ms below centre before it turns, so 140 ms of
+               consecutive droop-shaped hops is a dying note, never music
+               (a guitar cannot be bent BELOW its fretted pitch). A crawl,
+               not a slide: real slides fall far faster over 75 ms and a
+               standing slide keeps its gesture. Field, third round:
+               "continuing to bend up or down at the very end of notes"
+               -- the gentle tails trip nothing above and used to ride
+               out through EXPRESSION. */
+            {
+                const float d15 = p->rel_det[rbl];
+                const double fall75 = d15 > 0.0f
+                    ? detected_cents - 1200.0 * log2 ((double) d15 / ref)
+                    : 0.0;
+                if (p->attack_hold <= 0
+                    && ! p->slide_on
+                    && fall75 < -6.0 && fall75 > -50.0
+                    && p->expr_cents < -6.0
+                    && p->rel_rms[rbl] > 0.0f
+                    && rms < 1.05 * (double) p->rel_rms[rbl])
+                    ++p->droop_run;
+                else
+                    p->droop_run = 0;
+            }
+            const bool droop_c = p->droop_run >= 28;
+            const bool inst = fast_c || slow_c || lift_c || droop_c;
             /* LATCHED until the note actually ends. The windows above are
                verdicts about the level's RATE of fall, and a lifted string
                settles: after the first collapse the ratios drift back over
@@ -2481,13 +2538,44 @@ static void run_detection (AeCorrector *p)
                 p->rel_latch       = true;
                 p->rel_latch_cents = detected_cents;
                 p->rel_latch_att   = p->att_seq;
+                /* A droop-flavoured latch frees itself on a much smaller
+                   rise: a dying string never rises at all, but a slow
+                   deep vibrato caught in a trough must get its note back
+                   at the next peak instead of staying flattened. */
+                p->rel_latch_droop = droop_c && ! fast_c && ! slow_c
+                                     && ! lift_c;
             }
             else if (p->rel_latch
-                     && (detected_cents > p->rel_latch_cents + 60.0
+                     && (detected_cents > p->rel_latch_cents
+                                          + (p->rel_latch_droop ? 30.0 : 60.0)
                          || (p->att_seq != p->rel_latch_att
                              && p->atk_fast > 1.3 * p->atk_slow)))
-                p->rel_latch = false;
+            {
+                /* The RISE breaks the latch only when it persists: one
+                   octave-flavoured tail glitch used to un-freeze the
+                   release and dump the followed droop in a single hop.
+                   A real re-fret holds its new pitch, so waiting one hop
+                   costs 5 ms and buys the tail its silence. */
+                const bool rise_only =
+                    ! (p->att_seq != p->rel_latch_att
+                       && p->atk_fast > 1.3 * p->atk_slow);
+                if (! rise_only || p->rel_rise_pend)
+                {
+                    p->rel_latch     = false;
+                    p->rel_rise_pend = false;
+                }
+                else
+                    p->rel_rise_pend = true;
+            }
+            else
+                p->rel_rise_pend = false;
             p->rel_collapse = inst || p->rel_latch;
+            /* ...and it closes a slide that is already open. Gating only
+               the REFRESH left a standing slide riding straight through a
+               release, following the dying string down and then dumping
+               the whole followed droop when the latch broke. */
+            if (p->rel_collapse)
+                p->slide_hold = 0;
         }
         /* SLIDE detection (see the header note): accumulated one-direction
            travel with a 10 c drawdown belt, because a finger's rate and a
@@ -2503,13 +2591,32 @@ static void run_detection (AeCorrector *p)
                 ; /* nothing to read yet */
             else if (add >= 45.0)
             {
-                /* jump-rate motion: a strike's business */
-                p->slide_dir  = 0.0;
-                p->slide_age  = 0;
-                p->slide_hold = 0;
+                /* Jump-rate motion is a strike's business -- but ONE hop
+                   does not prove it. A single YIN spike mid-gesture used
+                   to kill the slide outright, snapping the output back
+                   onto the grid and then jerking as the slide re-opened.
+                   A real jump HOLDS its new pitch, so the verdict waits
+                   one hop for the confirmation. */
+                if (p->slide_jump_pend
+                    && fabs (detected_cents - p->slide_prejump) >= 45.0)
+                {
+                    p->slide_dir  = 0.0;
+                    p->slide_age  = 0;
+                    p->slide_hold = 0;
+                    p->slide_jump_pend = false;
+                }
+                else if (! p->slide_jump_pend)
+                {
+                    p->slide_jump_pend = true;
+                    p->slide_prejump   = p->prev_det_cents;
+                    ++p->slide_age; /* a hesitation until it is proven */
+                }
+                else
+                    p->slide_jump_pend = false; /* the spike came back */
             }
             else if (p->slide_dir == 0.0)
             {
+                p->slide_jump_pend = false;
                 if (add > 2.0)
                 {
                     p->slide_dir = dd > 0.0 ? 1.0 : -1.0;
@@ -2520,13 +2627,23 @@ static void run_detection (AeCorrector *p)
             }
             else if ((detected_cents - p->slide_ext) * p->slide_dir >= 0.0)
             {
-                p->slide_ext = detected_cents;
+                p->slide_jump_pend = false;
+                /* A jitter hop is not travel. Real finger motion measures
+                   well under 25 c/hop (the field trace runs at ~5); a
+                   bigger single step is a detector wobble, and letting it
+                   ratchet slide_ext inflated the travel that opens the
+                   gesture. */
+                if (add < 25.0)
+                {
+                    p->slide_ext = detected_cents;
+                    moving = add > 2.0;
+                }
                 ++p->slide_age;
-                moving = add > 2.0;
             }
             else if ((p->slide_ext - detected_cents) * p->slide_dir > 10.0)
             {
                 /* retreated past the belt: the direction flipped */
+                p->slide_jump_pend = false;
                 p->slide_dir = -p->slide_dir;
                 p->slide_ref = p->slide_ext;
                 p->slide_ext = detected_cents;
@@ -2534,11 +2651,31 @@ static void run_detection (AeCorrector *p)
                 moving = true;
             }
             else
+            {
+                p->slide_jump_pend = false;
                 ++p->slide_age; /* a hesitation inside the belt */
+            }
 
+            /* A DYING string is never a gesture. The release verdict above
+               is a test of the level's RATE of fall and a slow natural
+               decay (a few dB/s) trips none of its windows -- so the tail
+               droop of an ordinary note used to accumulate travel and open
+               a slide, and the portamento then followed the string down
+               (field: "continuing to bend up or down at the very end of
+               notes"). Flat of centre AND measurably decaying is the
+               release's own signature without its depth requirement. */
+            const int rbs = (p->rel_pos + AE_REL_RING - 15) % AE_REL_RING;
+            const bool dying = p->expr_cents < -6.0
+                            && p->rel_rms[rbs] > 0.0f
+                            && rms < (double) p->rel_rms[rbs];
+            /* A slide travels to the NEXT NOTE by definition, so the bar
+               is a degree of the tuning in use, never a fixed 40 cents
+               that a droop can clear. */
+            const double step_c = ae_edo_step_cents_ex (p->edo, period);
+            const double open_c = dclamp (1.1 * step_c, 60.0, 90.0);
             const double travel = (p->slide_ext - p->slide_ref) * p->slide_dir;
-            if (p->slide_dir != 0.0 && moving && ! p->rel_collapse
-                && travel >= 40.0 && (travel >= 90.0 || p->slide_age >= 28))
+            if (p->slide_dir != 0.0 && moving && ! p->rel_collapse && ! dying
+                && travel >= open_c && (travel >= 110.0 || p->slide_age >= 28))
                 p->slide_hold = 24; /* ~120 ms of stall before it closes */
             else if (p->slide_hold > 0)
                 --p->slide_hold;
@@ -2563,8 +2700,14 @@ static void run_detection (AeCorrector *p)
            When the slide closes, the landing glides onto the grid at the
            GLIDE (transitionMs) speed. */
         if (p->slide_on && ! p->slide_was)
-            p->slide_off = p->out_cents + p->expr_cents * p->expression
-                         - detected_cents;
+        {
+            p->slide_off  = p->out_cents + p->expr_cents * p->expression
+                          - detected_cents;
+            /* The finger's zero and the aim it started from, so EXPRESSION
+               can scale how much of the travel reaches the output. */
+            p->slide_det0 = detected_cents;
+            p->slide_out0 = p->out_cents + p->expr_cents * p->expression;
+        }
         if (! p->slide_on && p->slide_was)
             p->in_transition = true; /* land on the grid at the glide speed */
         p->slide_was = p->slide_on;
@@ -2574,7 +2717,15 @@ static void run_detection (AeCorrector *p)
         double tau_ms = p->retune_ms;
         if (p->slide_on)
         {
-            eff_cents = detected_cents + p->slide_off
+            /* EXPRESSION scales the follow, as it scales every other
+               thing the player does to a note: at 1 this is exactly the
+               finger's own motion (it reduces to detected + slide_off),
+               below it the glissando is correspondingly tamed instead of
+               ignoring the knob entirely. The expr term is subtracted
+               because the ride is added back downstream -- counting it
+               twice was the kink at the boundary. */
+            eff_cents = p->slide_out0
+                      + p->expression * (detected_cents - p->slide_det0)
                       - p->expr_cents * p->expression;
             tau_ms = 15.0; /* track the finger, not the grid */
             p->in_transition = false; /* re-armed when the slide closes */
@@ -2898,11 +3049,13 @@ harmony_done: ;
            hop is a new note's, and it must track from its first sample. */
         p->rel_latch = false;
         p->rel_collapse = false;
+        p->droop_run = 0;
         /* The slide ended with the note; motion across the silence is a
            new gesture, never this one's momentum. */
         p->slide_dir  = 0.0;
         p->slide_age  = 0;
         p->slide_hold = 0;
+        p->slide_jump_pend = false;
         p->slide_on   = false;
         p->slide_was  = false;
     }
@@ -4226,6 +4379,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const int L = AE_HARM_VOICES;
         if (p->smp_guard > 0)
             p->smp_guard -= num_samples;
+        if (p->revote_hold > 0)
+            p->revote_hold -= num_samples;
         if (p->onset_pulse)
         {
             p->smp_pending[L] = true;
@@ -4239,8 +4394,12 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->smp_wait[L] -= num_samples;
             if (p->smp_wait[L] <= 0)
                 p->smp_pending[L] = false;
-            else if (hz > 0.0)
+            else if (hz > 0.0 && p->voiced)
             {
+                /* ...and only once the detector has actually VOTED on
+                   this note. Striking the moment a pitch existed served
+                   the note before it -- a stale target, often an equave
+                   out -- which is the wrong-octave note start. */
                 sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false;
                 p->smp_guard = (int) (0.040 * p->fs);
@@ -4296,9 +4455,20 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                        below (at the GLIDE time), which is what the finger
                        is asking for. A new PICK mid-slide still strikes --
                        the energy path below does not consult slide_on. */
+                    /* ...and a RE-VOTE strikes nothing either: the
+                       engine has just decided this is the same note
+                       under a different octave name, so a strike lays a
+                       second, wrong-register copy over the one still
+                       ringing -- two near-unison voices summing several
+                       dB hotter than every neighbour (field: "certain
+                       sample notes will unexpectedly be much louder
+                       sometimes, regardless of pinned velocity"). A
+                       genuinely picked octave leap still strikes through
+                       the energy/att_seq path below. */
                     if (p->smp_lead_deg_valid && ldeg != (long long) p->smp_lead_deg
                         && ! p->rel_collapse
                         && ! p->slide_on
+                        && p->revote_hold <= 0
                         && (p->det_slope_hold > 15.0
                             || llabs (dstep) >= half_oct))
                         want = true;

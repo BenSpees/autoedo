@@ -479,6 +479,26 @@ typedef struct
                                holds until the note is over, not until the
                                level pauses on its way down */
     double rel_latch_cents; /* detected_cents when the latch closed */
+    int    droop_run;       /* consecutive hops whose 75 ms pitch fall
+                               reads droop-shaped (slow, flat of centre,
+                               level never rising) -- the fourth release
+                               face fires at 28 (~140 ms), longer than any
+                               vibrato spends below centre in one pass */
+    bool   rel_latch_droop; /* the latch was set by the DROOP face alone:
+                               its rise-break is +30 c instead of +60, so
+                               a slow deep vibrato caught in a trough gets
+                               its note back at the next peak */
+    bool   rel_rise_pend;   /* the latch's +60 c rise test saw ONE hop up;
+                               a single tail glitch must not un-freeze a
+                               release, so the break waits for the next
+                               hop to confirm the note really rose */
+    int    revote_hold;     /* samples left in which the OCTAVE RE-VOTE's
+                               relabeling must not be read as a note change.
+                               The re-vote says "same note, wrong octave
+                               name" -- a sample lead that struck on it
+                               laid a second, wrong-register copy over the
+                               ringing one (field: "certain sample notes
+                               will unexpectedly be much louder") */
     int    rel_latch_att;   /* att_seq at the latch: a fresh ARMING edge
                                with the envelope genuinely rising is a new
                                attack and reopens tracking */
@@ -675,6 +695,17 @@ typedef struct
     int    slide_age;            /* hops the direction has held */
     int    slide_hold;           /* hops of slide_on left once motion stalls */
     double slide_off;            /* portamento offset, frozen at the open */
+    double slide_det0;           /* detected cents at the open: the finger's
+                                    zero, so EXPRESSION can scale how much of
+                                    its travel reaches the output */
+    double slide_out0;           /* the aim point at the open (the same sum
+                                    the shifter was using), so a scaled
+                                    follow starts exactly where it stood */
+    bool   slide_jump_pend;      /* a >=45 c hop seen; a slide dies only when
+                                    the NEXT hop confirms the new pitch --
+                                    one YIN spike must not snap a gesture
+                                    back onto the grid mid-slide */
+    double slide_prejump;        /* detected cents before that hop */
     bool   slide_on;
     bool   slide_was;            /* last hop's slide_on (edge detect) */
     int    smp_guard;            /* samples until another lead strike may
