@@ -2629,6 +2629,62 @@ static void test_attack_sound_poly (void)
            early[0], early[1]);
 }
 
+/* ...and a SAMPLED lead with the ghosts switched off (field: "I've lost the
+   attack sound on mono as well"). The cover used to be tied to the harmony
+   being up, so this rig -- the one where a struck recording replaces the
+   pick outright, and the transient is most obviously missing -- went bare. */
+static void test_attack_sound_sample_lead (void)
+{
+    const int quiet = 9600, played = 24064, total = quiet + played;
+    double early[2];
+
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        {
+            int srcs[AE_HARM_VOICES];
+            for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;
+            ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        }
+        /* HARMONY OFF -- the whole point of the case. */
+        {
+            AeHarmVoice voices[AE_HARM_VOICES];
+            memset (voices, 0, sizeof (voices));
+            ae_corrector_set_harmony (p, false, 0, voices);
+        }
+        ae_corrector_set_attack (p, c == 0 ? AE_ATK_OFF : AE_ATK_PICK, 1.0);
+
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = quiet; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            in[i] = (float) (0.4 * sin (ph) + 0.2 * sin (2.0 * ph));
+        }
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+        }
+        double pk = 0.0;
+        for (int i = quiet; i < quiet + 2880 && i < total; ++i)
+        {
+            const double a = fabs ((double) hl[i]);
+            if (a > pk) pk = a;
+        }
+        early[c] = pk;
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+    CHECK (early[1] > 4.0 * early[0] + 1e-4,
+           "a sample lead with harmony OFF still gets the attack sound "
+           "(off %.5f, pick %.5f)", early[0], early[1]);
+}
+
 static void test_attack_sound (void)
 {
     const int quiet = 9600, sung = 48000, total = quiet + sung;
@@ -5269,6 +5325,7 @@ int main (void)
     test_expression_transfer();
     test_attack_sound();
     test_attack_sound_poly();
+    test_attack_sound_sample_lead();
     test_poly_mode();
     test_polyf0_tracker();
     test_poly_detect_export();

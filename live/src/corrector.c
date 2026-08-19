@@ -1756,7 +1756,19 @@ static bool attack_relevant (const AeCorrector *p)
        those swallows the pick transient the cover exists to replace. */
     if (p->poly)
         return true;
-    if (p->lead_source == AE_HARM_SRC_SYNTH)
+    /* A SAMPLED lead qualifies for exactly the same reason a synth one
+       does, and leaving it out was the field's "I've lost the attack sound
+       on mono": the pick cover was tied to the HARMONY being up, so a
+       sample lead with the ghosts switched off went bare -- which is the
+       one rig where the transient is most obviously missing, because a
+       struck recording replaces the pick outright. */
+    if (p->lead_source == AE_HARM_SRC_SYNTH
+        || p->lead_source == AE_HARM_SRC_SAMPLE)
+        return true;
+    /* The other synthetic layers stand on their own too: MEL remodels the
+       whole input, STEEL adds a drone under it. Either one on the bus is
+       something for the hit to sit under. */
+    if (p->mel_mix > 0.0 || p->steel_on)
         return true;
     if (! p->harm_on)
         return false;
