@@ -137,6 +137,9 @@ typedef struct
     int      harm_voice_source[5];   /* per voice; -1 = follow harm_source */
     int      lead_source;            /* the corrected lead: 0/1/2 as above */
     double   sample_mix;             /* 0..1 layer blend, 0.5 = both at unity */
+    int      sample_register;        /* strike offset in semitones;
+                                        AE_SMP_OCTAVE_AUTO = by instrument
+                                        name (bass-type sets play -12) */
     double   sample_velocity;        /* >= 0 fixed strike level; < 0 = measure */
     double   sample_vel_ref;         /* SUPPLIED strike-velocity reference as
                                         a linear peak; < 0 = observe one.

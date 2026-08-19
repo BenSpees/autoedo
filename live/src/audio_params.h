@@ -91,6 +91,7 @@ typedef struct
     _Atomic double   sample_mix;
     _Atomic double   sample_velocity;
     _Atomic double   sample_vel_ref;
+    _Atomic int      sample_register;
     _Atomic bool     sample_ring;
     _Atomic double   sample_match;
     _Atomic double   sample_tilt;
@@ -255,6 +256,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
     atomic_store_explicit (&a->formant_st,   p->formant_st,   memory_order_relaxed);
     atomic_store_explicit (&a->sample_mix,      p->sample_mix,      memory_order_relaxed);
     atomic_store_explicit (&a->sample_velocity, p->sample_velocity, memory_order_relaxed);
+    atomic_store_explicit (&a->sample_register, p->sample_register, memory_order_relaxed);
     atomic_store_explicit (&a->sample_ring,     p->sample_ring,     memory_order_relaxed);
     atomic_store_explicit (&a->sample_match,    p->sample_match,    memory_order_relaxed);
     atomic_store_explicit (&a->sample_tilt,     p->sample_tilt,     memory_order_relaxed);
@@ -384,6 +386,14 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
                           atomic_load_explicit (&a->sample_ring, memory_order_relaxed));
     ae_corrector_set_vel_ref (ps,
                           atomic_load_explicit (&a->sample_vel_ref, memory_order_relaxed));
+    {
+        /* Guarded: the setter resolves the AUTO register against the bank
+           name (a scan and a pow), which has no place running per block. */
+        const int reg =
+            atomic_load_explicit (&a->sample_register, memory_order_relaxed);
+        if (reg != ps->smp_register)
+            ae_corrector_set_sample_register (ps, reg);
+    }
     ae_corrector_set_sample_match (ps,
                           atomic_load_explicit (&a->sample_match, memory_order_relaxed));
     ae_corrector_set_strike_tilt (ps,

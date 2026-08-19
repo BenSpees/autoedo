@@ -260,6 +260,16 @@ int main (void)
     CHECK (strstr (status, "\"sampleLevelDb\":-6") != NULL
            && strstr (status, "\"sampleToneDb\":4") != NULL,
            "config echo: sample section follows writes");
+    CHECK (strstr (status, "\"sampleRegister\":\"auto\"") != NULL,
+           "config echo: sampleRegister defaults to auto");
+    ae_embed_config (inst, "{\"sampleRegister\":-12}");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"sampleRegister\":-12") != NULL,
+           "config echo: sampleRegister follows a number");
+    ae_embed_config (inst, "{\"sampleRegister\":\"auto\"}");
+    ae_embed_status (inst, status, sizeof (status));
+    CHECK (strstr (status, "\"sampleRegister\":\"auto\"") != NULL,
+           "config echo: sampleRegister returns to auto");
     CHECK (strstr (status, "\"melMix\":0,") != NULL,
            "config echo: MEL layer defaults off");
     CHECK (strstr (status, "\"melPreset\":\"footage\"") != NULL,

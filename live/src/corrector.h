@@ -344,6 +344,10 @@ typedef struct
     signed char   smp_rr[AE_SMP_MAX_ZONES * 2]; /* last RR pick per zone+layer */
     unsigned      smp_rng;
     int           smp_octave;    /* filename -> sounding offset, or AUTO */
+    int           smp_register;  /* sampleRegister: strike offset in
+                                    semitones, AE_SMP_OCTAVE_AUTO = by name
+                                    (a bass-type set plays -12) */
+    double        smp_reg_ratio; /* the resolved ratio strikes multiply in */
     double        smp_gain_a;    /* per-sample coefficient of the ~15 ms
                                     ramp the velocity refinement rides */
 
@@ -932,6 +936,15 @@ void ae_corrector_set_lead_env (AeCorrector *p, double attack_ms,
 /* Filename-to-sounding pitch offset in semitones for the NEXT load;
    AE_SMP_OCTAVE_AUTO uses the built-in table. */
 void ae_corrector_set_sample_octave (AeCorrector *p, int semitones);
+
+/* REGISTER: where the instrument sounds relative to the pitch it is asked
+   for, in semitones. AE_SMP_OCTAVE_AUTO resolves by name -- a bass-type
+   set ("bass", "contrabass", "contrabasspizz", any user folder whose name
+   says bass; "bassoon" is not a bass) plays an octave DOWN, everything
+   else at pitch. Distinct from sampleOctave, which corrects FILENAMES that
+   lie about their sounding pitch; this one places the instrument. Live --
+   no reload, lands on the next strike. */
+void ae_corrector_set_sample_register (AeCorrector *p, int semitones);
 
 bool ae_corrector_load_samples (AeCorrector *p, const char *root,
                                 const char *instrument, const char *manifest,

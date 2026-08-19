@@ -4631,6 +4631,83 @@ static void test_sample_ring (void)
     if (system (cmd) != 0) { /* best effort */ }
 }
 
+/* sampleRegister: a bass-TYPE instrument (by folder name) plays the BASS
+   register -- struck an octave below the pitch asked for -- and the key
+   overrides by number (field: "Bass sample is not sounding an octave down
+   automatically... all bass type samples"). "synthbass" is deliberately
+   NOT in the filename-octave table: this is register placement, not
+   filename correction, and the by-name rule must reach user-added sets. */
+static void test_sample_register (void)
+{
+    const char *root = "/tmp/ae-smp-reg";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/synthbass", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "register: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    for (int pass = 0; pass < 2; ++pass) /* auto (-12), then pinned 0 */
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 0.0);
+        {
+            int srcs[AE_HARM_VOICES];
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+                srcs[v] = AE_HARM_SRC_DEFAULT;
+            ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        }
+        ae_corrector_set_sample (p, 1.0, 0.9, true); /* library only */
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "synthbass", NULL,
+                                          err, sizeof (err)),
+               "register: bank loads (%s)", err);
+        if (pass == 1)
+            ae_corrector_set_sample_register (p, 0);
+
+        const int total = 512 * 200;
+        float *buf = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            ph += 2.0 * M_PI * 220.0 / 48000.0;
+            buf[i] = (float) (0.3 * sin (ph));
+        }
+        for (int off = 0; off < total; off += 512)
+            ae_corrector_process (p, buf + off, NULL, NULL, 512);
+
+        const float *tail = buf + total - 48000;
+        const double lo = goertzel (tail, 48000, 110.0, 48000.0);
+        const double hi = goertzel (tail, 48000, 220.0, 48000.0);
+        if (pass == 0)
+            CHECK (lo > 3.0 * hi && lo > 0.02,
+                   "bass-type set plays the BASS register: A3 in, A2 out "
+                   "(110 Hz %.3g vs 220 Hz %.3g)", lo, hi);
+        else
+            CHECK (hi > 3.0 * lo && hi > 0.02,
+                   "sampleRegister 0 pins a bass set back to pitch "
+                   "(220 Hz %.3g vs 110 Hz %.3g)", hi, lo);
+        ae_corrector_free (p);
+        free (p); free (buf);
+    }
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 /* The LEAD's own release. A synth lead keeps sounding after the input
    stops -- it is an oscillator, not a copy of the input -- so leadReleaseMs
    is a real tail, and a long one must outlast a short one. The harmony's
@@ -5103,6 +5180,7 @@ int main (void)
     test_soft_clip();
     test_makeup_on_plucks();
     test_sampler_bank();
+    test_sample_register();
     test_sample_ghost();
     test_sample_velocity();
     test_velocity_relative();

@@ -1,6 +1,7 @@
 #include "corrector.h"
 #include "attack_picks.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -765,6 +766,8 @@ void ae_corrector_reset (AeCorrector *p)
     if (p->smp_vel_fixed == 0.0) p->smp_vel_fixed = -1.0;
     p->smp_rng = 0x2545f491u;
     if (p->smp_octave == 0) p->smp_octave = AE_SMP_OCTAVE_AUTO;
+    if (p->smp_register == 0) p->smp_register = AE_SMP_OCTAVE_AUTO;
+    p->smp_reg_ratio = 1.0; /* resolved when a bank loads / the key writes */
     /* Voices default to "follow the global source" -- the documented
        meaning of AE_HARM_SRC_DEFAULT. A zeroed struct would otherwise read
        as an explicit per-voice AE_HARM_SRC_VOICE override and silently
@@ -1369,6 +1372,51 @@ void ae_corrector_set_sample_octave (AeCorrector *p, int semitones)
     p->smp_octave = semitones;
 }
 
+/* A bass-TYPE set by name: "bass" anywhere in the folder name -- which is
+   what makes a user-added "synthbass" or "mellotronbass" just work -- with
+   the one English trap excluded (a bassoon is not a bass). */
+static bool instrument_is_bass (const char *name)
+{
+    for (const char *s = name; *s != '\0'; ++s)
+    {
+        if (tolower ((unsigned char) s[0]) != 'b')
+            continue;
+        if (tolower ((unsigned char) s[1]) == 'a'
+            && tolower ((unsigned char) s[2]) == 's'
+            && tolower ((unsigned char) s[3]) == 's')
+        {
+            if (tolower ((unsigned char) s[4]) == 'o'
+                && tolower ((unsigned char) s[5]) == 'o'
+                && tolower ((unsigned char) s[6]) == 'n')
+                continue; /* bassoon: keep looking past it */
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Resolve smp_register against the LIVE bank's name. Called wherever either
+   side changes (a bank load, the key's write); the ratio is what the audio
+   thread reads, so the resolution never runs per strike. */
+static void sample_register_resolve (AeCorrector *p)
+{
+    int st = p->smp_register;
+    if (st == AE_SMP_OCTAVE_AUTO)
+    {
+        const int live = atomic_load_explicit (&p->smp_live,
+                                               memory_order_acquire);
+        st = (live >= 0 && instrument_is_bass (p->smp_bank[live].instrument))
+                 ? -12 : 0;
+    }
+    p->smp_reg_ratio = pow (2.0, (double) st / 12.0);
+}
+
+void ae_corrector_set_sample_register (AeCorrector *p, int semitones)
+{
+    p->smp_register = semitones;
+    sample_register_resolve (p);
+}
+
 static void mel_analyze_bank (AeCorrector *p, int bank_idx);
 
 bool ae_corrector_load_samples (AeCorrector *p, const char *root,
@@ -1388,7 +1436,8 @@ bool ae_corrector_load_samples (AeCorrector *p, const char *root,
                            memory_order_relaxed);
     atomic_store_explicit (&p->smp_live, idle, memory_order_release);
     memset (p->smp_rr, -1, sizeof (p->smp_rr));
-    mel_analyze_bank (p, idle); /* melPreset "auto" learns this bank */
+    sample_register_resolve (p); /* the register follows the NAME just loaded */
+    mel_analyze_bank (p, idle);  /* melPreset "auto" learns this bank */
     return true;
 }
 
@@ -1508,6 +1557,11 @@ static void sample_strike (AeCorrector *p, int v, double hz, double vel,
     const AeSampleBank *bank = &p->smp_bank[live];
     if (bank->n_recs == 0)
         return;
+
+    /* REGISTER: a bass-type set plays the bass register -- the strike
+       lands an octave below the pitch asked for (sampleRegister; the
+       repitch wears the same ratio, so a bend rides in register too). */
+    hz *= p->smp_reg_ratio > 0.0 ? p->smp_reg_ratio : 1.0;
 
     const int midi = (int) lround (12.0 * log2 (hz / 440.0) + 69.0);
     const int zone = ae_sampler_zone (bank, midi);
@@ -1672,6 +1726,7 @@ static void sample_repitch (AeCorrector *p, int v, double hz)
     const int cur = p->smp_cur[v];
     if (hz <= 0.0 || p->smp[v][cur].rec == NULL)
         return;
+    hz *= p->smp_reg_ratio > 0.0 ? p->smp_reg_ratio : 1.0; /* stay in register */
     const AeSampleRec *r = p->smp[v][cur].rec;
     p->smp[v][cur].rate = hz / (440.0 * pow (2.0, (r->midi - 69) / 12.0));
 }

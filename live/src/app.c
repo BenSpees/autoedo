@@ -307,6 +307,7 @@ static void config_defaults (App *app)
     c->sample_root[0] = c->sample_manifest[0] = '\0';
     snprintf (c->sample_instrument, sizeof (c->sample_instrument), "piano");
     c->sample_octave = AE_SMP_OCTAVE_AUTO;
+    c->params.sample_register = AE_SMP_OCTAVE_AUTO;
     app->sample_err[0] = '\0';
     app->sample_dirty  = false;
     c->params.attack_sound   = 0;     /* off */
@@ -395,6 +396,12 @@ static void config_json (const App *app, char *out, size_t cap)
         snprintf (sample_oct_str, sizeof (sample_oct_str), "\"auto\"");
     else
         snprintf (sample_oct_str, sizeof (sample_oct_str), "%d", c->sample_octave);
+    char sample_reg_str[16];
+    if (c->params.sample_register == AE_SMP_OCTAVE_AUTO)
+        snprintf (sample_reg_str, sizeof (sample_reg_str), "\"auto\"");
+    else
+        snprintf (sample_reg_str, sizeof (sample_reg_str), "%d",
+                  c->params.sample_register);
     /* Echoed in the units it is written in: "auto" or dBFS. status carries
        the reference actually IN FORCE, always a number -- so a pinned rig
        sees the two agree, and an observing one sees what was found. */
@@ -539,6 +546,7 @@ static void config_json (const App *app, char *out, size_t cap)
               "\"polyMode\":%s,\"polyNotes\":%d,\"gateDb\":%.4g,"
               "\"sampleVelRefDb\":%s,"
               "\"sampleInstrument\":\"%s\",\"sampleOctave\":%s,"
+              "\"sampleRegister\":%s,"
               "\"sendChannel\":%d,\"sendContent\":\"%s\",\"sendGainDb\":%.4g,\"sendOn\":%s,"
               "\"midiMode\":%s,\"midiSource\":\"",
               c->params.harm_on ? "true" : "false",
@@ -573,7 +581,7 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.poly_notes,
               c->params.gate_db != 0.0 ? c->params.gate_db : -56.0,
               vel_ref_str,
-              c->sample_instrument, sample_oct_str,
+              c->sample_instrument, sample_oct_str, sample_reg_str,
               c->send_channel,
               (const char *[]){ "full", "wet", "lead", "harm" }
                   [c->params.send_content >= 0 && c->params.send_content <= 3
@@ -1003,6 +1011,14 @@ static bool config_apply_json (App *app, const char *json)
         if (oct != c->sample_octave) app->sample_dirty = true;
         c->sample_octave = oct;
     }
+    /* REGISTER: where the instrument SOUNDS relative to the pitch asked
+       for. "auto" = bass-type sets (name says bass; bassoon excluded) play
+       an octave down, everything else at pitch. Live -- no reload. */
+    if (ae_json_get_string (json, "sampleRegister", str, sizeof (str))
+        && strcmp (str, "auto") == 0)
+        c->params.sample_register = AE_SMP_OCTAVE_AUTO;
+    else if (ae_json_get_number (json, "sampleRegister", &num))
+        c->params.sample_register = (int) num_clamp (num, -24.0, 24.0);
     if (ae_json_get_string (json, "sampleInstrument", str, sizeof (str)))
     {
         if (strcmp (str, c->sample_instrument) != 0)
