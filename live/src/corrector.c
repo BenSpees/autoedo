@@ -752,6 +752,12 @@ void ae_corrector_reset (AeCorrector *p)
     p->ride_gain      = 1.0;
     p->glide_pos       = 0.0;
     p->glide_pos_valid = false;
+    p->fresh_pend_valid = false;
+    p->fresh_pend_cents = 0.0;
+    p->last_note_valid  = false;
+    p->last_note_cents  = 0.0;
+    p->smp_corr_shift   = 0.0;
+    p->note_peak_rms    = 0.0;
     p->out_cents      = 0.0;
     p->centre_cents   = 0.0;
     p->expr_cents     = 0.0;
@@ -2209,7 +2215,55 @@ static void run_detection (AeCorrector *p)
     p->last_detect_at = p->in_write;
 
     const AeYinResult res = ae_yin_process (&p->detector, p->frame, p->frame_size);
-    const bool now_voiced = res.voiced && res.frequency_hz > 0.0 && rms > GATE (p);
+    bool now_voiced = res.voiced && res.frequency_hz > 0.0 && rms > GATE (p);
+
+    /* FRESH-VOICE CONFIRM: the first voiced hop after a gap must AGREE --
+       with the pitch it re-finds (the note that was just sounding, so a
+       trill's or tremolo's re-lock costs nothing), or with itself one hop
+       later. A pick's damp reads 1-2 hops of junk (the thunk of the
+       muted string, way under the note -- the field trace's full-height
+       lines at every boundary), and a blink can re-lock one hop on the
+       wrong octave; neither ever produces two hops within 150 c of each
+       other, so neither gets to be a note. Cost: one hop (~5 ms) on a
+       genuinely NEW pitch after silence; nothing on re-picks. */
+    if (now_voiced && ! p->voiced)
+    {
+        /* ...and a TAIL is not a note. A dying string blinks back voiced
+           at its drooped pitch, and under glide continuity that "note"
+           dragged the output down at the glide rate on every release
+           (field: "STILL getting the pitch shifts on note releases").
+           A hop more than ~22 dB under the note's own peak is the
+           ring-down of the note that just ended, whatever YIN thinks.
+           The yardstick DECAYS through silence (~2 s) rather than
+           expiring on a clock -- tails ring for seconds, and the first
+           cut of this gate timed out mid-tail and let the engine
+           quantize a -60 c drooped whisper onto the next degree down.
+           A deliberate pianissimo after a rest clears the faded bar. */
+        if (p->note_peak_rms > 0.0 && rms < 0.08 * p->note_peak_rms)
+        {
+            now_voiced = false;
+            p->fresh_pend_valid = false;
+        }
+    }
+    if (now_voiced && ! p->voiced)
+    {
+        const double ref0 = p->ref_hz > 0.0 ? p->ref_hz : AE_REFERENCE_C0_HZ;
+        const double dc0  = 1200.0 * log2 (res.frequency_hz / ref0);
+        const bool matches_last = p->last_note_valid && p->silence_s < 0.25
+                               && fabs (dc0 - p->last_note_cents) < 150.0;
+        const bool matches_pend = p->fresh_pend_valid
+                               && fabs (dc0 - p->fresh_pend_cents) < 150.0;
+        if (! matches_last && ! matches_pend)
+        {
+            p->fresh_pend_cents = dc0;
+            p->fresh_pend_valid = true;
+            now_voiced = false; /* one hop of patience; junk never confirms */
+        }
+        else
+            p->fresh_pend_valid = false;
+    }
+    else if (now_voiced)
+        p->fresh_pend_valid = false;
 
     /* Vocal-tract estimate for LPC vowel mode, on the newest window of the
        same frame the detector just used. Runs whether or not the frame is
@@ -2249,6 +2303,33 @@ static void run_detection (AeCorrector *p)
            rather than sliding in from the last one. */
         if (! p->voiced || ! p->primed)
         {
+            /* BLINK-RELABEL: a re-lock an EQUAVE away from the note that
+               was just sounding, across a short gap, with no attack
+               energy behind it, is the same string under a new name --
+               the detector flipped harmonic across the blink -- not a
+               note. Without the rebase the shift math inverts the flip
+               straight into the audio: shift = out - detected, so a
+               +1200 c relabel with out held made the audible output DROP
+               an octave and slew back at the glide rate (field: "octaves
+               jumping on sustained notes, just in normal playing"). The
+               voiced-path re-vote's treatment, extended across a blink;
+               a really picked octave carries its pick and stays a note. */
+            if (p->primed && p->last_note_valid && p->silence_s < 0.25
+                && p->atk_fast <= 1.3 * p->atk_slow)
+            {
+                const double dj  = detected_cents - p->last_note_cents;
+                const double adj = fabs (dj);
+                if (fabs (adj - 1200.0) < 60.0 || fabs (adj - 1902.0) < 60.0
+                    || fabs (adj - 2400.0) < 60.0)
+                {
+                    p->out_cents += dj;
+                    if (p->glide_pos_valid)
+                        p->glide_pos += dj;
+                    p->smp_corr_shift -= dj; /* ringing samples stay put */
+                    p->revote_hold = (int) (0.030 * p->fs);
+                    p->revote_hop  = true;
+                }
+            }
             p->centre_cents = detected_cents;
             /* A NEW NOTE gets fresh release evidence. The ring held the
                PREVIOUS note's body, and the verdict below compared the
@@ -2264,6 +2345,7 @@ static void run_detection (AeCorrector *p)
             p->droop_run      = 0;
             p->det_slope_hold = 0.0;
             p->rel_note_age   = 0;
+            p->note_peak_rms  = rms; /* this note's own loudness yardstick */
         }
         else
         {
@@ -2285,9 +2367,28 @@ static void run_detection (AeCorrector *p)
             const bool fast_chase = p->attack_hold > 0
                 && (p->atk_fast > 1.2 * p->atk_slow
                     || fabs (detected_cents - p->centre_cents) > far_c);
+            /* ...and INSIDE the hold the chase is ASYMMETRIC: a pick
+               attack always reads SHARP (tension from the pick's
+               displacement, plus the analysis smear), so a downward
+               correction during the attack is the truth arriving and
+               takes the fast lane (~15 ms), while upward motion keeps
+               the normal caution. The field trace showed the target
+               committing 2-3 steps sharp at every pick and walking
+               down for ~150 ms ("it's detecting very sharp on
+               attacks"); with the settle fast-tracked the wrong commit
+               collapses in 2-3 hops. */
+            /* ...but only in the note's OPENING (~100 ms): deep vibrato
+               re-arms the hold all note long, and a fast-down lane that
+               stayed open tracked every falling half-cycle (probe D's
+               correction wobble doubled). Attack sharpness lives in the
+               first hops; after that the symmetric law stands. */
+            const double chase_s =
+                p->attack_hold > 0 && p->rel_note_age < 20
+                        && detected_cents < p->centre_cents
+                    ? 0.015
+                    : fast_chase ? 0.040 : 0.180;
             p->centre_cents += (detected_cents - p->centre_cents)
-                             * (1.0 - exp (-elapsed /
-                                    (fast_chase ? 0.040 : 0.180)));
+                             * (1.0 - exp (-elapsed / chase_s));
         }
         /* Octave re-vote. A guitar with a dominant second harmonic makes
            YIN vote octave-high at the pluck and re-vote the true octave
@@ -2329,6 +2430,13 @@ static void run_detection (AeCorrector *p)
                                             or a mid-slide re-vote swoops
                                             the output toward a stale one */
                 p->slide_prejump  += dd;
+                p->smp_corr_shift -= dd; /* the RINGING sample layer keeps
+                                            sounding the pitch it was struck
+                                            at: a relabel moving corr_hz an
+                                            equave yanked ringing samples up
+                                            an octave mid-note (field:
+                                            "octaves jumping on sustained
+                                            notes") */
                 /* ...and for 30 ms the degree change it just caused is
                    NOT a new note: the sample lead must not strike on it
                    (see the strike gate). */
@@ -2343,6 +2451,8 @@ static void run_detection (AeCorrector *p)
         p->expr_cents = detected_cents - p->centre_cents;
         if (p->rel_note_age < 1 << 20)
             ++p->rel_note_age;
+        if (rms > p->note_peak_rms)
+            p->note_peak_rms = rms;
 
         /* The release slope-freeze verdict, decided BEFORE the QUANTIZER
            runs: a latched release used to freeze only the audible shift
@@ -2692,8 +2802,10 @@ static void run_detection (AeCorrector *p)
                where it stood, seeking the new pitch at the glide rate
                (the tau floor below). With glide off this is the old
                snap, unchanged. */
-            if (! p->primed || glide_bias (p) <= 0.0
-                || p->silence_s >= 0.15)
+            if ((! p->primed || glide_bias (p) <= 0.0
+                 || p->silence_s >= 0.15)
+                && p->revote_hold <= 0) /* a blink-relabel just rebased
+                                           out; snapping would undo it */
             {
                 p->out_cents       = detected_cents;
                 p->glide_pos_valid = false; /* the slewer re-seeds here */
@@ -3025,6 +3137,11 @@ static void run_detection (AeCorrector *p)
         p->prev_det_cents  = detected_cents;
         p->prev_tgt_cents  = target_cents;
         p->prev_pair_valid = true;
+        p->last_note_cents = detected_cents; /* survives gaps: the fresh-
+                                                voice confirm and the blink-
+                                                relabel both compare against
+                                                the note that was sounding */
+        p->last_note_valid = true;
 
         /* ---- harmony voices (Xentar emulation) --------------------------- */
         /* Release slope-freeze. A mute or finger-lift drops the level far
@@ -3287,6 +3404,8 @@ harmony_done: ;
         p->droop_run = 0;
         p->silence_s += elapsed; /* the THEREMIN clock: how clear is this
                                     note end? (see the out_cents snap) */
+        p->note_peak_rms *= exp (-elapsed / 2.0); /* the tail yardstick
+                                    fades with the memory of the note */
         /* The slide ended with the note; motion across the silence is a
            new gesture, never this one's momentum. */
         p->slide_dir  = 0.0;
@@ -4652,7 +4771,15 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->smp_wait[L] -= num_samples;
             if (p->smp_wait[L] <= 0)
                 p->smp_pending[L] = false;
-            else if (hz > 0.0 && p->voiced && p->smp_guard <= 0)
+            else if (hz > 0.0 && p->voiced && p->smp_guard <= 0
+                     /* ...and once the vote has SETTLED: attacks read
+                        SHARP (field), and a strike at the transient's
+                        degree plays the wrong note then flams down.
+                        Slope under ~60 c/hop = the pitch stopped
+                        moving; the 60 ms cap keeps a rough attack from
+                        eating the strike outright. */
+                     && (p->det_slope_hold < 60.0
+                         || p->smp_wait[L] < (int) (0.34 * p->fs)))
             {
                 /* ...and only once the detector has actually VOTED on
                    this note. Striking the moment a pitch existed served
@@ -4662,6 +4789,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                    keeps counting): a pick 20 ms after a hammer-on used to
                    land a second full-gain copy inside the guard window,
                    two near-identical slots summing ~+6 dB. */
+                p->smp_corr_shift = 0.0;
                 sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false;
                 p->smp_guard = (int) (0.040 * p->fs);
@@ -4808,6 +4936,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->att_seq_seen = p->att_seq;
             if ((want || want_deg) && p->smp_guard <= 0 && hz > 0.0)
             {
+                p->smp_corr_shift = 0.0;
                 sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false; /* this event is served */
                 p->smp_guard = (int) (0.040 * p->fs);
@@ -4850,6 +4979,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                     && (! p->smp_strike_deg_valid
                         || (long long) ldeg != p->smp_strike_deg))
                 {
+                    p->smp_corr_shift = 0.0;
                     sample_strike (p, L, hz, vel, 1.0);
                     p->smp_pending[L] = false;
                     p->smp_guard = (int) (0.040 * p->fs);
@@ -4866,7 +4996,12 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         {
             const double ch = (double) atomic_load_explicit (
                 &p->corr_hz_out, memory_order_relaxed);
-            sample_repitch (p, L, ch > 0.0 ? ch : hz);
+            /* Through the relabel compensation: a re-vote renames the
+               note, and a ringing sample must keep sounding the pitch
+               it was struck at, not leap to the new name. Reset at
+               every strike -- a fresh strike aims absolutely. */
+            sample_repitch (p, L, (ch > 0.0 ? ch : hz)
+                                      * pow (2.0, p->smp_corr_shift / 1200.0));
         }
         const double fade_step = 1.0 / (0.006 * p->fs);
         /* The LEAD's ceiling is its own release, not the harmony's. */

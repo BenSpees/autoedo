@@ -743,6 +743,24 @@ typedef struct
     double slide_prejump;        /* detected cents before that hop */
     bool   slide_on;
     bool   slide_was;            /* last hop's slide_on (edge detect) */
+    double note_peak_rms;        /* the current note's peak frame RMS: a
+                                    re-voice ~22 dB under it is the ring-down
+                                    of the note that just ended, not a note */
+    double fresh_pend_cents;     /* fresh-voice confirm: the first voiced hop
+                                    after a gap must agree with the pitch it
+                                    re-finds or with itself one hop later --
+                                    a damp's junk thunk and a wrong-octave
+                                    blink never produce two agreeing hops */
+    bool   fresh_pend_valid;
+    double last_note_cents;      /* the note that was sounding, surviving
+                                    gaps: the confirm and the blink-relabel
+                                    both compare against it */
+    bool   last_note_valid;
+    double smp_corr_shift;       /* cents the RINGING sample layer subtracts
+                                    from corr_hz: a re-vote/relabel renames
+                                    the note, and a struck sample must keep
+                                    the pitch it was struck at; reset at
+                                    every strike */
     double glide_pos;            /* the THEREMIN's linear slewer: walks
                                     toward the aim at CONSTANT SPEED (one
                                     EDO step per transitionMs -- same speed
