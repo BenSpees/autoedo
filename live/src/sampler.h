@@ -127,8 +127,16 @@ void ae_sampler_free (AeSampleBank *bank);
 
    Raised from 64 when the horn stabs took the shipped library to 61 dirs:
    three slots of headroom is not headroom, and the failure mode here is
-   silent. The cost is a names table, so there is no reason to sit close. */
-#define AE_SMP_MAX_INSTRUMENTS 128
+   silent. The cost is a names table, so there is no reason to sit close.
+
+   Raised again from 128 when the drum import took it to 138 -- the factory
+   GM kit plus 46 percussion kits, each its own folder. That overran the cap
+   outright, and the truncation is worse than a shortfall: the loop above
+   stops at `max` and only sorts AFTERWARDS, so the instruments that vanish
+   are whatever readdir happened to yield last. Nondeterministic, silent,
+   and different on each machine. 256 is 118 past a library that grew by 47
+   folders in one import. */
+#define AE_SMP_MAX_INSTRUMENTS 256
 int ae_sampler_list (const char *root, char names[][32], int max);
 
 /* The nearest zone by PITCH to `midi`, or -1 for an empty bank. */
