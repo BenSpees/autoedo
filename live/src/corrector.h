@@ -484,6 +484,15 @@ typedef struct
                                holds until the note is over, not until the
                                level pauses on its way down */
     double rel_latch_cents; /* detected_cents when the latch closed */
+    int    rel_note_age;    /* voiced hops since THIS note (or re-pick)
+                               began. The expression-reading release faces
+                               (lift, droop) wait out the centre's own
+                               180 ms settle: early on, "flat of centre"
+                               measures the centre's lag behind the
+                               attack, not a lifted string -- a hard pick
+                               used to latch its own settle and strip the
+                               whole note's vibrato (probe: 50 c of input
+                               vibrato, 0 c out) */
     int    droop_run;       /* consecutive hops whose 75 ms pitch fall
                                reads droop-shaped (slow, flat of centre,
                                level never rising) -- the fourth release
@@ -497,6 +506,9 @@ typedef struct
                                a single tail glitch must not un-freeze a
                                release, so the break waits for the next
                                hop to confirm the note really rose */
+    bool   revote_hop;      /* THIS hop's detected delta is an octave
+                               relabeling, not motion: the slope peak-hold
+                               skips it (strictly one hop) */
     int    revote_hold;     /* samples left in which the OCTAVE RE-VOTE's
                                relabeling must not be read as a note change.
                                The re-vote says "same note, wrong octave
@@ -672,6 +684,14 @@ typedef struct
                                     struck with (like the bank's norm) */
     long long smp_lead_deg;      /* lead sampler: last degree struck/heard */
     bool   smp_lead_deg_valid;
+    int    smp_gap_smps;         /* samples the lead degree has been OFF: a
+                                    SHORT gap then a re-lock on a DIFFERENT
+                                    degree is a picked note the Schmitt slept
+                                    through (trill probe: at >5 notes/s the
+                                    slow env never decays, fast/slow reads
+                                    ~1.0 at every pick, and the old code
+                                    cleared the degree memory during the gap
+                                    -- every trigger path went blind) */
     /* SLIDE: sustained same-direction pitch motion -- a finger travelling
        down (or up) the string. The bend-vs-jump gate reads each degree
        crossing of a slide as a JUMP (the slope is way past 15 c/hop), so a
@@ -713,9 +733,39 @@ typedef struct
     double slide_prejump;        /* detected cents before that hop */
     bool   slide_on;
     bool   slide_was;            /* last hop's slide_on (edge detect) */
+    double ride_gain;            /* how much of the expression ride reaches
+                                    the audible output: 1 on held notes
+                                    (vibrato passes untouched), fading toward
+                                    1-glide_bias while a slide travels in
+                                    glide mode, where the ride re-drew the
+                                    fret stairs the seeker smears */
+    double silence_s;            /* seconds of continuous unvoiced: the
+                                    THEREMIN clock. In glide mode the output
+                                    seeks continuously from note start to a
+                                    CLEAR note end; only real silence resets
+                                    the seeker, a blink or trill damp never
+                                    does */
     int    smp_guard;            /* samples until another lead strike may
                                     fire (de-dupes onset + degree + re-attack
                                     triggers landing on one event) */
+    bool   smp_deg_pend;         /* a DEGREE-path strike arrived while the
+                                    guard was up. Dropping it outright capped
+                                    fast alternation at ~5 notes/s (trill
+                                    probe) -- the second note's strike died
+                                    inside the first's guard. DEFER it
+                                    instead, one event deep... */
+    int    smp_deg_wait;         /* ...for at most this long (samples); a
+                                    deferral that outlives the gesture must
+                                    expire, not fire late */
+    long long smp_strike_deg;    /* lead degree at the LAST strike (any
+                                    path). The old drop doubled as cross-path
+                                    de-dup -- one pick fires the onset strike,
+                                    then its own degree echo 10-40 ms later.
+                                    The deferred strike fires ONLY if the
+                                    degree at fire time still differs from
+                                    this, so a served pick's echo dies and a
+                                    genuinely swallowed note does not */
+    bool   smp_strike_deg_valid;
     int    att_seq_seen;         /* lead sampler's read cursor on att_seq */
     bool   atk_armed;            /* Schmitt: a hit fires once per onset EDGE;
                                     re-arms only when the fast/slow ratio

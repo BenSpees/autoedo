@@ -387,9 +387,11 @@ static void test_synth_harmony (void)
     voices[0].interval = 7; /* P5: A3 in -> ghost at E4, 329.63 Hz */
     ae_corrector_set_harmony (p, true, 0, voices);
     ae_corrector_set_synth (p, AE_HARM_SRC_SYNTH,
-                            ae_synth_patch_find ("sine"), 5.0, 200.0);
+                            ae_synth_patch_find ("sine"), 5.0, 1400.0);
 
-    /* One second of A3, then silence long enough to watch the release. */
+    /* One second of A3, then silence long enough to watch the release.
+       (Release knobs now mean time-to-silence, -60 dB -- 1.4 s here is
+       the same audio the old 200 ms time constant produced.) */
     const int sung = 48000, quiet = 72000, total = sung + quiet;
     float *in = calloc ((size_t) total, sizeof (float));
     float *hl = malloc ((size_t) total * sizeof (float));
@@ -430,7 +432,7 @@ static void test_synth_harmony (void)
            got_rms, want_rms);
 
     /* Release: the pad keeps ringing at its pitch just after the voice
-       stops (200 ms release), and has died out by the end. Equal windows --
+       stops (1.4 s release), and has died out by the end. Equal windows --
        Goertzel power scales with window length. */
     const double p_sung = goertzel (hl + sung - 4800, 4800, 329.63, 48000.0);
     const double p_tail = goertzel (hl + sung + 2400, 4800, 329.63, 48000.0);
@@ -1688,7 +1690,8 @@ static void test_poly_onset_response (void)
         ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
     }
     ae_corrector_set_sample (p, 1.0, 0.9, true);
-    ae_corrector_set_lead_env (p, 5.0, 400.0); /* audible ring for the count */
+    ae_corrector_set_lead_env (p, 5.0, 2800.0); /* audible ring for the
+        count (release knobs now mean time-to-silence, -60 dB) */
 
     /* Chord attacks at `quiet`, decays to ~0.3, is re-plucked at t1. */
     const double notes[3] = { 130.81, 164.81, 196.0 };
@@ -2267,6 +2270,75 @@ static void test_slide_glides_not_staircases (void)
    detected ramp. The gesture here is the SLOW one that trace shows --
    5 semitones in half a second, ~5 c/hop, under the old rate band's
    floor -- so this also proves the travel-based detector opens on it. */
+static void test_fret_slide_smears_with_glide (void)
+{
+    /* A real guitar slide is FRET-STEPPED: the detected pitch itself
+       stairsteps ~100 c per fret. With GLIDE high (transition 440) the
+       portamento follower must smear the rungs into continuous motion,
+       not reproduce them (field trace: green treads under the orange
+       steps at glide 440). */
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 10.0);
+    ae_corrector_set_transition_ms (p, 440.0);
+
+    const int hold1 = 48000;
+    const int stepn = 7200;  /* 150 ms per fret */
+    const int slurn = 1200;  /* 25 ms slur between frets */
+    const int nfret = 8, hold2 = 48000;
+    const int total = hold1 + nfret * stepn + hold2;
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        double c;
+        if (i < hold1) c = 0.0;
+        else
+        {
+            const int k = (i - hold1) / stepn;
+            const int r = (i - hold1) % stepn;
+            if (k >= nfret) c = 100.0 * nfret;
+            else c = 100.0 * k
+                   + (r < slurn ? 100.0 * (double) r / slurn : 100.0);
+        }
+        ph += 2.0 * M_PI * 220.0 * pow (2.0, c / 1200.0) / 48000.0;
+        in[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+    }
+
+    /* Sample the audible pitch every 512; the biggest single-block move
+       in the slide interior is the staircase riser detector. */
+    double prev_out = 0.0, max_step = 0.0, first_out = 0.0, last_out = 0.0;
+    bool   prev_ok = false, have_first = false;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        if (off < hold1 + 12000 || off > hold1 + nfret * stepn - 1024)
+        { prev_ok = false; continue; }
+        const float det = ae_corrector_detected_hz (p);
+        if (det <= 0.0f) { prev_ok = false; continue; }
+        const double out_c = 1200.0 * log2 ((double) det / 220.0)
+                           + 100.0 * p->shift_semitones;
+        if (prev_ok && fabs (out_c - prev_out) > max_step)
+            max_step = fabs (out_c - prev_out);
+        if (! have_first) { first_out = out_c; have_first = true; }
+        last_out = out_c;
+        prev_out = out_c;
+        prev_ok  = true;
+    }
+    /* the input rungs arrive as ~100 c bursts; a smeared output never
+       moves more than ~a third of a fret in one 10.7 ms block */
+    CHECK (max_step <= 35.0,
+           "fret slide with glide: rungs are smeared, no riser past 35 c "
+           "per block (worst %.1f c)", max_step);
+    CHECK (have_first && last_out - first_out >= 400.0,
+           "fret slide with glide: the output actually travelled "
+           "(%.1f c across the interior)", have_first ? last_out - first_out : 0.0);
+    ae_corrector_free (p);
+    free (p); free (in);
+}
+
 static void test_slide_portamento_follows_finger (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -2326,7 +2398,12 @@ static void test_slide_portamento_follows_finger (void)
     CHECK (max_step <= 35.0,
            "portamento: the output follows the finger, no riser past 35 c "
            "per block (worst %.1f c)", max_step);
-    CHECK (have_first && first_out - last_out >= 180.0,
+    /* THEREMIN contract: in glide mode the output SEEKS the finger at
+       the glide rate rather than tracking it tightly, so the interior
+       travel is the seeker's lagged share of the input's ~360 c, not
+       all of it. The bar is anti-freeze, not tightness: a release-
+       frozen output measures ~0 here. */
+    CHECK (have_first && first_out - last_out >= 100.0,
            "portamento: the output actually travelled with the slide "
            "(%.1f c across the interior)", have_first ? first_out - last_out : 0.0);
     ae_corrector_free (p);
@@ -5328,7 +5405,7 @@ static void test_sample_ring (void)
         voices[0].interval = 7;
         ae_corrector_set_harmony (p, true, 0, voices);
         ae_corrector_set_sample (p, 1.0, 0.8, ring != 0);
-        ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 200.0);
+        ae_corrector_set_synth (p, AE_HARM_SRC_SAMPLE, 0, 5.0, 1400.0);
 
         /* Two notes, each a clear onset, the second far enough after the
            first that it registers as an edge rather than as decay. */
@@ -5683,9 +5760,11 @@ static void test_sample_release (void)
         free (pcm);
     }
 
-    /* 1. Release-ceiling slot lifetime: superseded under a 200 ms
-       ceiling, the old slot must survive past 1.6 s (freed at -80 dB =
-       9.2 time constants) -- the old -60 dB threshold freed it by 1.4 s. */
+    /* 1. Release-ceiling slot lifetime: the release knob means TIME TO
+       SILENCE (-60 dB at the knob; treated as a time constant, a 1.6 s
+       release rang for ~11 s -- the field complaint). Under a 200 ms
+       ceiling a superseded slot is still decaying at +0.15 s (~-45 dB)
+       and freed (-80 dB, 4/3 of the knob) well before +0.6 s. */
     {
         AeCorrector *p = calloc (1, sizeof (AeCorrector));
         ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
@@ -5711,8 +5790,8 @@ static void test_sample_release (void)
             buf[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
         }
         int live_16 = 0, live_22 = 0;
-        const int c16 = t1 + (int) (1.6 * 48000.0) / 512 * 512;
-        const int c22 = t1 + (int) (2.2 * 48000.0) / 512 * 512;
+        const int c16 = t1 + (int) (0.15 * 48000.0) / 512 * 512;
+        const int c22 = t1 + (int) (0.60 * 48000.0) / 512 * 512;
         for (int off = 0; off < total; off += 512)
         {
             ae_corrector_process (p, buf + off, NULL, NULL, 512);
@@ -5726,12 +5805,12 @@ static void test_sample_release (void)
             }
         }
         CHECK (live_16 >= 2,
-               "release ceiling: the superseded slot decays to -80 dB "
-               "before it is freed (%d live at +1.6 s; -60 dB freed it "
-               "by 1.4 s)", live_16);
+               "release ceiling: the superseded slot is still decaying "
+               "at +0.15 s under a 200 ms release-to-silence (%d live)",
+               live_16);
         CHECK (live_22 <= live_16 - 1,
                "release ceiling: ...and it IS freed once finished "
-               "(%d live at +2.2 s)", live_22);
+               "(%d live at +0.6 s)", live_22);
         ae_corrector_free (p); free (p); free (buf);
     }
 
@@ -5962,6 +6041,7 @@ int main (void)
     test_sample_bend_follow();
     test_slide_glides_not_staircases();
     test_slide_portamento_follows_finger();
+    test_fret_slide_smears_with_glide();
     test_release_freeze_holds_live_shifter();
     test_tail_droop_is_not_a_slide();
     test_octave_revote_does_not_restrike();

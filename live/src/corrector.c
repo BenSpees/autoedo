@@ -38,6 +38,17 @@ static double glide_bias (const AeCorrector *p)
     return dclamp ((p->transition_ms - 60.0) / 240.0, 0.0, 1.0);
 }
 
+/* One-pole RELEASE coefficient from a release-time knob. The knob means
+   what every sampler's release means -- the time until the tail is GONE
+   (~-60 dB) -- not the one-pole's time constant. Treated as tau, a
+   1.6 s release rang for ~11 s (field: "takes way longer than that to
+   fully fade out"): a one-pole only reaches -60 dB after ln(1000) ~
+   6.91 time constants. */
+static inline double release_coeff (double ms, double fs)
+{
+    return 1.0 - exp (-6.9078 / (ms * 0.001 * fs));
+}
+
 /* JI landmark set (cents re root), mirroring the UI's JI lane. */
 static const struct { int a, b; } k_ji[] = {
     {1,1},{9,8},{7,6},{6,5},{5,4},{4,3},{11,8},{3,2},{8,5},{5,3},{7,4},{9,5},{15,8}
@@ -737,6 +748,8 @@ void ae_corrector_reset (AeCorrector *p)
 
     p->voiced         = false;
     p->primed         = false;
+    p->silence_s      = 999.0; /* born into clear silence */
+    p->ride_gain      = 1.0;
     p->out_cents      = 0.0;
     p->centre_cents   = 0.0;
     p->expr_cents     = 0.0;
@@ -751,6 +764,10 @@ void ae_corrector_reset (AeCorrector *p)
     p->att_hold_j      = 0;
     p->smp_guard          = 0;
     p->smp_lead_deg_valid = false;
+    p->smp_gap_smps       = 0;
+    p->smp_deg_pend       = false;
+    p->smp_deg_wait       = 0;
+    p->smp_strike_deg_valid = false;
     p->att_seq_seen       = p->att_seq;
     p->prev_pair_valid = false;
     p->prev_det_cents = p->prev_tgt_cents = 0.0;
@@ -840,6 +857,7 @@ void ae_corrector_reset (AeCorrector *p)
     p->rel_rise_pend   = false;
     p->rel_latch_droop = false;
     p->droop_run       = 0;
+    p->rel_note_age    = 0;
     p->slide_dir       = 0.0;
     p->slide_ref       = 0.0;
     p->slide_ext       = 0.0;
@@ -853,6 +871,7 @@ void ae_corrector_reset (AeCorrector *p)
     p->slide_on        = false;
     p->slide_was       = false;
     p->revote_hold     = 0;
+    p->revote_hop      = false;
     p->steel_att       = 0;
     p->atk_armed = true;
     p->hold_latched    = false;
@@ -1966,6 +1985,8 @@ static void detect_onset (AeCorrector *p, int num_samples)
         p->atk_armed   = false;
         p->atk_refract = (int) (0.060 * p->fs);
         p->vel_win     = (int) (AE_VEL_BODY_S * p->fs);
+        p->rel_note_age = 0; /* a re-pick restarts the centre-settle clock
+                                for the expression-reading release faces */
         p->vel_peak    = 0.0;
         p->vel_sq      = 0.0;
         p->vel_n       = 0;
@@ -2213,15 +2234,47 @@ static void run_detection (AeCorrector *p)
            is not. A fresh note starts its centre where it was struck
            rather than sliding in from the last one. */
         if (! p->voiced || ! p->primed)
+        {
             p->centre_cents = detected_cents;
+            /* A NEW NOTE gets fresh release evidence. The ring held the
+               PREVIOUS note's body, and the verdict below compared the
+               new note against it: any note ~4 dB softer than its
+               predecessor was latched as "releasing" on its first hop
+               and pitch-pulled toward the old note's frozen aim (probe:
+               a -12 dB follow-up played 300 c flat, a full minor third).
+               Zeroed, the faces stay silent until the ring refills with
+               THIS note -- their own > 0 guards are the warmup. */
+            memset (p->rel_det, 0, sizeof (p->rel_det));
+            memset (p->rel_rms, 0, sizeof (p->rel_rms));
+            p->rel_pos        = 0;
+            p->droop_run      = 0;
+            p->det_slope_hold = 0.0;
+            p->rel_note_age   = 0;
+        }
         else
+        {
             /* Inside the attack window the motion IS the transient
                settling (vibrato has not started yet): follow at ~40 ms
                so a sharp attack's centre reaches the true note in a few
-               hops instead of pinning a wrong degree for ~150 ms. */
+               hops instead of pinning a wrong degree for ~150 ms.
+               But the ARMING alone is not evidence -- deep vibrato
+               (>=~35 c) trips the pitch-jump re-arm every cycle, and the
+               40 ms centre then TRACKS the vibrato, collapsing the very
+               note/expression split it feeds (the correction audibly
+               fought wide vibrato). The fast chase now also wants either
+               a real energy edge or a centre genuinely lagging a note-
+               sized move -- an energy-less legato step still gets its
+               fast chase through the distance test, and a vibrato wobble
+               (which never strays a note's worth from centre) does not. */
+            const double step_c0 = ae_edo_step_cents_ex (p->edo, period);
+            const double far_c   = 0.6 * step_c0 > 25.0 ? 0.6 * step_c0 : 25.0;
+            const bool fast_chase = p->attack_hold > 0
+                && (p->atk_fast > 1.2 * p->atk_slow
+                    || fabs (detected_cents - p->centre_cents) > far_c);
             p->centre_cents += (detected_cents - p->centre_cents)
                              * (1.0 - exp (-elapsed /
-                                    (p->attack_hold > 0 ? 0.040 : 0.180)));
+                                    (fast_chase ? 0.040 : 0.180)));
+        }
         /* Octave re-vote. A guitar with a dominant second harmonic makes
            YIN vote octave-high at the pluck and re-vote the true octave
            mid-note as the uppers decay -- a near-equave step in ONE 5 ms
@@ -2255,14 +2308,25 @@ static void run_detection (AeCorrector *p)
                 p->slide_ref      += dd;
                 p->slide_ext      += dd;
                 p->slide_det0     += dd;
+                p->slide_out0     += dd; /* the portamento follower's aim
+                                            moves with the relabeling too,
+                                            or a mid-slide re-vote swoops
+                                            the output toward a stale one */
                 p->slide_prejump  += dd;
                 /* ...and for 30 ms the degree change it just caused is
                    NOT a new note: the sample lead must not strike on it
                    (see the strike gate). */
                 p->revote_hold = (int) (0.030 * p->fs);
+                p->revote_hop  = true; /* this hop's delta is a relabeling,
+                                          not motion: the slope peak-hold
+                                          must not spend ~95 ms above the
+                                          strike bar on it while the strike
+                                          suppression lasts only 30 */
             }
         }
         p->expr_cents = detected_cents - p->centre_cents;
+        if (p->rel_note_age < 1 << 20)
+            ++p->rel_note_age;
 
         /* The release slope-freeze verdict, decided BEFORE the QUANTIZER
            runs: a latched release used to freeze only the audible shift
@@ -2293,9 +2357,18 @@ static void run_detection (AeCorrector *p)
                before believing the lift, and those 12 cents were audible
                on every single note end. 6 is under the JND for a decaying
                guitar note and still twice a vibrato hop's typical read. */
+            /* The EXPRESSION-reading faces discount the centre's own
+               settle. A pick starts sharp and the centre sheds that
+               offset on its 180 ms clock, so early in a note "flat of
+               centre" mostly measures the centre's remaining lag -- a
+               hard pick used to latch its own settle and strip the
+               note's vibrato. The bar starts at ~36 c and decays to the
+               true 6 c floor on the same clock the residual does. */
+            const double settle_c =
+                6.0 + 30.0 * exp (-(double) p->rel_note_age / 36.0);
             const bool lift_c = p->rel_rms[rbl] > 0.0f
                              && rms < 0.85 * (double) p->rel_rms[rbl]
-                             && p->expr_cents < -6.0;
+                             && p->expr_cents < -settle_c;
             /* The fourth face, the one no rate-of-fall window can see: a
                DROOP. The pitch keeps easing flat -- read over the release
                ring's own 75 ms horizon, because per-hop deltas on a
@@ -2325,7 +2398,7 @@ static void run_detection (AeCorrector *p)
                 else
                     p->droop_run = 0;
             }
-            const bool droop_c = p->droop_run >= 28;
+            const bool droop_c = p->rel_note_age >= 36 && p->droop_run >= 28;
             const bool inst = fast_c || slow_c || lift_c || droop_c;
             /* LATCHED until the note actually ends. The windows above are
                verdicts about the level's RATE of fall, and a lifted string
@@ -2595,7 +2668,17 @@ static void run_detection (AeCorrector *p)
            from a stale value. */
         if (! p->voiced || ! p->primed)
         {
-            p->out_cents     = detected_cents;
+            /* THEREMIN (glide mode): once a note has started, the
+               output is a continuous seeker -- it never teleports while
+               the playing is connected. Only a CLEAR note end (real
+               silence) hands the next note a fresh start; a detector
+               blink, a pick's damp, or a trill gap keeps the output
+               where it stood, seeking the new pitch at the glide rate
+               (the tau floor below). With glide off this is the old
+               snap, unchanged. */
+            if (! p->primed || glide_bias (p) <= 0.0
+                || p->silence_s >= 0.15)
+                p->out_cents = detected_cents;
             p->target_valid  = false;
             p->in_transition = false;
             p->sustain_s     = 0.0;
@@ -2725,7 +2808,13 @@ static void run_detection (AeCorrector *p)
             const double step_c = ae_edo_step_cents_ex (p->edo, period);
             const double open_c = dclamp (1.1 * step_c, 60.0, 90.0);
             const double travel = (p->slide_ext - p->slide_ref) * p->slide_dir;
-            if (p->slide_dir != 0.0 && moving && ! p->rel_collapse && ! dying
+            /* A DYING string crawls; a sliding finger MOVES. The veto
+               stands only under gesture rate (~4 c/hop average), so the
+               descending slide on a naturally decaying string -- the one
+               quadrant the veto used to eat -- gets its portamento while
+               the true tail droop (a crawl) stays refused. */
+            if (p->slide_dir != 0.0 && moving && ! p->rel_collapse
+                && (! dying || travel >= 4.0 * p->slide_age)
                 && travel >= open_c
                 && (travel >= 110.0 - 15.0 * glide_bias (p)
                     || p->slide_age >= 28 - (int) (6.0 * glide_bias (p) + 0.5)))
@@ -2752,14 +2841,27 @@ static void run_detection (AeCorrector *p)
            degrees passing by -- but the audible centre tracks the finger.
            When the slide closes, the landing glides onto the grid at the
            GLIDE (transitionMs) speed. */
+        /* THEREMIN: while the finger is TRAVELLING in glide mode, the
+           expression ride folds into the seeker instead of riding raw on
+           top. The ride is detected minus the (chasing) centre, so every
+           fret jump lives in it for the centre's chase time -- added
+           back verbatim it re-drew the very stairs the seeker had just
+           smeared (probe: ~40 c sawteeth on a smooth ramp). On held
+           notes the ride returns in full and vibrato passes untouched.
+           Smoothed ~40 ms so the handoff never clicks. */
+        {
+            const double ride_t = p->slide_on ? 1.0 - glide_bias (p) : 1.0;
+            p->ride_gain += (ride_t - p->ride_gain)
+                          * (1.0 - exp (-elapsed / 0.040));
+        }
+        const double ride = p->expr_cents * p->expression * p->ride_gain;
         if (p->slide_on && ! p->slide_was)
         {
-            p->slide_off  = p->out_cents + p->expr_cents * p->expression
-                          - detected_cents;
+            p->slide_off  = p->out_cents + ride - detected_cents;
             /* The finger's zero and the aim it started from, so EXPRESSION
                can scale how much of the travel reaches the output. */
             p->slide_det0 = detected_cents;
-            p->slide_out0 = p->out_cents + p->expr_cents * p->expression;
+            p->slide_out0 = p->out_cents + ride;
         }
         if (! p->slide_on && p->slide_was)
             p->in_transition = true; /* land on the grid at the glide speed */
@@ -2779,21 +2881,44 @@ static void run_detection (AeCorrector *p)
                twice was the kink at the boundary. */
             eff_cents = p->slide_out0
                       + p->expression * (detected_cents - p->slide_det0)
-                      - p->expr_cents * p->expression;
-            tau_ms = 15.0; /* track the finger, not the grid */
+                      - ride;
+            tau_ms = 15.0; /* track the finger, not the grid (the glide
+                              floor below still applies in glide mode) */
             p->in_transition = false; /* re-armed when the slide closes */
         }
         else if (p->in_transition)
         {
             tau_ms = p->transition_ms;
             const double step_c = ae_edo_step_cents_ex (p->edo, period);
-            if (fabs (p->out_cents - target_cents) < dclamp (0.1 * step_c, 1.0, 5.0))
+            /* Arrival is measured against EFF -- the aim out_cents
+               actually chases. Against the raw target, a player fretting
+               a few cents off inside the tolerance dead zone could never
+               'arrive': the transition tau latched for the rest of the
+               note and humanize never engaged. */
+            if (fabs (p->out_cents - eff_cents) < dclamp (0.1 * step_c, 1.0, 5.0))
                 p->in_transition = false; /* arrived */
         }
         else if (p->humanize > 0.0)
         {
             const double sustain = p->sustain_s < 1.0 ? p->sustain_s : 1.0;
             tau_ms *= 1.0 + 3.0 * p->humanize * sustain;
+        }
+
+        /* GLIDE mode is a THEREMIN: from note start to a clear note
+           end, the output is one continuous seeker of its aim at the
+           GLIDE RATE -- whatever segment logic chose above (finger
+           follow, degree transition, retune hold), the seek time is
+           floored at the glide time. A real guitar slide is FRET-
+           STEPPED (the detected pitch itself stairsteps ~100 c per
+           fret dwell), and a fast follower faithfully reproduces the
+           stairs (field trace, glide 440: green treads under the
+           orange steps); the floor smears the rungs into the
+           continuous sweep the knob is asking for. Glide off: bias 0,
+           nothing changes. */
+        {
+            const double gfloor = glide_bias (p) * p->transition_ms;
+            if (tau_ms < gfloor)
+                tau_ms = gfloor;
         }
 
         const double tau_sec = tau_ms / 1000.0;
@@ -2812,14 +2937,12 @@ static void run_detection (AeCorrector *p)
            term below moves, so the played note keeps its pitch as the
            string dies. */
         {
-            const double out_expr_live =
-                p->out_cents + p->expr_cents * p->expression;
+            const double out_expr_live = p->out_cents + ride;
             if (! p->rel_collapse)
                 p->rel_out_expr = out_expr_live;
         }
         const double out_expr = p->rel_collapse ? p->rel_out_expr
-                                                : p->out_cents
-                                                  + p->expr_cents * p->expression;
+                                                : p->out_cents + ride;
         p->shift_semitones = dclamp ((out_expr + lead_shift_c - detected_cents) / 100.0,
                                      -36.0, 36.0);
         /* The corrected pitch WITH the playing on top -- what the shifter
@@ -2838,13 +2961,16 @@ static void run_detection (AeCorrector *p)
            creeps. Peak-hold (~25 ms at the 5 ms hop) so the block-rate
            reader downstream still sees the jump hop. */
         {
-            const double dsl = p->prev_pair_valid
+            const double dsl = p->prev_pair_valid && ! p->revote_hop
                 ? fabs (detected_cents - p->prev_det_cents) : 0.0;
-            p->det_slope_hold *= 0.8;
+            p->det_slope_hold *= 0.8; /* the decay always runs -- only the
+                                         re-vote hop's PEAK is skipped */
             if (dsl > p->det_slope_hold)
                 p->det_slope_hold = dsl;
+            p->revote_hop = false; /* strictly per-hop */
         }
         p->primed = true;
+        p->silence_s = 0.0;
         atomic_store_explicit (&p->shift_st_out, (float) p->shift_semitones,
                                memory_order_relaxed);
         {
@@ -3123,6 +3249,8 @@ harmony_done: ;
         p->rel_latch = false;
         p->rel_collapse = false;
         p->droop_run = 0;
+        p->silence_s += elapsed; /* the THEREMIN clock: how clear is this
+                                    note end? (see the out_cents snap) */
         /* The slide ended with the note; motion across the silence is a
            new gesture, never this one's momentum. */
         p->slide_dir  = 0.0;
@@ -3367,7 +3495,7 @@ static void harm_env_coeffs (const AeCorrector *p, double *atk, double *rel)
     const double atk_ms = p->synth_attack_ms  > 5.0 ? p->synth_attack_ms  : 5.0;
     const double rel_ms = p->synth_release_ms > 5.0 ? p->synth_release_ms : 5.0;
     *atk = 1.0 - exp (-1.0 / (atk_ms * 0.001 * p->fs));
-    *rel = 1.0 - exp (-1.0 / (rel_ms * 0.001 * p->fs));
+    *rel = release_coeff (rel_ms, p->fs);
 }
 
 static double sample_tone_tick (AeCorrector *p, int s, double x);
@@ -3742,7 +3870,7 @@ static void steel_process (AeCorrector *p, bool voiced, long lead_deg,
     const double la  = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
     const double lr  = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
     const double atk = 1.0 - exp (-1.0 / (la * 0.001 * p->fs));
-    const double rel = 1.0 - exp (-1.0 / (lr * 0.001 * p->fs));
+    const double rel = release_coeff (lr, p->fs);
     const double tgt = deg != AE_HARM_DEG_OFF ? 1.0 : 0.0;
     double g_dry_u, g_smp;
     sample_layer_gains (p->smp_mix, &g_dry_u, &g_smp);
@@ -4246,7 +4374,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     if (chord_sampler)
     {
         const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
-        const double l_rel_a = 1.0 - exp (-1.0 / (lr * 0.001 * p->fs));
+        const double l_rel_a = release_coeff (lr, p->fs);
         const double fade_step = 1.0 / (0.006 * p->fs);
         for (int i = 0; i < num_samples; ++i)
         {
@@ -4262,7 +4390,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
     const double la_ms = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
     const double lr_ms = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
     const double l_atk = 1.0 - exp (-1.0 / (la_ms * 0.001 * p->fs));
-    const double l_rel = 1.0 - exp (-1.0 / (lr_ms * 0.001 * p->fs));
+    const double l_rel = release_coeff (lr_ms, p->fs);
     const double f_lvl = (double) atomic_load_explicit (
         &p->follow_level_in, memory_order_relaxed);
     const double f_tgt = (1.0 - p->follow_amt) + p->follow_amt * f_lvl;
@@ -4273,8 +4401,8 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
        lead's. Gated on energy alone -- no decisions. */
     const double m_atk = 1.0 - exp (-1.0 /
         ((p->mel_atk_ms > 5.0 ? p->mel_atk_ms : 5.0) * 0.001 * p->fs));
-    const double m_rel = 1.0 - exp (-1.0 /
-        ((p->mel_rel_ms > 5.0 ? p->mel_rel_ms : 5.0) * 0.001 * p->fs));
+    const double m_rel =
+        release_coeff (p->mel_rel_ms > 5.0 ? p->mel_rel_ms : 5.0, p->fs);
     double m_env = p->mel_env;
     double v_gain = p->v_gain, l_env = p->lead_env, f_g = p->follow_gain_cur;
     const long long block_start = p->in_write - num_samples;
@@ -4469,6 +4597,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const double vel = strike_gain (p, body_level_now (p),
                                         (double) ae_corrector_detected_hz (p));
         const int L = AE_HARM_VOICES;
+        const int ldeg = atomic_load_explicit (&p->lead_deg_out,
+                                               memory_order_relaxed);
         if (p->smp_guard > 0)
             p->smp_guard -= num_samples;
         if (p->revote_hold > 0)
@@ -4499,6 +4629,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false;
                 p->smp_guard = (int) (0.040 * p->fs);
+                p->smp_strike_deg       = (long long) ldeg;
+                p->smp_strike_deg_valid = ldeg != AE_HARM_DEG_OFF;
             }
         }
 
@@ -4516,11 +4648,59 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
              envelope condition keeps deep vibrato -- which can arm the
              hold -- from machine-gunning the sample. */
         {
-            const int ldeg = atomic_load_explicit (&p->lead_deg_out,
-                                                   memory_order_relaxed);
-            bool want = false;
+            bool want     = false;
+            bool want_deg = false;
             if (hz > 0.0 && ldeg != AE_HARM_DEG_OFF)
             {
+                /* GAP-EDGE: a short unvoiced gap, then a re-lock on a
+                   DIFFERENT degree, is a picked note none of the other
+                   paths can see (trill probe, alternating picks): the
+                   Schmitt reads fast/slow ~1.0 because the slow env
+                   never decays between fast picks, the re-lock's slope
+                   is ~0 so the jump gate stays shut, and the att_seq
+                   re-voice bump fails its envelope condition. The gap
+                   itself is the note edge -- the finger damped the
+                   string and a NEW degree emerged. Two floors keep it
+                   honest: the gap must be at least a full dropped hop
+                   (4 ms -- a hammer-on blinks the detector for ~5 ms,
+                   the measured trill damp is ~15 ms; the floor LEANS
+                   longer with GLIDE, where the player has asked for
+                   midpoint cases to connect), and the degree must
+                   differ from the LAST STRIKE's degree, so a re-lock
+                   that merely re-finds the note already sounding
+                   restrikes nothing. */
+                /* A degree change that arrived ACROSS A BLINK at an
+                   equave distance (1200/1902/2400 c -- the octave
+                   re-vote's own windows) with no attack energy behind
+                   it is a HARMONIC RE-LOCK of the note still ringing
+                   -- the register flip the re-vote exists to relabel,
+                   not a pick. It must strike nothing, on either path
+                   below. A genuinely picked octave carries its pick
+                   (atk_fast rises) and strikes through the energy
+                   paths. */
+                const int  gap_smps = p->smp_gap_smps;
+                bool harmonic_relock = false;
+                if (gap_smps > 0 && p->smp_lead_deg_valid
+                    && p->atk_fast <= 1.3 * p->atk_slow)
+                {
+                    const double dc =
+                        fabs ((double) ((long long) ldeg - p->smp_lead_deg))
+                        * ae_edo_step_cents_ex (p->edo, p->period_cents);
+                    harmonic_relock = fabs (dc - 1200.0) < 60.0
+                                   || fabs (dc - 1902.0) < 60.0
+                                   || fabs (dc - 2400.0) < 60.0;
+                }
+                if (p->smp_lead_deg_valid
+                    && gap_smps
+                           >= (int) ((0.004 + 0.012 * glide_bias (p)) * p->fs)
+                    && (long long) ldeg != p->smp_lead_deg
+                    && ! harmonic_relock
+                    && ! p->rel_collapse && ! p->slide_on
+                    && p->revote_hold <= 0
+                    && (! p->smp_strike_deg_valid
+                        || (long long) ldeg != p->smp_strike_deg))
+                    want_deg = true;
+                p->smp_gap_smps = 0;
                 /* Bend-vs-jump (research batch): a degree change reached by
                    a JUMP is a new note and strikes; one reached by a CREEP
                    is the player bending, and the ringing sample follows it
@@ -4565,12 +4745,13 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                         && ! p->rel_collapse
                         && ! p->slide_on
                         && p->revote_hold <= 0
+                        && ! harmonic_relock
                         /* the slope bar LEANS with GLIDE: mid-rate motion
                            that would re-attack at glide-off connects
                            instead when the player has asked for glides */
                         && (p->det_slope_hold > 15.0 + 25.0 * glide_bias (p)
                             || llabs (dstep) >= half_oct))
-                        want = true;
+                        want_deg = true;
                 }
                 if (p->att_seq != p->att_seq_seen
                     && p->atk_fast > 1.3 * p->atk_slow)
@@ -4579,13 +4760,67 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->smp_lead_deg_valid = true;
             }
             else
-                p->smp_lead_deg_valid = false;
+            {
+                /* Degree memory SURVIVES the gap (the gap-edge trigger
+                   above needs the pre-gap degree to compare against);
+                   it only goes stale after a real silence, where the
+                   onset path owns the next note anyway. */
+                p->smp_gap_smps += num_samples;
+                if (p->smp_gap_smps > (int) (0.25 * p->fs))
+                    p->smp_lead_deg_valid = false;
+            }
             p->att_seq_seen = p->att_seq;
-            if (want && p->smp_guard <= 0 && hz > 0.0)
+            if ((want || want_deg) && p->smp_guard <= 0 && hz > 0.0)
             {
                 sample_strike (p, L, hz, vel, 1.0);
                 p->smp_pending[L] = false; /* this event is served */
                 p->smp_guard = (int) (0.040 * p->fs);
+                p->smp_strike_deg       = (long long) ldeg;
+                p->smp_strike_deg_valid = true;
+                p->smp_deg_pend         = false; /* nothing owed */
+            }
+            else if (want_deg && p->smp_guard > 0)
+            {
+                /* A guard-blocked DEGREE strike DEFERS instead of
+                   dropping (trill probe: the drop capped alternation at
+                   ~5 notes/s -- each new note's strike died inside the
+                   previous strike's 40 ms guard). The att_seq path still
+                   drops: a same-note re-pluck inside the guard IS the
+                   pick that raised the guard. */
+                p->smp_deg_pend = true;
+                p->smp_deg_wait = (int) (0.080 * p->fs);
+            }
+        }
+        if (p->smp_deg_pend)
+        {
+            p->smp_deg_wait -= num_samples;
+            if (p->smp_deg_wait <= 0 || ! p->voiced)
+                p->smp_deg_pend = false;
+            else if (p->smp_guard <= 0)
+            {
+                /* Guard expired: decide ONCE, either way. Fire only if
+                   the degree NOW still differs from the degree at the
+                   last strike -- the old drop doubled as cross-path
+                   de-dup (one pick fires the onset strike, then its own
+                   degree echo 10-40 ms later), and this test keeps that:
+                   a served pick's echo lands on the degree the onset
+                   strike just recorded and dies here. No re-decide on
+                   later hops -- the jump gates were checked at DEFER
+                   time, and a bend crossing a degree line 60 ms later
+                   must not inherit this strike. */
+                if (hz > 0.0 && ldeg != AE_HARM_DEG_OFF
+                    && ! p->rel_collapse && ! p->slide_on
+                    && p->revote_hold <= 0
+                    && (! p->smp_strike_deg_valid
+                        || (long long) ldeg != p->smp_strike_deg))
+                {
+                    sample_strike (p, L, hz, vel, 1.0);
+                    p->smp_pending[L] = false;
+                    p->smp_guard = (int) (0.040 * p->fs);
+                    p->smp_strike_deg       = (long long) ldeg;
+                    p->smp_strike_deg_valid = true;
+                }
+                p->smp_deg_pend = false;
             }
         }
         /* Continuous repitch: the corrected pitch WITH the playing's own
@@ -4600,7 +4835,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         const double fade_step = 1.0 / (0.006 * p->fs);
         /* The LEAD's ceiling is its own release, not the harmony's. */
         const double lr = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
-        const double l_rel = 1.0 - exp (-1.0 / (lr * 0.001 * p->fs));
+        const double l_rel = release_coeff (lr, p->fs);
         /* The consolidated sample section: the mix's sample side and the
            engine-wide sample level, applied at render so a fader move
            reaches notes already ringing; tone on the summed row. The dry
@@ -4690,7 +4925,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     const double la_ms = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
     const double lr_ms = p->lead_release_ms > 5.0 ? p->lead_release_ms : 5.0;
     const double l_atk = 1.0 - exp (-1.0 / (la_ms * 0.001 * p->fs));
-    const double l_rel = 1.0 - exp (-1.0 / (lr_ms * 0.001 * p->fs));
+    const double l_rel = release_coeff (lr_ms, p->fs);
     const bool   no_dry = lead_synth || lead_sample;
     double l_env = p->lead_env;
 
