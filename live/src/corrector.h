@@ -443,6 +443,11 @@ typedef struct
        state below, so the chart's droneOn rank stays independent). */
     bool   steel_on;
     int    steel_root;      /* root degree CLASS, 0..edo-1 (engine map) */
+    int    steel_att;       /* att_seq when the drone last (re)registered:
+                               under GLIDE the register HOLDS through
+                               connected gestures -- a lead gliding across
+                               the root class must not bump the drone --
+                               and follows again at the next real attack */
     double steel_level;     /* steelLevelDb as linear */
     long   steel_deg;       /* the drone's current absolute degree, or
                                AE_HARM_DEG_OFF while nothing sounds */

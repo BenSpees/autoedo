@@ -24,6 +24,20 @@ static double dclamp (double v, double lo, double hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/* GLIDE as a CONNECTEDNESS PRIOR (field: "when Glide is on, it would make
+   sense to bias more towards notes being connected than being
+   disconnected"). Zero at the 50 ms default -- a rig that never raised
+   the knob changes nothing -- ramping to one at 300 ms and above. The
+   BORDERLINE gates lean by this amount: the strike slope bar, the
+   pitch-jump re-arm, the slide detector's open and kill thresholds, and
+   the drone's re-register. Unambiguous events -- a real pick's energy
+   edge, a genuine jump that holds its landing -- are not borderline and
+   do not move. */
+static double glide_bias (const AeCorrector *p)
+{
+    return dclamp ((p->transition_ms - 60.0) / 240.0, 0.0, 1.0);
+}
+
 /* JI landmark set (cents re root), mirroring the UI's JI lane. */
 static const struct { int a, b; } k_ji[] = {
     {1,1},{9,8},{7,6},{6,5},{5,4},{4,3},{11,8},{3,2},{8,5},{5,3},{7,4},{9,5},{15,8}
@@ -839,6 +853,7 @@ void ae_corrector_reset (AeCorrector *p)
     p->slide_on        = false;
     p->slide_was       = false;
     p->revote_hold     = 0;
+    p->steel_att       = 0;
     p->atk_armed = true;
     p->hold_latched    = false;
     p->hold_level      = 0.0;
@@ -2399,8 +2414,12 @@ static void run_detection (AeCorrector *p)
            the threshold too, and arming on it is harmless: the hold only
            refuses ADJACENT-degree moves while still within 3/4 step of
            the current target -- exactly the wobble that should hold. */
+        /* ...and the re-arm bar LEANS with GLIDE: at high glide a
+           moving pitch is presumed CONNECTED, so it takes a genuinely
+           faster jump to call the motion a new attack. */
         if (p->att_prev_valid
-            && fabs (detected_cents - p->att_hist[2]) > 18.0)
+            && fabs (detected_cents - p->att_hist[2])
+                   > 18.0 + 18.0 * glide_bias (p))
         {
             if (p->attack_hold <= 0)
                 ++p->att_seq;
@@ -2614,10 +2633,14 @@ static void run_detection (AeCorrector *p)
             const double dd = p->prev_pair_valid
                 ? detected_cents - p->prev_det_cents : 0.0;
             const double add = fabs (dd);
+            /* the jump-rate bar leans with GLIDE too: motion a strike
+               would claim at glide-off keeps feeding the gesture when
+               the player has asked for connection */
+            const double kill_c = 45.0 + 25.0 * glide_bias (p);
             bool moving = false;
             if (! p->prev_pair_valid)
                 ; /* nothing to read yet */
-            else if (add >= 45.0)
+            else if (add >= kill_c)
             {
                 /* Jump-rate motion is a strike's business -- but ONE hop
                    does not prove it. A single YIN spike mid-gesture used
@@ -2626,7 +2649,7 @@ static void run_detection (AeCorrector *p)
                    A real jump HOLDS its new pitch, so the verdict waits
                    one hop for the confirmation. */
                 if (p->slide_jump_pend
-                    && fabs (detected_cents - p->slide_prejump) >= 45.0)
+                    && fabs (detected_cents - p->slide_prejump) >= kill_c)
                 {
                     p->slide_dir  = 0.0;
                     p->slide_age  = 0;
@@ -2703,7 +2726,9 @@ static void run_detection (AeCorrector *p)
             const double open_c = dclamp (1.1 * step_c, 60.0, 90.0);
             const double travel = (p->slide_ext - p->slide_ref) * p->slide_dir;
             if (p->slide_dir != 0.0 && moving && ! p->rel_collapse && ! dying
-                && travel >= open_c && (travel >= 110.0 || p->slide_age >= 28))
+                && travel >= open_c
+                && (travel >= 110.0 - 15.0 * glide_bias (p)
+                    || p->slide_age >= 28 - (int) (6.0 * glide_bias (p) + 0.5)))
                 p->slide_hold = 24; /* ~120 ms of stall before it closes */
             else if (p->slide_hold > 0)
                 --p->slide_hold;
@@ -3682,6 +3707,18 @@ static void steel_process (AeCorrector *p, bool voiced, long lead_deg,
             for (int sl = 0; sl < AE_SMP_SLOTS; ++sl)
                 if (p->smp[S][sl].rec != NULL)
                     p->smp[S][sl].releasing = true;
+            p->steel_deg = deg;
+        }
+        else if (p->steel_deg != AE_HARM_DEG_OFF
+                 && glide_bias (p) > 0.0
+                 && p->att_seq == p->steel_att)
+        {
+            /* CONNECTED gesture under GLIDE: the lead is travelling
+               across the root class with no new attack, and the classic
+               steel move is the drone HOLDING while the melody moves
+               over it (field: "we want to keep the drone smoothly
+               persisting while we glide the other note around"). Keep
+               the register it has; the next real pick re-registers. */
         }
         else
         {
@@ -3697,8 +3734,9 @@ static void steel_process (AeCorrector *p, bool voiced, long lead_deg,
                                strike_gain (p, body_level_now (p), p->steel_hz)
                                    * p->steel_level,
                                p->steel_level);
+            p->steel_deg = deg;
+            p->steel_att = p->att_seq;
         }
-        p->steel_deg = deg;
     }
 
     const double la  = p->lead_attack_ms  > 5.0 ? p->lead_attack_ms  : 5.0;
@@ -4527,7 +4565,10 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                         && ! p->rel_collapse
                         && ! p->slide_on
                         && p->revote_hold <= 0
-                        && (p->det_slope_hold > 15.0
+                        /* the slope bar LEANS with GLIDE: mid-rate motion
+                           that would re-attack at glide-off connects
+                           instead when the player has asked for glides */
+                        && (p->det_slope_hold > 15.0 + 25.0 * glide_bias (p)
                             || llabs (dstep) >= half_oct))
                         want = true;
                 }

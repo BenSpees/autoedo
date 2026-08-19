@@ -2490,6 +2490,213 @@ static void test_octave_revote_does_not_restrike (void)
     if (system (cmd) != 0) { /* best effort */ }
 }
 
+/* GLIDE as a connectedness prior (field: "when Glide is on ... bias more
+   towards notes being connected than being disconnected"). The MIDPOINT
+   case: a one-semitone move smeared at ~20 c/hop -- past the glide-off
+   strike bar (15), under the glide-on bar (40). Same gesture, two GLIDE
+   settings: at the 50 ms default it re-attacks; at 400 ms it connects. */
+static void test_glide_bias_connects_midpoint (void)
+{
+    const char *root = "/tmp/ae-smp-gbias";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "gbias: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    int strikes[2]; /* [0] GLIDE 50 (off), [1] GLIDE 400 (on) */
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 10.0);
+        ae_corrector_set_transition_ms (p, c == 0 ? 50.0 : 400.0);
+        {
+            int srcs[AE_HARM_VOICES];
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+                srcs[v] = AE_HARM_SRC_DEFAULT;
+            ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        }
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL,
+                                          err, sizeof (err)),
+               "gbias: bank loads (%s)", err);
+
+        /* A3 held, then TWO SEMITONES as an instant hammer-on (constant
+           amplitude, no pick), then held. By the time the degree commits
+           (~28 ms later, the centre's 40 ms chase), the slope peak-hold
+           has decayed into the ambiguous band: past the glide-off strike
+           bar, under the glide-on one. The same gesture, two readings. */
+        const int hold1 = 48000, hold2 = 48000;
+        const int total = hold1 + hold2;
+        float *in = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            const double hz = i < hold1
+                ? 220.0 : 220.0 * pow (2.0, 200.0 / 1200.0);
+            ph += 2.0 * M_PI * hz / 48000.0;
+            in[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+
+        double prev_pos[AE_SMP_SLOTS];
+        for (int k = 0; k < AE_SMP_SLOTS; ++k) prev_pos[k] = -1.0;
+        int count = 0;
+        const int L = AE_HARM_VOICES;
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, NULL, NULL, n);
+            if (off < hold1 - 4800)
+            {
+                for (int k = 0; k < AE_SMP_SLOTS; ++k)
+                    prev_pos[k] = p->smp[L][k].rec ? p->smp[L][k].pos : -1.0;
+                continue;
+            }
+            for (int k = 0; k < AE_SMP_SLOTS; ++k)
+            {
+                const double pos = p->smp[L][k].rec ? p->smp[L][k].pos : -1.0;
+                if (pos >= 0.0 && (prev_pos[k] < 0.0 || pos < prev_pos[k]))
+                    ++count;
+                prev_pos[k] = pos;
+            }
+        }
+        strikes[c] = count;
+        ae_corrector_free (p);
+        free (p); free (in);
+    }
+    CHECK (strikes[0] >= 1,
+           "glide OFF: the midpoint legato step re-attacks (got %d)",
+           strikes[0]);
+    CHECK (strikes[1] == 0,
+           "glide ON: the same step CONNECTS -- no re-attack (got %d)",
+           strikes[1]);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
+/* The DRONE persists through a glide (field: "in the steel guitar case,
+   we want to keep the drone smoothly persisting while we glide the other
+   note around"). The lead glides up across the ROOT CLASS -- exactly
+   where the drone re-registers an equave -- with no new pick. GLIDE off:
+   the register follows (a restrike). GLIDE on: the drone holds until the
+   next real attack. */
+static void test_drone_persists_through_glide (void)
+{
+    const char *root = "/tmp/ae-smp-dhold";
+    char dir[256], pth[512], cmd[512];
+    snprintf (dir, sizeof (dir), "%s/piano", root);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s && mkdir -p %s", root, dir);
+    if (system (cmd) != 0) { CHECK (false, "dhold: cannot stage"); return; }
+    snprintf (pth, sizeof (pth), "%s/C4.wav", dir);
+    {
+        const int n = 4 * 48000;
+        float *pcm = calloc ((size_t) n, sizeof (float));
+        double phr = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            phr += 2.0 * M_PI * 261.6256 / 48000.0;
+            pcm[i] = (float) (0.5 * sin (phr));
+        }
+        write_wav_pcm (pth, pcm, n);
+        free (pcm);
+    }
+
+    int restrikes[2]; /* [0] GLIDE 50, [1] GLIDE 400 */
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_retune_ms (p, 10.0);
+        ae_corrector_set_transition_ms (p, c == 0 ? 50.0 : 400.0);
+        {
+            int srcs[AE_HARM_VOICES];
+            for (int v = 0; v < AE_HARM_VOICES; ++v)
+                srcs[v] = AE_HARM_SRC_DEFAULT;
+            ae_corrector_set_voice_sources (p, srcs, AE_HARM_SRC_SAMPLE);
+        }
+        ae_corrector_set_sample (p, 1.0, 0.9, true);
+        ae_corrector_set_steel (p, true, 9, 0.7); /* root class = A */
+        char err[256] = "";
+        CHECK (ae_corrector_load_samples (p, root, "piano", NULL,
+                                          err, sizeof (err)),
+               "dhold: bank loads (%s)", err);
+
+        /* G#3 held, then a 300 c UP-glide across A (the root class) to
+           B3 over half a second -- no pick anywhere past the birth. */
+        const int hold1 = 48000, gl = 24000, hold2 = 48000;
+        const int total = hold1 + gl + hold2;
+        const double g3s = 207.652; /* G#3 */
+        float *in = calloc ((size_t) total, sizeof (float));
+        double ph = 0.0;
+        for (int i = 0; i < total; ++i)
+        {
+            double hz;
+            if (i < hold1) hz = g3s;
+            else if (i < hold1 + gl)
+            {
+                const double w = (double) (i - hold1) / gl;
+                hz = g3s * pow (2.0, 300.0 * w / 1200.0);
+            }
+            else
+                hz = g3s * pow (2.0, 300.0 / 1200.0);
+            ph += 2.0 * M_PI * hz / 48000.0;
+            in[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+        }
+
+        double prev_pos[AE_SMP_SLOTS];
+        for (int k = 0; k < AE_SMP_SLOTS; ++k) prev_pos[k] = -1.0;
+        int count = 0;
+        const int S = AE_HARM_VOICES + 1; /* the drone row */
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, NULL, NULL, n);
+            if (off < hold1 - 4800)
+            {
+                for (int k = 0; k < AE_SMP_SLOTS; ++k)
+                    prev_pos[k] = p->smp[S][k].rec ? p->smp[S][k].pos : -1.0;
+                continue;
+            }
+            for (int k = 0; k < AE_SMP_SLOTS; ++k)
+            {
+                const double pos = p->smp[S][k].rec ? p->smp[S][k].pos : -1.0;
+                if (pos >= 0.0 && (prev_pos[k] < 0.0 || pos < prev_pos[k]))
+                    ++count;
+                prev_pos[k] = pos;
+            }
+        }
+        restrikes[c] = count;
+        ae_corrector_free (p);
+        free (p); free (in);
+    }
+    CHECK (restrikes[0] >= 1,
+           "glide OFF: the drone re-registers when the lead crosses the "
+           "root class (got %d)", restrikes[0]);
+    CHECK (restrikes[1] == 0,
+           "glide ON: the drone PERSISTS through the crossing -- no "
+           "restrike until a real pick (got %d)", restrikes[1]);
+    snprintf (cmd, sizeof (cmd), "rm -rf %s", root);
+    if (system (cmd) != 0) { /* best effort */ }
+}
+
 static void test_release_freeze_holds_live_shifter (void)
 {
     AeCorrector *p = calloc (1, sizeof (AeCorrector));
@@ -5758,6 +5965,8 @@ int main (void)
     test_release_freeze_holds_live_shifter();
     test_tail_droop_is_not_a_slide();
     test_octave_revote_does_not_restrike();
+    test_glide_bias_connects_midpoint();
+    test_drone_persists_through_glide();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();
