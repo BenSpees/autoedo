@@ -818,6 +818,10 @@ void ae_corrector_reset (AeCorrector *p)
     memset (p->rel_det, 0, sizeof (p->rel_det));
     memset (p->rel_rms, 0, sizeof (p->rel_rms));
     p->rel_pos = 0;
+    p->rel_collapse    = false;
+    p->rel_latch       = false;
+    p->rel_latch_cents = 0.0;
+    p->rel_latch_att   = 0;
     p->atk_armed = true;
     p->hold_latched    = false;
     p->hold_level      = 0.0;
@@ -2456,10 +2460,40 @@ static void run_detection (AeCorrector *p)
                              && rms < 0.6 * (double) p->rel_rms[rb];
             const bool slow_c = p->rel_rms[rbl] > 0.0f
                              && rms < 0.55 * (double) p->rel_rms[rbl];
+            /* -6, not -12: the freeze used to wait for 12 cents of droop
+               before believing the lift, and those 12 cents were audible
+               on every single note end. 6 is under the JND for a decaying
+               guitar note and still twice a vibrato hop's typical read. */
             const bool lift_c = p->rel_rms[rbl] > 0.0f
                              && rms < 0.85 * (double) p->rel_rms[rbl]
-                             && p->expr_cents < -12.0;
-            p->rel_collapse = fast_c || slow_c || lift_c;
+                             && p->expr_cents < -6.0;
+            const bool inst = fast_c || slow_c || lift_c;
+            /* LATCHED until the note actually ends. The windows above are
+               verdicts about the level's RATE of fall, and a lifted string
+               settles: after the first collapse the ratios drift back over
+               the thresholds while the pitch is still flat and dying, and
+               every hop they released leaked a burst of the droop (field:
+               "still bending on note ends like I described before"). Once
+               a release has begun it does not un-begin -- the latch opens
+               only for a genuinely NEW event:
+               - the gate closing (cleared at the unvoiced transition);
+               - the pitch RISING well clear of where the droop started
+                 (a re-fret or hammer-on -- a dying string never rises);
+               - a fresh attack-hold ARMING edge with the envelope
+                 actually rising (the same test the re-pluck strike
+                 trusts): a new pick, whatever its pitch. */
+            if (inst && ! p->rel_latch)
+            {
+                p->rel_latch       = true;
+                p->rel_latch_cents = detected_cents;
+                p->rel_latch_att   = p->att_seq;
+            }
+            else if (p->rel_latch
+                     && (detected_cents > p->rel_latch_cents + 60.0
+                         || (p->att_seq != p->rel_latch_att
+                             && p->atk_fast > 1.3 * p->atk_slow)))
+                p->rel_latch = false;
+            p->rel_collapse = inst || p->rel_latch;
         }
         /* The corrected pitch WITH the playing on top -- what the shifter
            aims at, exported so a sample lead can ride a physical bend
@@ -2734,8 +2768,14 @@ harmony_done: ;
     p->voiced = now_voiced;
     atomic_store_explicit (&p->voiced_out, now_voiced, memory_order_relaxed);
     if (! now_voiced)
+    {
         atomic_store_explicit (&p->lead_deg_out, AE_HARM_DEG_OFF,
                                memory_order_relaxed);
+        /* The release the latch was riding out is over: the next voiced
+           hop is a new note's, and it must track from its first sample. */
+        p->rel_latch = false;
+        p->rel_collapse = false;
+    }
 
     /* Pitch-trace ring: one point per detection (~200/s), packed into a
        single atomic so a reader can never tear a pair. Unvoiced stores 0 Hz

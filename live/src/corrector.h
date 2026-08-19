@@ -470,6 +470,18 @@ typedef struct
                                repitch holds the exported corrected pitch,
                                and the degree-change strike stands down
                                (a dying string's pitch dive is not a run) */
+    bool   rel_latch;       /* the freeze LATCHED: a collapse tripped once
+                               and the note has not ended. The per-hop
+                               windows go quiet as a lifted string settles
+                               at low level, and every quiet hop leaked a
+                               burst of the dying pitch (field: "still
+                               bending on note ends") -- so the verdict
+                               holds until the note is over, not until the
+                               level pauses on its way down */
+    double rel_latch_cents; /* detected_cents when the latch closed */
+    int    rel_latch_att;   /* att_seq at the latch: a fresh ARMING edge
+                               with the envelope genuinely rising is a new
+                               attack and reopens tracking */
     /* POLY bend-follow: each tracked note's deviation from its snapped
        degree passes to the sample rate (scaled by `expression`), minus a
        slow per-row centre (seeded at birth, ~0.7 s) -- the centre is

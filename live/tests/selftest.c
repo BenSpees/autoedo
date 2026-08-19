@@ -2504,6 +2504,74 @@ static void test_release_pitch_stability (void)
     free (p); free (in); free (hl); free (hr);
 }
 
+/* The release freeze LATCHES (field, round two: "still bending on note
+   ends like I described before"). A lifted-but-not-muted string collapses
+   fast, then SETTLES at a low plateau -- the level stops falling while the
+   pitch goes on drooping flat. The per-hop collapse windows are verdicts
+   about the level's rate of fall, so they released during the plateau and
+   the exported corrected pitch followed the droop after all. Once a
+   release begins, the export must stay frozen until the note ENDS. */
+static void test_release_freeze_latch (void)
+{
+    const int hold = 48000, drop = 2880, plateau = 19200, quiet = 48000;
+    const int total = hold + drop + plateau + quiet;
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 20.0);
+    ae_corrector_set_transition_ms (p, 50.0);
+
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < hold + drop + plateau; ++i)
+    {
+        double hz = 220.0, amp = 0.4;
+        if (i >= hold && i < hold + drop)
+        {
+            /* the lift: -12 dB in 60 ms, pitch starting flat */
+            const double w = (double) (i - hold) / drop;
+            amp = 0.4 * pow (10.0, -12.0 * w / 20.0);
+            hz  = 220.0 * pow (2.0, -20.0 * w / 1200.0);
+        }
+        else if (i >= hold + drop)
+        {
+            /* the SETTLE: level constant (no collapse to see any more),
+               pitch drooping on toward -80 cents */
+            const double w = (double) (i - hold - drop) / plateau;
+            amp = 0.4 * pow (10.0, -12.0 / 20.0);
+            hz  = 220.0 * pow (2.0, (-20.0 - 60.0 * w) / 1200.0);
+        }
+        ph += 2.0 * M_PI * hz / 48000.0;
+        in[i] = (float) (amp * (sin (ph) + 0.4 * sin (2.0 * ph)));
+    }
+
+    double held_hz = 0.0, worst_cents = 0.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        const double ch = (double) atomic_load_explicit (&p->corr_hz_out,
+                                                         memory_order_relaxed);
+        if (off + n <= hold && ch > 0.0)
+            held_hz = ch; /* the sustained note's export */
+        /* well inside the plateau, past the initial collapse */
+        if (off >= hold + drop + 4800 && off + n <= hold + drop + plateau
+            && held_hz > 0.0 && ch > 0.0)
+        {
+            const double d = fabs (1200.0 * log2 (ch / held_hz));
+            if (d > worst_cents)
+                worst_cents = d;
+        }
+    }
+    CHECK (held_hz > 0.0 && worst_cents < 12.0,
+           "release freeze LATCHES through the settle: exported pitch "
+           "held (worst drift %.1f cents; the droop underneath is 80)",
+           worst_cents);
+
+    ae_corrector_free (p);
+    free (p); free (in);
+}
+
 static void test_attack_sound (void)
 {
     const int quiet = 9600, sung = 48000, total = quiet + sung;
@@ -5159,6 +5227,7 @@ int main (void)
     test_onset_clears_continuity();
     test_attack_hold();
     test_release_pitch_stability();
+    test_release_freeze_latch();
     test_midi_octave_fold();
     test_synth_envelope();
     test_walk();
