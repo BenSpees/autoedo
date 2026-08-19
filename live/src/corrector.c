@@ -1748,6 +1748,14 @@ void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin)
    all (harmony off, shifted lead) gets no hits. */
 static bool attack_relevant (const AeCorrector *p)
 {
+    /* POLY always qualifies (field: "Can I still have my attack sound in
+       poly mode?"). The test below asks whether anything SYNTHETIC is on
+       the bus for the hit to sit under, and in poly the answer is yes by
+       construction: the whole chord is resynthesized through the shifter,
+       or played by the library, or remodelled by MEL -- and every one of
+       those swallows the pick transient the cover exists to replace. */
+    if (p->poly)
+        return true;
     if (p->lead_source == AE_HARM_SRC_SYNTH)
         return true;
     if (! p->harm_on)
@@ -3996,6 +4004,14 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                                vgate ? (int) steps : AE_HARM_DEG_OFF,
                                memory_order_relaxed);
     }
+
+    /* The attack sound, on the same bus and in the same order as MONO:
+       under the ghosts, ahead of the harmony IR point and the tilt. POLY
+       needs it MORE than mono does -- there is no dry lead here to carry a
+       pick, every copy on the bus is resynthesized, and the onset edge is
+       already detected above (detect_onset runs for the gate and the
+       strike). */
+    attack_process (p, harm_l, harm_r, num_samples);
 
     if (p->ir_harm[0] != NULL)
     {

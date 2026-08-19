@@ -2572,6 +2572,63 @@ static void test_release_freeze_latch (void)
     free (p); free (in);
 }
 
+/* The attack sound in POLY (field: "Can I still have my attack sound in
+   poly mode?"). It used to be mono-only twice over: process_poly never
+   called attack_process, and attack_relevant asked for a synth lead or a
+   harmony voice, both of which poly makes inert. Poly wants the cover MORE
+   than mono does -- every copy on the bus is resynthesized, so nothing
+   carries the pick. With no harmony voice configured the harmony bus holds
+   the hit ALONE, which makes it a clean discriminator. */
+static void test_attack_sound_poly (void)
+{
+    const int quiet = 9600, played = 24000, total = quiet + played;
+    double early[2]; /* off, pick: harm-bus peak in the first 60 ms */
+
+    for (int c = 0; c < 2; ++c)
+    {
+        AeCorrector *p = calloc (1, sizeof (AeCorrector));
+        ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0,
+                              AE_SHIFT_QUALITY_BALANCED
+                              | AE_SHIFT_QUALITY_POLY_FLAG);
+        ae_corrector_set_edo (p, 12);
+        ae_corrector_set_attack (p, c == 0 ? AE_ATK_OFF : AE_ATK_PICK, 1.0);
+
+        float *in = calloc ((size_t) total, sizeof (float));
+        float *hl = calloc ((size_t) total, sizeof (float));
+        float *hr = calloc ((size_t) total, sizeof (float));
+        double ph[3] = { 0.0, 0.4, 0.9 };
+        const double hz[3] = { 130.81, 164.81, 196.0 }; /* a C major triad */
+        for (int i = quiet; i < total; ++i)
+        {
+            double v = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                ph[k] += 2.0 * M_PI * hz[k] / 48000.0;
+                v += sin (ph[k]) + 0.3 * sin (2.0 * ph[k]);
+            }
+            in[i] = (float) (0.12 * v);
+        }
+        for (int off = 0; off < total; off += 512)
+        {
+            const int n = total - off < 512 ? total - off : 512;
+            ae_corrector_process (p, in + off, hl + off, hr + off, n);
+        }
+
+        double pk = 0.0;
+        for (int i = quiet; i < quiet + 2880 && i < total; ++i) /* 60 ms */
+        {
+            const double a = fabs ((double) hl[i]);
+            if (a > pk) pk = a;
+        }
+        early[c] = pk;
+        ae_corrector_free (p);
+        free (p); free (in); free (hl); free (hr);
+    }
+    CHECK (early[1] > 4.0 * early[0] + 1e-4,
+           "POLY plays the attack sound (off %.5f, pick %.5f)",
+           early[0], early[1]);
+}
+
 static void test_attack_sound (void)
 {
     const int quiet = 9600, sung = 48000, total = quiet + sung;
@@ -5211,6 +5268,7 @@ int main (void)
     test_octave_revote_rebase();
     test_expression_transfer();
     test_attack_sound();
+    test_attack_sound_poly();
     test_poly_mode();
     test_polyf0_tracker();
     test_poly_detect_export();
