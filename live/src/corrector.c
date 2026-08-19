@@ -758,6 +758,9 @@ void ae_corrector_reset (AeCorrector *p)
     p->last_note_cents  = 0.0;
     p->smp_corr_shift   = 0.0;
     p->note_peak_rms    = 0.0;
+    p->expr_med_n       = 0;
+    p->expr_med_d1      = 0.0;
+    p->expr_med_d2      = 0.0;
     p->out_cents      = 0.0;
     p->centre_cents   = 0.0;
     p->expr_cents     = 0.0;
@@ -2325,6 +2328,8 @@ static void run_detection (AeCorrector *p)
                     p->out_cents += dj;
                     if (p->glide_pos_valid)
                         p->glide_pos += dj;
+                    p->expr_med_d1 += dj;
+                    p->expr_med_d2 += dj;
                     p->smp_corr_shift -= dj; /* ringing samples stay put */
                     p->revote_hold = (int) (0.030 * p->fs);
                     p->revote_hop  = true;
@@ -2346,6 +2351,7 @@ static void run_detection (AeCorrector *p)
             p->det_slope_hold = 0.0;
             p->rel_note_age   = 0;
             p->note_peak_rms  = rms; /* this note's own loudness yardstick */
+            p->expr_med_n     = 0;   /* the ride restarts exact */
         }
         else
         {
@@ -2422,6 +2428,9 @@ static void run_detection (AeCorrector *p)
                 p->att_hist[0]    += dd;
                 p->att_hist[1]    += dd;
                 p->att_hist[2]    += dd;
+                p->expr_med_d1    += dd; /* the ride's median memory is
+                                            pitch labels too */
+                p->expr_med_d2    += dd;
                 p->slide_ref      += dd;
                 p->slide_ext      += dd;
                 p->slide_det0     += dd;
@@ -2448,7 +2457,35 @@ static void run_detection (AeCorrector *p)
                                           suppression lasts only 30 */
             }
         }
-        p->expr_cents = detected_cents - p->centre_cents;
+        /* EXPRESSION rides the output verbatim, so every hop of YIN
+           jitter rode with it -- a held note wore a +-30..50 c fuzz the
+           whole way down (field graph: "garbage noise still coming
+           through"; the target line is clean, the fuzz is the detected
+           trace, and expression carried it into the audio and the
+           ringing samples). A 3-hop MEDIAN kills the single-hop spikes
+           outright, and a ~10 ms settle rounds the rest; vibrato at
+           6-7 Hz loses only a few percent of depth through both. The
+           verdicts and slide logic all operate at 40 ms and slower and
+           read the same smoothed ride the audience hears. */
+        {
+            const double a3 = detected_cents, b3 = p->expr_med_d1,
+                         c3 = p->expr_med_d2;
+            const double med =
+                a3 > b3 ? (b3 > c3 ? b3 : (a3 > c3 ? c3 : a3))
+                        : (a3 > c3 ? a3 : (b3 > c3 ? c3 : b3));
+            const double e_raw =
+                (p->expr_med_n >= 2 ? med : detected_cents) - p->centre_cents;
+            p->expr_med_d2 = p->expr_med_d1;
+            p->expr_med_d1 = detected_cents;
+            if (p->expr_med_n < 2)
+            {
+                ++p->expr_med_n;
+                p->expr_cents = e_raw; /* a fresh note starts exact */
+            }
+            else
+                p->expr_cents += (e_raw - p->expr_cents)
+                               * (1.0 - exp (-elapsed / 0.007));
+        }
         if (p->rel_note_age < 1 << 20)
             ++p->rel_note_age;
         if (rms > p->note_peak_rms)

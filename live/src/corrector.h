@@ -743,6 +743,10 @@ typedef struct
     double slide_prejump;        /* detected cents before that hop */
     bool   slide_on;
     bool   slide_was;            /* last hop's slide_on (edge detect) */
+    double expr_med_d1, expr_med_d2; /* last two detected hops: the ride's
+                                    3-hop median (single-hop YIN spikes never
+                                    reach the audible expression) */
+    int    expr_med_n;           /* hops since the note started (median warmup) */
     double note_peak_rms;        /* the current note's peak frame RMS: a
                                     re-voice ~22 dB under it is the ring-down
                                     of the note that just ended, not a note */
