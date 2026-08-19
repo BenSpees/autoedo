@@ -2259,6 +2259,139 @@ static void test_slide_glides_not_staircases (void)
     if (system (cmd) != 0) { /* best effort */ }
 }
 
+/* The OUTPUT of a slide, not just its strikes: while slide_on the audible
+   pitch must follow the finger (detected + the offset frozen at the open)
+   instead of pinning degree by degree. Field: "it seems to know the slid
+   notes are connected, but it's rarely doing the expected portamento",
+   with a trace of the corrected pitch stair-stepping alongside a smooth
+   detected ramp. The gesture here is the SLOW one that trace shows --
+   5 semitones in half a second, ~5 c/hop, under the old rate band's
+   floor -- so this also proves the travel-based detector opens on it. */
+static void test_slide_portamento_follows_finger (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 10.0);
+    ae_corrector_set_transition_ms (p, 300.0);
+
+    const int hold1 = 48000, slide = 24000, hold2 = 48000;
+    const int total = hold1 + slide + hold2;
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        double hz;
+        if (i < hold1) hz = 220.0;
+        else if (i < hold1 + slide)
+        {
+            const double w = (double) (i - hold1) / slide;
+            hz = 220.0 * pow (2.0, -5.0 * w / 12.0);
+        }
+        else hz = 220.0 * pow (2.0, -5.0 / 12.0);
+        ph += 2.0 * M_PI * hz / 48000.0;
+        in[i] = (float) (0.4 * (sin (ph) + 0.3 * sin (2.0 * ph)));
+    }
+
+    /* The audible pitch is detected + the shift the corrector chose for
+       that same hop; both come from the last hop of the block. */
+    double prev_out = 0.0;
+    bool   prev_ok  = false;
+    double max_step = 0.0, first_out = 0.0, last_out = 0.0;
+    bool   have_first = false;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        /* the slide interior: clear of the open (~90 ms in, when 90 c of
+           travel has accumulated) and of the landing glide */
+        if (off < hold1 + 12000 || off > hold1 + slide - 1024)
+        { prev_ok = false; continue; }
+        const float det = ae_corrector_detected_hz (p);
+        if (det <= 0.0f) { prev_ok = false; continue; }
+        const double out_c = 1200.0 * log2 ((double) det / 220.0)
+                           + 100.0 * p->shift_semitones;
+        if (prev_ok)
+        {
+            const double step = fabs (out_c - prev_out);
+            if (step > max_step) max_step = step;
+        }
+        if (! have_first) { first_out = out_c; have_first = true; }
+        last_out = out_c;
+        prev_out = out_c;
+        prev_ok  = true;
+    }
+    /* the input moves ~10.7 c per 512-sample block; a staircase riser is
+       a near-degree step (~100 c in 12-EDO) across a couple of blocks */
+    CHECK (max_step <= 35.0,
+           "portamento: the output follows the finger, no riser past 35 c "
+           "per block (worst %.1f c)", max_step);
+    CHECK (have_first && first_out - last_out >= 180.0,
+           "portamento: the output actually travelled with the slide "
+           "(%.1f c across the interior)", have_first ? first_out - last_out : 0.0);
+    ae_corrector_free (p);
+    free (p); free (in);
+}
+
+/* The release freeze must hold the AUDIBLE shifter, not just the export:
+   expr_cents follows the droop (the centre chases it at ~180 ms), so with
+   EXPRESSION up the collapse used to ride straight through
+   shift_semitones while the graph sat frozen and innocent. Field: "more
+   notes bending down at end", third report of the same droop. */
+static void test_release_freeze_holds_live_shifter (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 10.0);
+    ae_corrector_set_expression (p, 1.0);
+
+    /* A3 held, then a finger-lift: the pitch eases 45 c flat across
+       200 ms while the level collapses -- the exact gesture the verdict
+       names a lift. */
+    const int hold = 57600, droop = 9600, total = hold + droop;
+    float *in = calloc ((size_t) total, sizeof (float));
+    double ph = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        double hz = 220.0, amp = 0.4;
+        if (i >= hold)
+        {
+            const double w = (double) (i - hold) / droop;
+            hz  = 220.0 * pow (2.0, -45.0 * w / 1200.0);
+            amp = 0.4 * pow (0.05, w); /* ~-26 dB across the droop */
+        }
+        ph += 2.0 * M_PI * hz / 48000.0;
+        in[i] = (float) (amp * (sin (ph) + 0.3 * sin (2.0 * ph)));
+    }
+
+    double pre = 0.0;
+    int    pre_n = 0;
+    double worst = 0.0;
+    for (int off = 0; off < total; off += 512)
+    {
+        const int n = total - off < 512 ? total - off : 512;
+        ae_corrector_process (p, in + off, NULL, NULL, n);
+        const float det = ae_corrector_detected_hz (p);
+        if (det <= 0.0f) continue;
+        const double out_c = 1200.0 * log2 ((double) det / 220.0)
+                           + 100.0 * p->shift_semitones;
+        if (off >= hold - 4800 && off < hold) { pre += out_c; ++pre_n; }
+        if (off >= hold + 1024 && pre_n > 0)
+        {
+            const double dev = fabs (out_c - pre / pre_n);
+            if (dev > worst) worst = dev;
+        }
+    }
+    CHECK (pre_n > 0, "release-shifter: the held note was heard at all");
+    CHECK (worst <= 12.0,
+           "the audible shifter holds through a release: output within "
+           "12 c of the held pitch while the string dies (worst %.1f c; "
+           "the droop it must not follow is 45 c)", worst);
+    ae_corrector_free (p);
+    free (p); free (in);
+}
+
 static void test_sample_bend_follow (void)
 {
     const char *root = "/tmp/ae-smp-bend";
@@ -5469,6 +5602,8 @@ int main (void)
     test_steel_mode();
     test_sample_bend_follow();
     test_slide_glides_not_staircases();
+    test_slide_portamento_follows_finger();
+    test_release_freeze_holds_live_shifter();
     test_follow_link();
     test_detection_lock_time();
     test_onset_clears_continuity();

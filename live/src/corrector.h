@@ -482,6 +482,16 @@ typedef struct
     int    rel_latch_att;   /* att_seq at the latch: a fresh ARMING edge
                                with the envelope genuinely rising is a new
                                attack and reopens tracking */
+    double rel_out_expr;    /* the aim point (out_cents + ridden expression)
+                               frozen for the AUDIBLE shifter while the
+                               release stands. The export freeze alone left
+                               the played note bending: expr_cents follows
+                               the droop (the centre chases it at ~180 ms),
+                               so with EXPRESSION up the collapse rode
+                               straight through shift_semitones (field:
+                               "more notes bending down at end", trace
+                               showing a flat export over a drooping
+                               detection) */
     /* POLY bend-follow: each tracked note's deviation from its snapped
        degree passes to the sample rate (scaled by `expression`), minus a
        slow per-row centre (seeded at birth, ~0.7 s) -- the centre is
@@ -637,17 +647,36 @@ typedef struct
                                     struck with (like the bank's norm) */
     long long smp_lead_deg;      /* lead sampler: last degree struck/heard */
     bool   smp_lead_deg_valid;
-    /* SLIDE: sustained same-direction pitch motion, hop after hop -- a
-       finger travelling down (or up) the string. The bend-vs-jump gate
-       reads each degree crossing of a slide as a JUMP (the slope is way
-       past 15 c/hop), so a glissando restruck the sample at every degree:
-       "a staircase of notes instead of gliding between" (field, with the
-       pitch trace). While slide_on, degree-change strikes stand down and
-       the ringing note repitches through the transition-glided corrected
-       pitch -- the glissando the GLIDE control describes. */
-    int    slide_run;            /* consecutive moving hops (decays) */
+    /* SLIDE: sustained same-direction pitch motion -- a finger travelling
+       down (or up) the string. The bend-vs-jump gate reads each degree
+       crossing of a slide as a JUMP (the slope is way past 15 c/hop), so a
+       glissando restruck the sample at every degree: "a staircase of notes
+       instead of gliding between" (field, with the pitch trace). Detection
+       is ACCUMULATED TRAVEL, not per-hop rate: a real finger slide can
+       move as slowly as 5 c/hop -- under a vibrato's PEAK rate -- so no
+       rate band can tell them apart. What no vibrato does is keep going.
+       Travel accumulates in one direction, the furthest point is
+       remembered, and only a retreat past a drawdown belt (10 c) flips the
+       direction -- detector jitter and a fret's hesitation stay inside the
+       belt. The slide opens once the travel exceeds what a vibrato
+       half-cycle can cover (90 c), or at 40 c when the direction has held
+       far past any vibrato half-period (~140 ms). A jump-rate hop (>=45
+       c/hop) is a strike's business and resets everything.
+       While slide_on, degree-change strikes stand down and the OUTPUT
+       FOLLOWS THE FINGER: detected pitch plus the correction offset the
+       note carried when the slide opened (field #2: "it seems to know the
+       slid notes are connected, but it's rarely doing the expected
+       portamento" -- the first fix silenced the strikes but the pitch
+       path still pinned every degree). When the slide closes, the landing
+       glides onto the grid at the GLIDE (transitionMs) speed. */
     double slide_dir;            /* +1 rising, -1 falling, 0 unknown */
+    double slide_ref;            /* cents where this direction's run began */
+    double slide_ext;            /* furthest point reached since slide_ref */
+    int    slide_age;            /* hops the direction has held */
+    int    slide_hold;           /* hops of slide_on left once motion stalls */
+    double slide_off;            /* portamento offset, frozen at the open */
     bool   slide_on;
+    bool   slide_was;            /* last hop's slide_on (edge detect) */
     int    smp_guard;            /* samples until another lead strike may
                                     fire (de-dupes onset + degree + re-attack
                                     triggers landing on one event) */

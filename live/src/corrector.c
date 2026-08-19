@@ -822,9 +822,15 @@ void ae_corrector_reset (AeCorrector *p)
     p->rel_latch       = false;
     p->rel_latch_cents = 0.0;
     p->rel_latch_att   = 0;
-    p->slide_run       = 0;
+    p->rel_out_expr    = 0.0;
     p->slide_dir       = 0.0;
+    p->slide_ref       = 0.0;
+    p->slide_ext       = 0.0;
+    p->slide_age       = 0;
+    p->slide_hold      = 0;
+    p->slide_off       = 0.0;
     p->slide_on        = false;
+    p->slide_was       = false;
     p->atk_armed = true;
     p->hold_latched    = false;
     p->hold_level      = 0.0;
@@ -2428,44 +2434,9 @@ static void run_detection (AeCorrector *p)
             p->att_hold_recent = (int) (0.150 * p->fs);
         }
 
-        /* Tolerance: dead zone around the target where the pitch is left
-           alone (preserves vibrato instead of fighting it). Then Amount
-           scales whatever correction remains. */
-        double eff_cents = target_cents;
-        if (fabs (p->centre_cents - target_cents) <= p->tolerance_cents)
-            eff_cents = p->centre_cents;
-        eff_cents = p->centre_cents + (eff_cents - p->centre_cents) * p->amount;
-
-        /* Retune speed within a note, transition speed between degrees,
-           and Humanize relaxes the retune on long-held notes. */
-        double tau_ms = p->retune_ms;
-        if (p->in_transition)
-        {
-            tau_ms = p->transition_ms;
-            const double step_c = ae_edo_step_cents_ex (p->edo, period);
-            if (fabs (p->out_cents - target_cents) < dclamp (0.1 * step_c, 1.0, 5.0))
-                p->in_transition = false; /* arrived */
-        }
-        else if (p->humanize > 0.0)
-        {
-            const double sustain = p->sustain_s < 1.0 ? p->sustain_s : 1.0;
-            tau_ms *= 1.0 + 3.0 * p->humanize * sustain;
-        }
-
-        const double tau_sec = tau_ms / 1000.0;
-        const double alpha   = (tau_sec <= 0.0) ? 1.0 : (1.0 - exp (-elapsed / tau_sec));
-        p->out_cents += (eff_cents - p->out_cents) * alpha;
-
-        /* The shifter takes semitones. Correction alone stays near 1; the
-           lead transpose can be octaves, so the clamp is the same +-36 the
-           harmony voices get (a safety net, not a musical bound). */
-        /* The corrected note centre, with the playing put back on top. */
-        const double out_expr = p->out_cents + p->expr_cents * p->expression;
-        p->shift_semitones = dclamp ((out_expr + lead_shift_c - detected_cents) / 100.0,
-                                     -36.0, 36.0);
-        /* The release slope-freeze verdict, decided HERE so the exported
-           pitch can honour it too (its full story sits at the harmony
-           freeze below). */
+        /* The release slope-freeze verdict, decided BEFORE the shifter
+           aims so the audible shift and the exported pitch can both
+           honour it (its full story sits at the harmony freeze below). */
         {
             const int rb  = (p->rel_pos + AE_REL_RING - 8) % AE_REL_RING;
             const int rbl = (p->rel_pos + AE_REL_RING - 15) % AE_REL_RING;
@@ -2518,6 +2489,135 @@ static void run_detection (AeCorrector *p)
                 p->rel_latch = false;
             p->rel_collapse = inst || p->rel_latch;
         }
+        /* SLIDE detection (see the header note): accumulated one-direction
+           travel with a 10 c drawdown belt, because a finger's rate and a
+           vibrato's overlap completely -- only PERSISTENCE separates them.
+           A release never refreshes the hold: a lifted string's droop is a
+           dying note, not a gesture (the freeze above owns it). */
+        {
+            const double dd = p->prev_pair_valid
+                ? detected_cents - p->prev_det_cents : 0.0;
+            const double add = fabs (dd);
+            bool moving = false;
+            if (! p->prev_pair_valid)
+                ; /* nothing to read yet */
+            else if (add >= 45.0)
+            {
+                /* jump-rate motion: a strike's business */
+                p->slide_dir  = 0.0;
+                p->slide_age  = 0;
+                p->slide_hold = 0;
+            }
+            else if (p->slide_dir == 0.0)
+            {
+                if (add > 2.0)
+                {
+                    p->slide_dir = dd > 0.0 ? 1.0 : -1.0;
+                    p->slide_ref = p->prev_det_cents;
+                    p->slide_ext = detected_cents;
+                    p->slide_age = 1;
+                }
+            }
+            else if ((detected_cents - p->slide_ext) * p->slide_dir >= 0.0)
+            {
+                p->slide_ext = detected_cents;
+                ++p->slide_age;
+                moving = add > 2.0;
+            }
+            else if ((p->slide_ext - detected_cents) * p->slide_dir > 10.0)
+            {
+                /* retreated past the belt: the direction flipped */
+                p->slide_dir = -p->slide_dir;
+                p->slide_ref = p->slide_ext;
+                p->slide_ext = detected_cents;
+                p->slide_age = 1;
+                moving = true;
+            }
+            else
+                ++p->slide_age; /* a hesitation inside the belt */
+
+            const double travel = (p->slide_ext - p->slide_ref) * p->slide_dir;
+            if (p->slide_dir != 0.0 && moving && ! p->rel_collapse
+                && travel >= 40.0 && (travel >= 90.0 || p->slide_age >= 28))
+                p->slide_hold = 24; /* ~120 ms of stall before it closes */
+            else if (p->slide_hold > 0)
+                --p->slide_hold;
+            p->slide_on = p->slide_hold > 0;
+        }
+
+        /* Tolerance: dead zone around the target where the pitch is left
+           alone (preserves vibrato instead of fighting it). Then Amount
+           scales whatever correction remains. */
+        double eff_cents = target_cents;
+        if (fabs (p->centre_cents - target_cents) <= p->tolerance_cents)
+            eff_cents = p->centre_cents;
+        eff_cents = p->centre_cents + (eff_cents - p->centre_cents) * p->amount;
+
+        /* PORTAMENTO: while a slide stands, the finger owns the pitch.
+           The aim point is the DETECTED pitch plus the correction the note
+           carried at the moment the slide opened (continuity: no step at
+           the boundary), with the ridden expression compensated so the
+           motion is not counted twice. The quantizer above keeps running
+           -- the graph target and the harmony voices still see the
+           degrees passing by -- but the audible centre tracks the finger.
+           When the slide closes, the landing glides onto the grid at the
+           GLIDE (transitionMs) speed. */
+        if (p->slide_on && ! p->slide_was)
+            p->slide_off = p->out_cents + p->expr_cents * p->expression
+                         - detected_cents;
+        if (! p->slide_on && p->slide_was)
+            p->in_transition = true; /* land on the grid at the glide speed */
+        p->slide_was = p->slide_on;
+
+        /* Retune speed within a note, transition speed between degrees,
+           and Humanize relaxes the retune on long-held notes. */
+        double tau_ms = p->retune_ms;
+        if (p->slide_on)
+        {
+            eff_cents = detected_cents + p->slide_off
+                      - p->expr_cents * p->expression;
+            tau_ms = 15.0; /* track the finger, not the grid */
+            p->in_transition = false; /* re-armed when the slide closes */
+        }
+        else if (p->in_transition)
+        {
+            tau_ms = p->transition_ms;
+            const double step_c = ae_edo_step_cents_ex (p->edo, period);
+            if (fabs (p->out_cents - target_cents) < dclamp (0.1 * step_c, 1.0, 5.0))
+                p->in_transition = false; /* arrived */
+        }
+        else if (p->humanize > 0.0)
+        {
+            const double sustain = p->sustain_s < 1.0 ? p->sustain_s : 1.0;
+            tau_ms *= 1.0 + 3.0 * p->humanize * sustain;
+        }
+
+        const double tau_sec = tau_ms / 1000.0;
+        const double alpha   = (tau_sec <= 0.0) ? 1.0 : (1.0 - exp (-elapsed / tau_sec));
+        p->out_cents += (eff_cents - p->out_cents) * alpha;
+
+        /* The shifter takes semitones. Correction alone stays near 1; the
+           lead transpose can be octaves, so the clamp is the same +-36 the
+           harmony voices get (a safety net, not a musical bound). */
+        /* The corrected note centre, with the playing put back on top --
+           and HELD through a release: expr_cents follows the droop (the
+           centre chases it at ~180 ms), so with EXPRESSION up the collapse
+           rode straight through the live shift even while the export sat
+           frozen (field: "more notes bending down at end"). While the
+           release stands the aim point holds and only the compensation
+           term below moves, so the played note keeps its pitch as the
+           string dies. */
+        {
+            const double out_expr_live =
+                p->out_cents + p->expr_cents * p->expression;
+            if (! p->rel_collapse)
+                p->rel_out_expr = out_expr_live;
+        }
+        const double out_expr = p->rel_collapse ? p->rel_out_expr
+                                                : p->out_cents
+                                                  + p->expr_cents * p->expression;
+        p->shift_semitones = dclamp ((out_expr + lead_shift_c - detected_cents) / 100.0,
+                                     -36.0, 36.0);
         /* The corrected pitch WITH the playing on top -- what the shifter
            aims at, exported so a sample lead can ride a physical bend
            instead of stair-stepping the snapped grid. HELD through a
@@ -2540,45 +2640,6 @@ static void run_detection (AeCorrector *p)
             if (dsl > p->det_slope_hold)
                 p->det_slope_hold = dsl;
         }
-        /* SLIDE detection (see the header note): a finger travelling on
-           the string moves 6-45 cents per hop -- 5 semitones in half a
-           second reads ~25 c/hop, and a hand cannot go much past 40
-           without the gesture being a jump anyway. A LEGATO STEP is the
-           imposter to beat: the detector smears even an instant hammer-on
-           across the analysis frame, several same-direction hops -- but at
-           the INTERVAL'S rate (a 5-semitone hammer smears at ~100 c/hop),
-           far past any finger. So a hop inside the band feeds the run, a
-           hop at jump rate KILLS it, and four fed hops (~20 ms of genuine
-           travel) open the slide. The one deliberate concession is the
-           small-interval hammer whose smear rate falls inside the band: a
-           single-step legato reads as a glide -- the pedal-steel reading
-           the strike gate already chose for fine EDOs. The run DECAYS
-           rather than clearing, so a fret's hesitation mid-slide does not
-           hand the landing back to the strike gate. */
-        {
-            const double dd = p->prev_pair_valid
-                ? detected_cents - p->prev_det_cents : 0.0;
-            const double add = fabs (dd);
-            if (add >= 45.0)
-            {
-                p->slide_run = 0; /* jump-rate motion: a strike's business */
-                p->slide_dir = 0.0;
-            }
-            else if (add > 6.0 && dd * p->slide_dir > 0.0)
-            {
-                if (p->slide_run < 100)
-                    ++p->slide_run;
-            }
-            else if (add > 6.0)
-            {
-                p->slide_dir = dd > 0.0 ? 1.0 : -1.0;
-                p->slide_run = 1;
-            }
-            else if (p->slide_run > 0)
-                --p->slide_run;
-            p->slide_on = p->slide_run >= 4;
-        }
-
         p->primed = true;
         atomic_store_explicit (&p->shift_st_out, (float) p->shift_semitones,
                                memory_order_relaxed);
@@ -2644,7 +2705,8 @@ static void run_detection (AeCorrector *p)
            now carries the bend, so the harmony bends with it, which is the
            whole point of a harmoniser tracking the player. */
         const double anchor_cents = p->lead_on
-            ? p->out_cents + p->expr_cents * p->expression + lead_shift_c
+            ? out_expr + lead_shift_c /* the frozen aim during a release --
+                                         what is actually heard */
             : detected_cents;
 
         for (int v = 0; v < AE_HARM_VOICES; ++v)
@@ -2838,9 +2900,11 @@ harmony_done: ;
         p->rel_collapse = false;
         /* The slide ended with the note; motion across the silence is a
            new gesture, never this one's momentum. */
-        p->slide_run = 0;
-        p->slide_dir = 0.0;
-        p->slide_on  = false;
+        p->slide_dir  = 0.0;
+        p->slide_age  = 0;
+        p->slide_hold = 0;
+        p->slide_on   = false;
+        p->slide_was  = false;
     }
 
     /* Pitch-trace ring: one point per detection (~200/s), packed into a
