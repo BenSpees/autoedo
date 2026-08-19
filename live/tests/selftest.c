@@ -2332,7 +2332,10 @@ static void test_fret_slide_smears_with_glide (void)
     CHECK (max_step <= 35.0,
            "fret slide with glide: rungs are smeared, no riser past 35 c "
            "per block (worst %.1f c)", max_step);
-    CHECK (have_first && last_out - first_out >= 400.0,
+    /* CONSTANT-SPEED law: the seeker moves one EDO step per transitionMs
+       (~227 c/s at 440), whatever the finger's own rate -- so the interior
+       covers the rate times the window (~210 c), not the input's 800. */
+    CHECK (have_first && last_out - first_out >= 150.0,
            "fret slide with glide: the output actually travelled "
            "(%.1f c across the interior)", have_first ? last_out - first_out : 0.0);
     ae_corrector_free (p);
@@ -2403,9 +2406,11 @@ static void test_slide_portamento_follows_finger (void)
        travel is the seeker's lagged share of the input's ~360 c, not
        all of it. The bar is anti-freeze, not tightness: a release-
        frozen output measures ~0 here. */
-    CHECK (have_first && first_out - last_out >= 100.0,
+    CHECK (have_first && first_out - last_out >= 40.0,
            "portamento: the output actually travelled with the slide "
-           "(%.1f c across the interior)", have_first ? first_out - last_out : 0.0);
+           "(%.1f c across the interior; constant-speed seek covers "
+           "rate x window, ~70 c here)",
+           have_first ? first_out - last_out : 0.0);
     ae_corrector_free (p);
     free (p); free (in);
 }

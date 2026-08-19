@@ -109,6 +109,15 @@
 #define AE_ATK_PICK  2 /* the Xentar pick set: 3 ranges x 2 directions */
 #define AE_ATK_CLICK 3 /* damped high tick */
 
+/* Attack NOISE length: how long the burst breathes before it is gone.
+   SHORT is the classic chiff; LONG is a pad's opening -- a noise swell
+   that fades over most of a second (field: "pads can work well with a
+   long noise burst that fades out"). Applies to the NOISE mode; a pick
+   recording and a click are what they are. */
+#define AE_ATK_LEN_SHORT  0
+#define AE_ATK_LEN_MEDIUM 1
+#define AE_ATK_LEN_LONG   2
+
 /* Formant (vowel) transfer: a channel vocoder that lifts the live voice's
    spectral envelope onto the synth, so a sung "ah" -> "oo" moves the synth
    with it. Band count is the resolution/cost trade: 16 log-spaced bands
@@ -651,6 +660,7 @@ typedef struct
 
     /* Attack Sound ---------------------------------------------------------- */
     int    atk_mode;             /* AE_ATK_* */
+    int    atk_len;              /* AE_ATK_LEN_*: noise-burst length */
     double atk_gain;             /* linear; its own volume, no envelope */
     double atk_fast, atk_slow;   /* onset follower (block RMS) */
     int    atk_refract;          /* samples until the next hit may fire */
@@ -733,6 +743,12 @@ typedef struct
     double slide_prejump;        /* detected cents before that hop */
     bool   slide_on;
     bool   slide_was;            /* last hop's slide_on (edge detect) */
+    double glide_pos;            /* the THEREMIN's linear slewer: walks
+                                    toward the aim at CONSTANT SPEED (one
+                                    EDO step per transitionMs -- same speed
+                                    to any note, near or far); out_cents
+                                    rounds its corners with a ~30 ms settle */
+    bool   glide_pos_valid;
     double ride_gain;            /* how much of the expression ride reaches
                                     the audible output: 1 on held notes
                                     (vibrato passes untouched), fading toward
@@ -1177,6 +1193,9 @@ static inline uint64_t ae_corrector_poly_note (const AeCorrector *p, int k)
    synth ghost, a synth lead, not a purely-shifted rig, whose real signal
    covers its own onsets). */
 void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin);
+
+/* Attack NOISE length (audio thread, between blocks): AE_ATK_LEN_*. */
+void ae_corrector_set_attack_len (AeCorrector *p, int len);
 
 /* Harmony portamento in milliseconds (audio thread, between blocks): the
    time constant a ghost takes to slide to a new target when the lead moves.

@@ -107,6 +107,7 @@ typedef struct
     _Atomic double   gate_rms;
     _Atomic double   sample_trim_lin;
     _Atomic int      attack_sound;
+    _Atomic int      attack_len;
     _Atomic double   attack_gain_lin;
     _Atomic bool     harm_sustain;
     _Atomic bool     harm_hold;
@@ -280,6 +281,7 @@ static inline void ae_atomic_params_store (AeAtomicParams *a, const AeLiveParams
                            memory_order_relaxed);
     atomic_store_explicit (&a->sample_vel_ref,  p->sample_vel_ref,  memory_order_relaxed);
     atomic_store_explicit (&a->attack_sound, p->attack_sound, memory_order_relaxed);
+    atomic_store_explicit (&a->attack_len, p->attack_len, memory_order_relaxed);
     atomic_store_explicit (&a->attack_gain_lin,
                            pow (10.0, p->attack_gain_db / 20.0),
                            memory_order_relaxed);
@@ -423,6 +425,8 @@ static inline void ae_atomic_params_apply (AeAtomicParams *a, AeCorrector *ps,
     ae_corrector_set_attack (ps,
                           atomic_load_explicit (&a->attack_sound, memory_order_relaxed),
                           atomic_load_explicit (&a->attack_gain_lin, memory_order_relaxed));
+    ae_corrector_set_attack_len (ps,
+                          atomic_load_explicit (&a->attack_len, memory_order_relaxed));
     ae_corrector_set_harm_glide_ms (ps,
                           atomic_load_explicit (&a->harm_glide_ms, memory_order_relaxed));
     ae_corrector_set_harm_sustain (ps,

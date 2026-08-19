@@ -117,6 +117,7 @@ typedef struct
        latency -- fires on energy, before the pitch is known; outside every
        envelope, with its own gain. 0 off, 1 noise, 2 pick, 3 click. */
     int      attack_sound;
+    int      attack_len;             /* 0 short, 1 medium, 2 long (noise) */
     double   attack_gain_db;         /* -60..+12, default -26 */
 
     bool     formant_hold;           /* hold formants under the shift (voice);

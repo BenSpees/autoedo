@@ -311,6 +311,7 @@ static void config_defaults (App *app)
     app->sample_err[0] = '\0';
     app->sample_dirty  = false;
     c->params.attack_sound   = 0;     /* off */
+    c->params.attack_len     = 0;     /* short: the classic chiff */
     c->params.attack_gain_db = -26.0; /* Xentar's shipped pick level */  /* jump, the classic harmonizer */
     c->params.harm_sustain = true;  /* the release means nothing without it */
     c->params.harm_hold    = false; /* momentary; never a saved state */
@@ -534,7 +535,7 @@ static void config_json (const App *app, char *out, size_t cap)
     snprintf (harm, sizeof (harm),
               ",\"harmOn\":%s,\"harmLock\":\"%s\",\"harmGainDb\":%.4g,"
               "\"harmSustain\":%s,\"harmHold\":%s,\"harmGlideMs\":%.4g,"
-              "\"attackSound\":\"%s\",\"attackGainDb\":%.4g,"
+              "\"attackSound\":\"%s\",\"attackLen\":\"%s\",\"attackGainDb\":%.4g,"
               "\"midiOctaves\":\"%s\",\"formantHold\":%s,\"formantSemitones\":%.4g,"
               "\"sampleMix\":%.4g,\"sampleVelocity\":%.4g,\"sampleRing\":%s,"
               "\"sampleMatch\":%.4g,\"strikeTilt\":%.4g,"
@@ -559,6 +560,9 @@ static void config_json (const App *app, char *out, size_t cap)
               (const char *[]){ "off", "noise", "pick", "click" }
                   [c->params.attack_sound >= 0 && c->params.attack_sound <= 3
                        ? c->params.attack_sound : 0],
+              (const char *[]){ "short", "medium", "long" }
+                  [c->params.attack_len >= 0 && c->params.attack_len <= 2
+                       ? c->params.attack_len : 0],
               c->params.attack_gain_db,
               c->params.midi_fold ? "nearest" : "held",
               c->params.formant_hold ? "true" : "false",
@@ -882,6 +886,9 @@ static bool config_apply_json (App *app, const char *json)
         c->params.attack_sound = strcmp (str, "noise") == 0 ? 1
                                : strcmp (str, "pick")  == 0 ? 2
                                : strcmp (str, "click") == 0 ? 3 : 0;
+    if (ae_json_get_string (json, "attackLen", str, sizeof (str)))
+        c->params.attack_len = strcmp (str, "long")   == 0 ? 2
+                             : strcmp (str, "medium") == 0 ? 1 : 0;
     if (ae_json_get_number (json, "attackGainDb", &num))
         c->params.attack_gain_db = num_clamp (num, -60.0, 12.0);
     if (ae_json_get_number (json, "sampleMix", &num))

@@ -750,6 +750,8 @@ void ae_corrector_reset (AeCorrector *p)
     p->primed         = false;
     p->silence_s      = 999.0; /* born into clear silence */
     p->ride_gain      = 1.0;
+    p->glide_pos       = 0.0;
+    p->glide_pos_valid = false;
     p->out_cents      = 0.0;
     p->centre_cents   = 0.0;
     p->expr_cents     = 0.0;
@@ -842,6 +844,7 @@ void ae_corrector_reset (AeCorrector *p)
     p->atk_last_dir   = 0;
     if (p->atk_gain <= 0.0)
         p->atk_gain = pow (10.0, -26.0 / 20.0); /* Xentar's shipped 5% */
+    p->atk_len = AE_ATK_LEN_SHORT;
     p->sus_len         = 0;
     p->sus_read        = 0;
     p->sus_mix         = 0.0;
@@ -1801,6 +1804,11 @@ void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin)
     p->atk_gain = gain_lin < 0.0 ? 0.0 : (gain_lin > 16.0 ? 16.0 : gain_lin);
 }
 
+void ae_corrector_set_attack_len (AeCorrector *p, int len)
+{
+    p->atk_len = len < 0 ? 0 : (len > 2 ? 2 : len);
+}
+
 /* Is there a voice in the path for the attack sound to sit under? BOTH
    sources, like the envelope: a shifted ghost's onset is as synthetic as a
    synth ghost's -- the shifter's latency and the mix ramp swallow the real
@@ -1883,8 +1891,14 @@ static void attack_trigger (AeCorrector *p)
     }
     else if (p->atk_mode == AE_ATK_NOISE)
     {
+        /* The burst's breath, by the LEN setting: SHORT is the classic
+           ~60 ms chiff, MEDIUM breathes ~1/4 s, LONG is a pad's opening
+           -- most of a second of noise fading out under the swell. */
+        const double tau = p->atk_len == AE_ATK_LEN_LONG   ? 0.240
+                         : p->atk_len == AE_ATK_LEN_MEDIUM ? 0.080
+                                                           : 0.020;
         p->atk_env   = 1.0;
-        p->atk_env_a = exp (-1.0 / (0.020 * p->fs)); /* ~60 ms audible */
+        p->atk_env_a = exp (-1.0 / (tau * p->fs));
         p->atk_hp_x  = p->atk_hp_y = 0.0;
     }
     else /* AE_ATK_CLICK */
@@ -2293,6 +2307,8 @@ static void run_detection (AeCorrector *p)
             {
                 p->centre_cents += dd; /* the note moved; follow it at once */
                 p->out_cents    += dd; /* and keep the correction continuous */
+                if (p->glide_pos_valid)
+                    p->glide_pos += dd; /* the slewer relabels with it */
                 p->in_transition = false;
                 /* A re-vote RELABELS the note: every stored pitch label
                    has to move with it or it now describes a note an
@@ -2678,7 +2694,10 @@ static void run_detection (AeCorrector *p)
                snap, unchanged. */
             if (! p->primed || glide_bias (p) <= 0.0
                 || p->silence_s >= 0.15)
-                p->out_cents = detected_cents;
+            {
+                p->out_cents       = detected_cents;
+                p->glide_pos_valid = false; /* the slewer re-seeds here */
+            }
             p->target_valid  = false;
             p->in_transition = false;
             p->sustain_s     = 0.0;
@@ -2905,25 +2924,42 @@ static void run_detection (AeCorrector *p)
         }
 
         /* GLIDE mode is a THEREMIN: from note start to a clear note
-           end, the output is one continuous seeker of its aim at the
-           GLIDE RATE -- whatever segment logic chose above (finger
-           follow, degree transition, retune hold), the seek time is
-           floored at the glide time. A real guitar slide is FRET-
-           STEPPED (the detected pitch itself stairsteps ~100 c per
-           fret dwell), and a fast follower faithfully reproduces the
-           stairs (field trace, glide 440: green treads under the
-           orange steps); the floor smears the rungs into the
-           continuous sweep the knob is asking for. Glide off: bias 0,
-           nothing changes. */
+           end, the output is one continuous seeker of its aim -- and it
+           seeks at CONSTANT SPEED, one EDO step per transitionMs (field:
+           "moves at a (smoothed) constant speed to any note, not a
+           slower speed to a closer note" -- an exponential tau does
+           exactly that wrong thing). The linear slewer glide_pos walks
+           toward the aim at that rate whatever segment logic chose
+           above (finger follow, degree transition, retune hold), and
+           out_cents rounds its corners with a short settle. The rate
+           bound is also what kills the re-pick swoops (field trace,
+           repeated notes): a pick transient that drags the quantizer
+           sharp for ~40 ms can move the output ~9 c, not a few hundred.
+           A real guitar slide stays covered too -- the fret rungs smear
+           into one constant-speed sweep. Glide off: bias 0, the old
+           retune/transition taus stand untouched. */
+        if (glide_bias (p) > 0.0)
         {
-            const double gfloor = glide_bias (p) * p->transition_ms;
-            if (tau_ms < gfloor)
-                tau_ms = gfloor;
+            const double step_c = ae_edo_step_cents_ex (p->edo, period);
+            const double rate   = step_c / (p->transition_ms * 0.001);
+            const double dmax   = rate * elapsed;
+            if (! p->glide_pos_valid)
+            {
+                p->glide_pos       = p->out_cents;
+                p->glide_pos_valid = true;
+            }
+            p->glide_pos += dclamp (eff_cents - p->glide_pos, -dmax, dmax);
+            p->out_cents += (p->glide_pos - p->out_cents)
+                          * (1.0 - exp (-elapsed / 0.030));
         }
-
-        const double tau_sec = tau_ms / 1000.0;
-        const double alpha   = (tau_sec <= 0.0) ? 1.0 : (1.0 - exp (-elapsed / tau_sec));
-        p->out_cents += (eff_cents - p->out_cents) * alpha;
+        else
+        {
+            p->glide_pos_valid = false;
+            const double tau_sec = tau_ms / 1000.0;
+            const double alpha   = (tau_sec <= 0.0)
+                ? 1.0 : (1.0 - exp (-elapsed / tau_sec));
+            p->out_cents += (eff_cents - p->out_cents) * alpha;
+        }
 
         /* The shifter takes semitones. Correction alone stays near 1; the
            lead transpose can be octaves, so the clamp is the same +-36 the
