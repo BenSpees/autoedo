@@ -1668,6 +1668,120 @@ static void api_config_post (App *app, const char *body, AeHttpResponse *resp)
     api_status (app, resp);
 }
 
+/* AUDIO LOG dump (field ask: "record an audio log... send you the audio
+   that had a particular issue in a package to debug"): write the last ~20 s
+   of raw engine input as a float32 WAV next to the config, plus a .json
+   snapshot of the config itself, and answer with both paths. The package
+   replays offline through ae_corrector_process exactly as it sounded. */
+static void api_debuglog (App *app, AeHttpResponse *resp)
+{
+    AeAudioEngine *eng = ae_app_engine_live (app);
+    if (eng == NULL)
+    {
+        resp->status = 503;
+        resp->content_type = "application/json";
+        ae_http_resp_printf (resp, "{\"error\":\"engine not running\"}");
+        return;
+    }
+    AeEngineStatus st;
+    ae_audio_engine_get_status (eng, &st);
+    const double sr = st.input_rate > 0.0 ? st.input_rate : 48000.0;
+    const int max = (int) (20.0 * sr);
+    float *buf = malloc (sizeof (float) * (size_t) max);
+    if (buf == NULL)
+    {
+        resp->status = 500;
+        resp->content_type = "application/json";
+        ae_http_resp_printf (resp, "{\"error\":\"out of memory\"}");
+        return;
+    }
+    const int n = ae_audio_engine_debug_log (eng, buf, max);
+
+    /* Paths: beside the config, stamped. */
+    char cfg[1024], dir[1024], wav[1200], js[1200], stamp[32];
+    config_path (app, cfg, sizeof (cfg));
+    snprintf (dir, sizeof (dir), "%s", cfg);
+    char *slash = strrchr (dir, '/');
+    if (slash != NULL)
+        *slash = '\0';
+    else
+        snprintf (dir, sizeof (dir), ".");
+    const time_t now = time (NULL);
+    struct tm tmv;
+#ifdef _WIN32
+    localtime_s (&tmv, &now);
+#else
+    localtime_r (&now, &tmv);
+#endif
+    strftime (stamp, sizeof (stamp), "%Y%m%d-%H%M%S", &tmv);
+    snprintf (wav, sizeof (wav), "%s/autoedo-log-%s.wav", dir, stamp);
+    snprintf (js, sizeof (js), "%s/autoedo-log-%s.json", dir, stamp);
+
+    /* float32 WAV, mono, at the engine's input rate. */
+    bool ok = n > 0;
+    if (ok)
+    {
+        FILE *f = fopen (wav, "wb");
+        ok = f != NULL;
+        if (ok)
+        {
+            const uint32_t data = (uint32_t) n * 4u;
+            const uint32_t rate = (uint32_t) sr;
+            const uint32_t bps  = rate * 4u;
+            uint8_t h[58] = "RIFF____WAVEfmt \x12\0\0\0\x03\0\x01\0";
+            uint32_t riff = 50 + data;
+            memcpy (h + 4, &riff, 4);
+            memcpy (h + 24, &rate, 4);
+            memcpy (h + 28, &bps, 4);
+            h[32] = 4; h[33] = 0; h[34] = 32; h[35] = 0;
+            h[36] = 0; h[37] = 0; /* cbSize = 0 */
+            memcpy (h + 38, "fact\x04\0\0\0", 8);
+            memcpy (h + 46, &((uint32_t){ (uint32_t) n }), 4);
+            memcpy (h + 50, "data", 4);
+            memcpy (h + 54, &data, 4);
+            ok = fwrite (h, 1, 58, f) == 58
+              && fwrite (buf, 4, (size_t) n, f) == (size_t) n;
+            fclose (f);
+        }
+    }
+    free (buf);
+
+    /* Config snapshot: copy the config file beside it. */
+    bool cfg_ok = false;
+    {
+        FILE *in = fopen (cfg, "rb");
+        if (in != NULL)
+        {
+            FILE *out = fopen (js, "wb");
+            if (out != NULL)
+            {
+                char tmp[4096];
+                size_t got;
+                cfg_ok = true;
+                while ((got = fread (tmp, 1, sizeof (tmp), in)) > 0)
+                    if (fwrite (tmp, 1, got, out) != got)
+                    {
+                        cfg_ok = false;
+                        break;
+                    }
+                fclose (out);
+            }
+            fclose (in);
+        }
+    }
+
+    resp->status = ok ? 200 : 500;
+    resp->content_type = "application/json";
+    if (ok)
+        ae_http_resp_printf (resp,
+            "{\"wav\":\"%s\",\"config\":\"%s\",\"configCopied\":%s,"
+            "\"seconds\":%.1f}",
+            wav, js, cfg_ok ? "true" : "false", (double) n / sr);
+    else
+        ae_http_resp_printf (resp,
+            "{\"error\":\"nothing logged yet or the file would not write\"}");
+}
+
 static void handle_request (void *user, const char *method, const char *path,
                             const char *body, size_t body_len, AeHttpResponse *resp)
 {
@@ -1746,6 +1860,11 @@ static void handle_request (void *user, const char *method, const char *path,
         atomic_store_explicit (&app->follow_in_ms, mono_ms (),
                                memory_order_relaxed);
         ae_http_resp_printf (resp, "{\"ok\":true}");
+        return;
+    }
+    if (strcmp (method, "GET") == 0 && strcmp (path, "/api/debuglog") == 0)
+    {
+        api_debuglog (app, resp);
         return;
     }
     if (strcmp (method, "POST") == 0 && strcmp (path, "/api/restart") == 0)

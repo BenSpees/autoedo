@@ -511,7 +511,12 @@ typedef struct
                                its rise-break is +30 c instead of +60, so
                                a slow deep vibrato caught in a trough gets
                                its note back at the next peak */
-    bool   rel_rise_pend;   /* the latch's +60 c rise test saw ONE hop up;
+    bool   rel_rise_pend;
+    bool   rel_fall_pend;        /* fall-break's one confirming hop */
+    int    rel_fall_hold;        /* hops the verdict faces stand down after a
+                                    fall-break, refreshed while the pitch
+                                    still travels: a down-slide or falling
+                                    legato is a finger, not a dying string */   /* the latch's +60 c rise test saw ONE hop up;
                                a single tail glitch must not un-freeze a
                                release, so the break waits for the next
                                hop to confirm the note really rose */
@@ -747,6 +752,15 @@ typedef struct
                                     3-hop median (single-hop YIN spikes never
                                     reach the audible expression) */
     int    expr_med_n;           /* hops since the note started (median warmup) */
+    /* AUDIO LOG (field ask: "record an audio log... to send you the audio
+       that had a particular issue"): a rolling ring of the RAW INPUT, so a
+       moment of bad tracking can be dumped and replayed through the engine
+       offline, exactly as it sounded. ~20 s; written on the audio thread,
+       read torn-at-the-seam by the debug endpoint -- a debug lane, not an
+       audio path. */
+    float *dbg_ring;
+    int    dbg_len;
+    long long dbg_w;
     double note_peak_rms;        /* the current note's peak frame RMS: a
                                     re-voice ~22 dB under it is the ring-down
                                     of the note that just ended, not a note */
@@ -1218,6 +1232,12 @@ void ae_corrector_set_attack (AeCorrector *p, int mode, double gain_lin);
 
 /* Attack NOISE length (audio thread, between blocks): AE_ATK_LEN_*. */
 void ae_corrector_set_attack_len (AeCorrector *p, int len);
+
+/* AUDIO LOG reader (control thread): copy up to `max` of the most recent
+   logged input samples into `out`, oldest first. Returns the count. The
+   ring is live under it -- torn at the seam by design; this is the debug
+   lane, not the audio path. */
+int ae_corrector_debug_log (const AeCorrector *p, float *out, int max);
 
 /* Harmony portamento in milliseconds (audio thread, between blocks): the
    time constant a ghost takes to slide to a new target when the lead moves.

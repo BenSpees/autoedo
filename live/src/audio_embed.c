@@ -230,6 +230,14 @@ double ae_audio_engine_env (AeAudioEngine *e)
     return e == NULL ? 0.0 : (double) ae_corrector_env (&e->corrector);
 }
 
+int ae_audio_engine_debug_log (AeAudioEngine *e, float *out, int max)
+{
+    if (e == NULL)
+        return 0;
+    return ae_corrector_debug_log (&e->corrector, out, max);
+}
+
+
 double ae_audio_engine_follow_level (AeAudioEngine *e)
 {
     return e == NULL ? 1.0

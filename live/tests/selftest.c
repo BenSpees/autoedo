@@ -2177,7 +2177,12 @@ static void test_slide_glides_not_staircases (void)
         ae_corrector_prepare (p, 48000.0, 512, 0.0, 0.0, AE_SHIFT_QUALITY_BALANCED);
         ae_corrector_set_edo (p, 12);
         ae_corrector_set_retune_ms (p, 10.0);
-        ae_corrector_set_transition_ms (p, 300.0);
+        /* The SLIDE leg runs under full glide; the JUMP control runs at
+           glide OFF -- under glide an energy-less jump now CONNECTS by
+           design (field rule: while gliding, only a real pick or clear
+           silence re-articulates), so the strike the control asserts
+           belongs to the unglided contract. */
+        ae_corrector_set_transition_ms (p, c == 0 ? 300.0 : 50.0);
         {
             int srcs[AE_HARM_VOICES];
             for (int v = 0; v < AE_HARM_VOICES; ++v) srcs[v] = AE_HARM_SRC_DEFAULT;

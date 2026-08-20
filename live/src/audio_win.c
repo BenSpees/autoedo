@@ -755,6 +755,12 @@ double ae_audio_engine_env (AeAudioEngine *e)
     return (double) ae_corrector_env (&e->corrector);
 }
 
+int ae_audio_engine_debug_log (AeAudioEngine *e, float *out, int max)
+{
+    return ae_corrector_debug_log (&e->corrector, out, max);
+}
+
+
 double ae_audio_engine_follow_level (AeAudioEngine *e)
 {
     return atomic_load_explicit (&e->params.follow_level, memory_order_relaxed);

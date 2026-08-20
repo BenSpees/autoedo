@@ -662,11 +662,18 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     p->buf_mask = p->buf_size - 1;
 
     free (p->in_buf);
+    free (p->dbg_ring);
+    p->dbg_ring = NULL;
     free (p->frame);
     free (p->in_block);
     free (p->wet_buf);
     free (p->voice_buf);
     p->in_buf    = calloc ((size_t) p->buf_size, sizeof (float));
+    /* The audio log's rolling input ring (~20 s). */
+    free (p->dbg_ring);
+    p->dbg_len  = (int) (20.0 * p->fs);
+    p->dbg_ring = calloc ((size_t) p->dbg_len, sizeof (float));
+    p->dbg_w    = 0;
     p->frame     = calloc ((size_t) frame_alloc, sizeof (float));
     p->in_block  = calloc ((size_t) p->max_block, sizeof (float));
     p->wet_buf   = calloc ((size_t) p->max_block, sizeof (float));
@@ -867,6 +874,8 @@ void ae_corrector_reset (AeCorrector *p)
     p->rel_latch_att   = 0;
     p->rel_out_expr    = 0.0;
     p->rel_rise_pend   = false;
+    p->rel_fall_pend   = false;
+    p->rel_fall_hold   = 0;
     p->rel_latch_droop = false;
     p->droop_run       = 0;
     p->rel_note_age    = 0;
@@ -998,6 +1007,8 @@ void ae_corrector_free (AeCorrector *p)
 {
     ae_polyf0_free (&p->polyf0);
     free (p->in_buf);
+    free (p->dbg_ring);
+    p->dbg_ring = NULL;
     free (p->frame);
     free (p->in_block);
     free (p->wet_buf);
@@ -1818,6 +1829,19 @@ void ae_corrector_set_attack_len (AeCorrector *p, int len)
     p->atk_len = len < 0 ? 0 : (len > 2 ? 2 : len);
 }
 
+int ae_corrector_debug_log (const AeCorrector *p, float *out, int max)
+{
+    if (p->dbg_ring == NULL || p->dbg_len <= 0 || out == NULL || max <= 0)
+        return 0;
+    const long long have = p->dbg_w < (long long) p->dbg_len
+                               ? p->dbg_w : (long long) p->dbg_len;
+    int n = (int) (have < (long long) max ? have : (long long) max);
+    long long start = p->dbg_w - n;
+    for (int i = 0; i < n; ++i)
+        out[i] = p->dbg_ring[(start + i) % p->dbg_len];
+    return n;
+}
+
 /* Is there a voice in the path for the attack sound to sit under? BOTH
    sources, like the envelope: a shifted ghost's onset is as synthetic as a
    synth ghost's -- the shifter's latency and the mix ramp swallow the real
@@ -2335,6 +2359,20 @@ static void run_detection (AeCorrector *p)
                     p->revote_hop  = true;
                 }
             }
+            /* CONTINUITY carries the whole AUDIBLE, ride included. The
+               centre snap below zeroes the expression ride, and mid-
+               gesture the ride can be most of the pitch (the centre lags
+               a travelling finger by its whole chase) -- so what rode
+               must fold into the seeker, or every blink re-voice jumps
+               by the ridden amount (probe: a mid-slide blink hopped the
+               output +65 c). Only on the continuity path -- a clear
+               note end re-seeds instead, at the out snap below. */
+            if (p->primed && glide_bias (p) > 0.0 && p->silence_s < 0.15)
+            {
+                p->out_cents += p->expr_cents * p->expression * p->ride_gain;
+                if (p->glide_pos_valid)
+                    p->glide_pos = p->out_cents;
+            }
             p->centre_cents = detected_cents;
             /* A NEW NOTE gets fresh release evidence. The ring held the
                PREVIOUS note's body, and the verdict below compared the
@@ -2562,7 +2600,33 @@ static void run_detection (AeCorrector *p)
                     p->droop_run = 0;
             }
             const bool droop_c = p->rel_note_age >= 36 && p->droop_run >= 28;
-            const bool inst = fast_c || slow_c || lift_c || droop_c;
+            bool inst = fast_c || slow_c || lift_c || droop_c;
+            /* Under GLIDE the faces stand down while the seeker is still
+               TRAVELLING (the output far from the finger): the theremin
+               arrives late by design, and a latch mid-catch-up froze the
+               output half-way down a big slide -- forever, once the
+               finger stopped refreshing the fall-hold (field: "finger
+               slides work up but not down... they get stuck"). A real
+               release's droop never opens a 50 c gap between the finger
+               and the seeker; a travelling gesture always does. */
+            if (glide_bias (p) > 0.0
+                && fabs (detected_cents - p->out_cents) > 50.0)
+                inst = false;
+            /* After a FALL-BREAK the faces stand down while the pitch is
+               still travelling -- otherwise they re-latched at the new
+               pitch within a hop (the slide still reads as a lift) and
+               the follow ratcheted in 40 c freezes. Motion keeps the
+               stand-down alive; ~200 ms after the finger stops, the
+               faces re-arm for the note's real release. */
+            if (p->rel_fall_hold > 0)
+            {
+                --p->rel_fall_hold;
+                if ((p->prev_pair_valid
+                     && fabs (detected_cents - p->prev_det_cents) > 2.0)
+                    || fabs (detected_cents - p->out_cents) > 50.0)
+                    p->rel_fall_hold = 40;
+                inst = false;
+            }
             /* LATCHED until the note actually ends. The windows above are
                verdicts about the level's RATE of fall, and a lifted string
                settles: after the first collapse the ratios drift back over
@@ -2613,6 +2677,38 @@ static void run_detection (AeCorrector *p)
             }
             else
                 p->rel_rise_pend = false;
+            /* The FALL breaks it too: a "release" whose pitch keeps
+               travelling well past the latch point is a FINGER, not a
+               dying string -- a down-slide or descending legato tripped
+               the lift face (flat of centre, decaying level: exactly a
+               slide's signature) and froze the output mid-gesture
+               (field: "finger slides work up but not down... they get
+               stuck, especially in legato"). Under GLIDE the note is
+               heavily presumed to be still gliding (the field rule:
+               only clear silence ends it), so the bar leans down with
+               the bias; one confirming hop, like the rise. On the
+               break, the seeker resumes FROM the frozen audible, so
+               nothing jumps -- it just starts following the finger
+               again. */
+            if (p->rel_latch
+                && detected_cents < p->rel_latch_cents
+                                        - (90.0 - 50.0 * glide_bias (p)))
+            {
+                if (p->rel_fall_pend)
+                {
+                    p->rel_latch     = false;
+                    p->rel_fall_pend = false;
+                    const double ride_now =
+                        p->expr_cents * p->expression * p->ride_gain;
+                    p->out_cents = p->rel_out_expr - ride_now;
+                    if (p->glide_pos_valid)
+                        p->glide_pos = p->out_cents;
+                }
+                else
+                    p->rel_fall_pend = true;
+            }
+            else
+                p->rel_fall_pend = false;
             p->rel_collapse = inst || p->rel_latch;
             /* ...and it closes a slide that is already open. Gating only
                the REFRESH left a standing slide riding straight through a
@@ -3087,7 +3183,15 @@ static void run_detection (AeCorrector *p)
            A real guitar slide stays covered too -- the fret rungs smear
            into one constant-speed sweep. Glide off: bias 0, the old
            retune/transition taus stand untouched. */
-        if (glide_bias (p) > 0.0)
+        if (p->rel_collapse)
+        {
+            /* The release froze the aim; the seeker holds WITH it.
+               Left seeking, out drifted toward the stale grid all
+               through the freeze and every unlatch (a blink, a rise,
+               a fall-break) resumed from somewhere the audience never
+               heard -- a jump instead of a resume. */
+        }
+        else if (glide_bias (p) > 0.0)
         {
             const double step_c = ae_edo_step_cents_ex (p->edo, period);
             const double rate   = step_c / (p->transition_ms * 0.001);
@@ -3436,6 +3540,16 @@ harmony_done: ;
                                memory_order_relaxed);
         /* The release the latch was riding out is over: the next voiced
            hop is a new note's, and it must track from its first sample. */
+        if (p->rel_collapse)
+        {
+            /* The freeze ends with the note: resume the seeker FROM the
+               frozen audible, or the next fresh note starts its glide
+               from a pitch the audience never heard (the +15 c hop at
+               every mid-slide blink). */
+            p->out_cents = p->rel_out_expr;
+            if (p->glide_pos_valid)
+                p->glide_pos = p->out_cents;
+        }
         p->rel_latch = false;
         p->rel_collapse = false;
         p->droop_run = 0;
@@ -4031,7 +4145,16 @@ static void steel_process (AeCorrector *p, bool voiced, long lead_deg,
         }
         else if (p->steel_deg != AE_HARM_DEG_OFF
                  && glide_bias (p) > 0.0
-                 && p->att_seq == p->steel_att)
+                 && (p->att_seq == p->steel_att
+                     /* ...or the "attack" carries no pick ENERGY: a
+                        hammer-on bumps att_seq through the pitch-jump
+                        re-arm, and the drone re-struck AND re-registered
+                        on it (field: "retriggers both... and shouldn't
+                        move the drone to a different octave while
+                        gliding"). A hammer is a connected gesture; only
+                        a real pick's fast/slow spike re-registers. */
+                     || p->atk_fast
+                            <= (1.0 + 0.3 * glide_bias (p)) * p->atk_slow))
         {
             /* CONNECTED gesture under GLIDE: the lead is travelling
                across the root class with no new attack, and the classic
@@ -4971,6 +5094,18 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                     p->smp_lead_deg_valid = false;
             }
             p->att_seq_seen = p->att_seq;
+            /* GLIDE presumes CONNECTED: a degree-path strike with no
+               pick ENERGY behind it is a hammer-on or a legato step the
+               glide should carry (field: "hammering on a higher note --
+               it correctly bends to the new note, but retriggers").
+               The energy bar rises with the bias: glide off keeps
+               today's strikes exactly; at full glide only a real pick
+               (its fast/slow spike) re-articulates, and everything else
+               is the theremin's one continuous note. */
+            if (want_deg && glide_bias (p) > 0.0
+                && p->atk_fast
+                       <= (1.0 + 0.3 * glide_bias (p)) * p->atk_slow)
+                want_deg = false;
             if ((want || want_deg) && p->smp_guard <= 0 && hz > 0.0)
             {
                 p->smp_corr_shift = 0.0;
@@ -5359,6 +5494,21 @@ void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *ha
         return;
     if (harm_l == NULL || harm_r == NULL)
         harm_l = harm_r = NULL;
+
+    /* The audio log: the raw input, before anything touches it. */
+    if (p->dbg_ring != NULL && p->dbg_len > 0)
+    {
+        int logged = 0;
+        while (logged < num_samples)
+        {
+            const int at = (int) (p->dbg_w % p->dbg_len);
+            int m = p->dbg_len - at;
+            if (m > num_samples - logged) m = num_samples - logged;
+            memcpy (p->dbg_ring + at, mono + logged, sizeof (float) * (size_t) m);
+            p->dbg_w += m;
+            logged   += m;
+        }
+    }
 
     /* Sub-chunk so a block larger than the prepared maximum can never
        overflow the ring buffers. */

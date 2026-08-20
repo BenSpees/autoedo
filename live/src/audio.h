@@ -401,6 +401,10 @@ void ae_audio_engine_set_follow (AeAudioEngine *e, int note, double level);
 /* This instance's own envelope (linear peak estimate, gated to 0 below
    the voicing gate) -- what a FOLLOW sender transmits. */
 double ae_audio_engine_env (AeAudioEngine *e);
+
+/* AUDIO LOG: copy up to `max` of the last ~20 s of raw engine input into
+   `out` (oldest first); returns the count. Debug lane -- see corrector.h. */
+int ae_audio_engine_debug_log (AeAudioEngine *e, float *out, int max);
 /* The follow level currently applied (receiver side; 1 = neutral). */
 double ae_audio_engine_follow_level (AeAudioEngine *e);
 
