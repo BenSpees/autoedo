@@ -1615,6 +1615,22 @@ nothing but scale semantics; `rootCents` is now inert in tuning math
 (grid trims belong to `refNoteHz`). Verified: `anchorHz` holds 261.626
 through rootNote 0 → 2 → 9 with rootCents 30.
 
+**Follow-on: the root is now `rootDeg`, an EDO STEP (0…edo−1).** Once the
+root stopped anchoring the grid, the only thing left translating it was
+the mapping onto the grid itself — `round(edo · rootNote / 12)` — and that
+mapping is wrong wherever an EDO's naturals are unevenly spread. Measured
+against the note-name tables the rig generates from Xentar it misplaces 54
+of the 240 class/EDO pairs, 21 of them naturals: in 22-EDO it puts E on 7
+and B on 20, where the tables say 8 and 21, a comma flat each. It also
+cannot ADDRESS most of a fine grid — 22-EDO has 22 possible tonics and
+twelve names for them.
+
+A step needs no mapping, so there is nothing left to get wrong. `rootNote`
+is still parsed (converted by the old proportional rule, which is no worse
+than what an old client already had) and still echoed alongside `rootDeg`
+for old readers, but it is lossy in both directions and no current client
+should use it. `steel_root_deg` is now simply the root.
+
 Treebrain consequences:
 - Your "the grid hangs off the ROOT, not off A" badge is now obsolete in
   its warning role — after this build the grid hangs off the REFERENCE,

@@ -74,7 +74,23 @@ struct AeApp
     AeEngineConfig  engine_cfg;
     /* UI-facing tuning-reference fields; params.ref_hz / period_cents and
        the detection range are derived from these in config_sync(). */
-    int             root_note;     /* 0..11, 0 = C (degree 0 of the grid) */
+    /* The scale's tonic, as an EDO STEP (0..edo-1). Stored the way the rest
+       of the format already stores roots -- a harmony chord's `root` is an
+       EDO pitch class too -- so nothing has to translate it.
+
+       It used to be a 12-tone class, 0..11, and everything downstream had to
+       map it onto the grid with round(edo * root / 12). That is wrong
+       wherever the naturals are not evenly spread, which is everywhere
+       except 12: measured against this rig's own note tables it misplaces 54
+       of the 240 class/EDO pairs, 21 of them NATURALS -- in 22-EDO it puts E
+       on 7 and B on 21 one step low, a comma flat, and in 20- and 27-EDO it
+       misses eight of the twelve. A 12-class root also cannot ADDRESS most
+       of a fine grid: 22-EDO has 22 possible tonics and this could name 12.
+
+       A step needs no table and no formula, so there is nothing left to get
+       wrong. `rootNote` is still accepted on the wire for old clients (see
+       config_apply) and still echoed. */
+    int             root_deg;      /* 0..edo-1, 0 = the reference (C) */
     double          root_cents;    /* fine offset, -50..+50 */
     double          ref_a4;        /* the absolute pitch anchor, carried as
                                       the A4 of a 12-EDO grid on the same
@@ -251,7 +267,7 @@ static void config_defaults (App *app)
     c->params.lead_shift_steps = 0;
     c->params.output_gain_db  = 0.0;
 
-    app->root_note     = 0;      /* C */
+    app->root_deg      = 0;      /* the reference degree */
     app->root_cents    = 0.0;
     app->ref_a4        = 440.0;
     app->ref_note      = 0;      /* state the standard as C, not as A */
@@ -363,10 +379,13 @@ static void config_sync (App *app)
     c->params.ref_hz = app->ref_a4
                      * pow (2.0, ((double) app->ref_note - 9.0) / 12.0) / 16.0;
     c->params.period_cents = 1200.0 + app->stretch_cents;
-    /* STEEL's root class, mapped into engine degrees the same way the
-       rig maps chart roots: round(edo * rootNote / 12). */
+    /* STEEL's root, which is just the root: it is already an engine degree,
+       so there is nothing to map. This used to be
+       round(edo * rootNote / 12), which put the steel drone a comma off the
+       scale's own tonic for any root the formula misplaces -- E and B in
+       22-EDO among them, so a D-major song's relative minor droned flat. */
     c->params.steel_root_deg = c->params.edo > 0
-        ? (int) ((long) (c->params.edo * app->root_note + 6) / 12 % c->params.edo)
+        ? ((app->root_deg % c->params.edo) + c->params.edo) % c->params.edo
         : 0;
     /* the CURRENT instrument's sampleGainDb trim rides into params */
     c->params.sample_trim_db = 0.0;
@@ -425,7 +444,12 @@ static void config_json (const App *app, char *out, size_t cap)
                  compounding across restarts until the anchor-residue
                  warning tripped on a rig nobody had touched. A reference
                  must survive its own echo byte-exactly. */
-              "\"rootNote\":%d,\"rootCents\":%.10g,\"refA4\":%.10g,"
+              /* `rootDeg` is the root. `rootNote` is the legacy 12-class
+                 spelling of it, derived back so an older reader still sees
+                 something sane -- it is lossy by construction (a fine grid
+                 has more tonics than twelve names) and no current reader
+                 should use it. */
+              "\"rootDeg\":%d,\"rootNote\":%d,\"rootCents\":%.10g,\"refA4\":%.10g,"
               "\"refNote\":%d,\"refNoteHz\":%.10g,"
               "\"stretchCents\":%.6g,\"range\":\"%s\",\"quality\":\"%s\","
               "\"detectMinHz\":%.6g,\"detectMaxHz\":%.6g,"
@@ -436,7 +460,13 @@ static void config_json (const App *app, char *out, size_t cap)
               c->params.edo, c->params.retune_ms, c->params.transition_ms,
               c->params.amount, c->params.tolerance_cents, c->params.stickiness,
               c->params.humanize, c->params.expression,
-              app->root_note, app->root_cents, app->ref_a4,
+              app->root_deg,
+              /* the lossy way back, for old readers only */
+              c->params.edo > 0
+                  ? (int) ((long) (12 * app->root_deg + c->params.edo / 2)
+                           / c->params.edo % 12)
+                  : app->root_deg % 12,
+              app->root_cents, app->ref_a4,
               app->ref_note,
               app->ref_a4 * pow (2.0, ((double) app->ref_note - 9.0) / 12.0),
               app->stretch_cents, app->range_name, app->quality_name,
@@ -698,8 +728,30 @@ static bool config_apply_json (App *app, const char *json)
         c->params.expression = num_clamp (num, 0.0, 1.0);
     if (ae_json_get_number (json, "humanize", &num))
         c->params.humanize = num_clamp (num, 0.0, 1.0);
+    /* The root, as an EDO STEP. This is the authoritative field and needs no
+       translation: it is already in the units everything downstream counts
+       in, which is the whole point of storing it this way.
+
+       `rootNote` is the LEGACY 12-tone class, still accepted so an older
+       client keeps working. Converting it needs a note-name table the engine
+       does not have -- naming is the rig's job, and the rig migrates a saved
+       rootNote off its own tables before it ever gets here -- so the fallback
+       is the proportional placement this engine always used. It is wrong
+       wherever the naturals are unevenly spread (E and B in 22-EDO among
+       them) and it is kept only because it is no worse than what an old
+       client already had. Parsed FIRST, so a POST carrying both lands on the
+       specific one. */
     if (ae_json_get_number (json, "rootNote", &num))
-        app->root_note = (int) num_clamp (num, 0.0, 11.0);
+    {
+        const int cls = (int) num_clamp (num, 0.0, 11.0);
+        const int edo = c->params.edo > 0 ? c->params.edo : 12;
+        app->root_deg = (int) ((long) (edo * cls + 6) / 12 % edo);
+    }
+    if (ae_json_get_number (json, "rootDeg", &num))
+    {
+        const int edo = c->params.edo > 0 ? c->params.edo : 12;
+        app->root_deg = ((int) num_clamp (num, -4096.0, 4096.0) % edo + edo) % edo;
+    }
     if (ae_json_get_number (json, "rootCents", &num))
         app->root_cents = num_clamp (num, -50.0, 50.0);
     if (ae_json_get_number (json, "refA4", &num))
