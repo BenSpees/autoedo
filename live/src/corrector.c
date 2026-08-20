@@ -5377,9 +5377,21 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             any_synth = true;
         else if (src == AE_HARM_SRC_SAMPLE)
         {
-            /* A sample voice is a sample voice: the mix's other side is
-               the latency-free dry at delivery, not a shifted copy, so
-               the shifter stays parked. */
+            /* For the LEAD the mix's other side is the latency-free dry at
+               delivery, so its shifter stays parked -- but a HARMONY voice
+               has no dry side. It sings an INTERVAL: there is no unshifted
+               copy of a note nobody played, so the shifter IS the other
+               half of its crossfade, which is why the pass below feeds a
+               sample voice whenever smp_mix < 1. Counting it as "nothing
+               to shift" regardless of the mix made that pass unreachable
+               once every voice was sample-sourced -- the sample side muted
+               by g_smp at mix 0, the shifted side never rendered, and the
+               harmony simply absent (field: "sample mix at 0% on guitar
+               with harmony on, I hear no harmony; turn it up and I hear
+               sample harmony -- never guitar harmony"). Agree with that
+               pass, or the mix control has a dead half. */
+            if (p->smp_mix < 1.0)
+                any_shift = true;
         }
         else
             any_shift = true;
