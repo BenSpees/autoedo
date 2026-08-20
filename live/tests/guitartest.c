@@ -59,6 +59,12 @@ typedef struct
     double vib_cents;  /* != 0: +/- this much at 5.5 Hz, finger vibrato */
     double swell_s;    /* > 0: gain ramps 0 -> vel over this long (volume
                           swell from silence -- no pick transient at all) */
+    double bend_j;     /* > 0: a bend JOURNEY -- up this many cents over the
+                          first quarter of the note, held a quarter, released
+                          over a quarter, home for the last. One pick. */
+    int    leg_to;     /* with leg_frac: hammer-on / pull-off target degree */
+    double leg_frac;   /* > 0: pitch steps to leg_to at this fraction of the
+                          note, waveform continuous -- no pick transient */
 } GtNote;
 
 typedef struct
@@ -69,6 +75,7 @@ typedef struct
     double        tail_s;
     double        noise_db;    /* 0 = clean */
     bool          report_only;
+    int           want_strikes; /* 0 = one per note; else this exactly */
 } GtScore;
 
 typedef struct
@@ -94,13 +101,15 @@ typedef struct
     int    lat_n;
 } GtMetrics;
 
-#define N(d,s,du)        { d, 0.0, s, du, false, d, 0.0 }
-#define NOFF(d,off,s,du) { d, off, s, du, false, d, 0.0 }
-#define NRING(d,s,du)    { d, 0.0, s, du, true,  d, 0.0 }
-#define NSLIDE(d,to,s,du){ d, 0.0, s, du, false, to, 0.0 }
-#define NSOFT(d,s,du)    { d, 0.0, s, du, false, d, 0.12 }
-#define NVIB(d,s,du,v)   { d, 0.0, s, du, false, d, 0.0, v, 0.0 }
-#define NSWELL(d,s,du,sw){ d, 0.0, s, du, false, d, 0.0, 0.0, sw }
+#define N(d,s,du)        { d, 0.0, s, du, false, d, 0.0, 0.0, 0.0, 0.0, 0, 0.0 }
+#define NOFF(d,off,s,du) { d, off, s, du, false, d, 0.0, 0.0, 0.0, 0.0, 0, 0.0 }
+#define NRING(d,s,du)    { d, 0.0, s, du, true,  d, 0.0, 0.0, 0.0, 0.0, 0, 0.0 }
+#define NSLIDE(d,to,s,du){ d, 0.0, s, du, false, to, 0.0, 0.0, 0.0, 0.0, 0, 0.0 }
+#define NSOFT(d,s,du)    { d, 0.0, s, du, false, d, 0.12, 0.0, 0.0, 0.0, 0, 0.0 }
+#define NVIB(d,s,du,v)   { d, 0.0, s, du, false, d, 0.0, v, 0.0, 0.0, 0, 0.0 }
+#define NSWELL(d,s,du,sw){ d, 0.0, s, du, false, d, 0.0, 0.0, sw, 0.0, 0, 0.0 }
+#define NBENDJ(d,s,du,b) { d, 0.0, s, du, false, d, 0.0, 0.0, 0.0, b, 0, 0.0 }
+#define NLEG(d,to,s,du)  { d, 0.0, s, du, false, d, 0.0, 0.0, 0.0, 0.0, to, 0.5 }
 
 static const GtNote k_low[]    = { N(-36,0.2,0.5), N(-34,0.95,0.5), N(-32,1.7,0.5), N(-30,2.45,0.5),
                                    N(-28,3.2,0.5), N(-26,3.95,0.5), N(-24,4.7,0.5), N(-22,5.45,0.5) };
@@ -133,32 +142,61 @@ static const GtNote k_trem[]   = { N(-6,0.2,0.14), N(-6,0.36,0.14), N(-6,0.52,0.
    the legacy 2.5x onset route fires spurious pulses on these today
    (measured); the floor route stays quiet. Tracks that behaviour. */
 static const GtNote k_swell[]  = { NSWELL(-10,0.2,1.2,0.6), NSWELL(-2,1.8,2.0,1.5) };
+/* The bend JOURNEY (field: "bend a string a whole step up, have it track,
+   bend back down, and return to original -- a whole step bend is 218
+   cents in 22-edo"): one pick, +4 EDO steps over the first quarter,
+   held, released, home. Detection must ride the finger the whole way
+   and the bend must never retrigger -- strikes == picks. Duration 1.2 s
+   keeps the home stretch inside honest sustain: at 1.6 s the string has
+   decayed far enough that the octave harmonic outweighs the fundamental
+   and YIN reads +1200 c -- that is ring-down behaviour (#67/#69), not
+   bend tracking, and it is measured by the ring-down scores instead. */
+static const GtNote k_bendj[]  = { NBENDJ(-10,0.2,1.2,4*STEP), NBENDJ(4,1.8,1.2,4*STEP),
+                                   NBENDJ(-24,3.4,1.2,4*STEP) };
+/* Hammer-ons / pull-offs: the pitch steps mid-note with the waveform
+   continuous -- no pick transient. The detector must land on the new
+   pitch; what the sampler does with it is reported first. */
+static const GtNote k_leg[]    = { NLEG(-14,-10,0.2,0.9), NLEG(-6,-2,1.4,0.9),
+                                   NLEG(0,-4,2.6,0.9), NLEG(10,6,3.8,0.9) };
 
 static const GtScore k_scores[] = {
-    { "low walk  E2..C#3", k_low,    8, 0.8, 0.0, false },
-    { "mid walk  F#3..A#3",k_mid,    8, 0.8, 0.0, false },
-    { "high walk E4..C5",  k_high,   8, 0.8, 0.0, false },
-    { "top walk  D5..E5",  k_top,    4, 0.8, 0.0, false },
-    { "repick x8 same deg",k_repick, 8, 0.8, 0.0, false },
-    { "octave leaps",      k_leaps,  5, 0.8, 0.0, false },
-    { "bends +20c off grid",k_bend,  5, 0.8, 0.0, false },
-    { "mid walk + floor noise", k_mid, 8, 0.8, NOISE_DB, false },
-    { "soft picks (vel .12)",   k_soft, 4, 0.8, 0.0, false },
-    { "vibrato +/-30c",    k_vib,    4, 0.8, 0.0, false },
-    { "tremolo 6/s",       k_trem,   8, 0.8, 0.0, false },
-    { "slides (report)",   k_slide,  3, 0.8, 0.0, true  },
-    { "swells (report)",   k_swell,  2, 1.0, 0.0, true  },
-    { "ring-down (report)",k_ring,   2, 3.0, 0.0, true  },
-    { "ring-down + noise (report)", k_ring, 2, 3.0, NOISE_DB, true },
+    { "low walk  E2..C#3", k_low,    8, 0.8, 0.0, false, 0 },
+    { "mid walk  F#3..A#3",k_mid,    8, 0.8, 0.0, false, 0 },
+    { "high walk E4..C5",  k_high,   8, 0.8, 0.0, false, 0 },
+    { "top walk  D5..E5",  k_top,    4, 0.8, 0.0, false, 0 },
+    { "repick x8 same deg",k_repick, 8, 0.8, 0.0, false, 0 },
+    { "octave leaps",      k_leaps,  5, 0.8, 0.0, false, 0 },
+    { "bends +20c off grid",k_bend,  5, 0.8, 0.0, false, 0 },
+    { "mid walk + floor noise", k_mid, 8, 0.8, NOISE_DB, false, 0 },
+    { "soft picks (vel .12)",   k_soft, 4, 0.8, 0.0, false, 0 },
+    { "vibrato +/-30c",    k_vib,    4, 0.8, 0.0, false, 0 },
+    { "tremolo 6/s",       k_trem,   8, 0.8, 0.0, false, 0 },
+    /* legato: a hammer-on / pull-off strikes the NEW note, measured
+       deterministic -- one pick strike plus one transition strike each */
+    { "bend journey +218c",k_bendj,  3, 0.8, 0.0, false, 0 },
+    { "hammer/pull legato",k_leg,    4, 0.8, 0.0, false, 8 },
+    { "slides (report)",   k_slide,  3, 0.8, 0.0, true, 0  },
+    { "swells (report)",   k_swell,  2, 1.0, 0.0, true, 0  },
+    { "ring-down (report)",k_ring,   2, 3.0, 0.0, true, 0  },
+    { "ring-down + noise (report)", k_ring, 2, 3.0, NOISE_DB, true, 0 },
 };
 
 static double note_cents (const GtNote *n, double frac)
 {
-    const double c0 = n->deg * STEP + n->off_cents;
-    const double c1 = n->slide_to * STEP + n->off_cents;
-    const double vib = n->vib_cents != 0.0
-        ? n->vib_cents * sin (2.0 * 3.14159265358979 * 5.5 * frac * n->dur) : 0.0;
-    return c0 + (c1 - c0) * frac + vib;
+    double c = n->deg * STEP + n->off_cents;
+    if (n->leg_frac > 0.0 && frac >= n->leg_frac)
+        c = n->leg_to * STEP + n->off_cents;
+    if (n->slide_to != n->deg)
+        c += (n->slide_to - n->deg) * STEP * frac;
+    if (n->bend_j > 0.0)
+    {
+        const double ph = frac * 4.0;  /* up, hold, release, home */
+        c += n->bend_j * (ph < 1.0 ? ph : ph < 2.0 ? 1.0
+                          : ph < 3.0 ? 3.0 - ph : 0.0);
+    }
+    if (n->vib_cents != 0.0)
+        c += n->vib_cents * sin (2.0 * 3.14159265358979 * 5.5 * frac * n->dur);
+    return c;
 }
 
 static double note_hz (const GtNote *n, double frac)
@@ -302,6 +340,13 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
     {
         const GtNote *n = &S->notes[i];
         const bool sliding = n->slide_to != n->deg;
+        /* moving: the finger is legitimately somewhere else each hop --
+           score against note_cents there, and don't read target-degree
+           changes as flips (following the finger through degrees is the
+           job, not jitter). Vibrato is the exception: it crosses the
+           boundary but the note identity must hold, so its flips COUNT. */
+        const bool moving = n->vib_cents != 0.0 || n->bend_j > 0.0
+                         || n->leg_frac > 0.0;
         const double want = n->deg * STEP + n->off_cents;
         /* settled body: skip the attack and the damp fade. Short notes
            (tremolo) shrink both margins so the window never collapses --
@@ -315,19 +360,27 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
         for (int h = h0; h < h1 && h < hops && ! sliding; ++h)
         {
             if (isnan (det[h])) continue;
-            /* vibrato: the finger IS moving -- score against where it is
-               this hop, not the note's centre */
             const double frac = ((double)(h + 1) * CH / SR - n->start) / n->dur;
-            const double e = det[h] - (n->vib_cents != 0.0
-                                           ? note_cents (n, frac) : want);
+            /* a hammer-on's step is instant but the detector's vote is
+               not -- give it 100 ms around the transition */
+            if (n->leg_frac > 0.0
+                && fabs (frac - n->leg_frac) * n->dur < 0.10) continue;
+            const double e = det[h] - (moving ? note_cents (n, frac) : want);
+            { const char *dmp = getenv ("AE_GT_DUMP");
+              if (dmp && strstr (S->name, dmp))
+                  fprintf (stderr, "%.3f det %7.1f want %7.1f%s\n",
+                           (double)(h + 1) * CH / SR, det[h],
+                           moving ? note_cents (n, frac) : want,
+                           fabs (e) > OCTAVE_CENTS ? "  OCT" : ""); }
             if (fabs (e) > OCTAVE_CENTS) { ++M.oct; continue; }
             if (ne < 512) errs[ne++] = fabs (e);
             if (! isnan (tgt[h]))
             {
                 const int td = (int) lround (tgt[h] / STEP);
-                if (last_tdeg != INT_MIN && td != last_tdeg) ++M.flips;
+                if (last_tdeg != INT_MIN && td != last_tdeg
+                    && ! (n->bend_j > 0.0 || n->leg_frac > 0.0)) ++M.flips;
                 last_tdeg = td;
-                if (n->off_cents == 0.0 && n->vib_cents == 0.0)
+                if (n->off_cents == 0.0 && ! moving)
                 {
                     const double te = tgt[h] - n->deg * STEP;
                     if (fabs (te) < OCTAVE_CENTS && nt < 512)
@@ -377,10 +430,13 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
           bool near = false;
           for (int i = 0; i < S->n && ! near; ++i)
           {
-              const double c0 = S->notes[i].deg * STEP + S->notes[i].off_cents;
-              const double c1 = S->notes[i].slide_to * STEP + S->notes[i].off_cents;
+              const GtNote *sn = &S->notes[i];
+              const double c0 = sn->deg * STEP + sn->off_cents;
+              double c1 = sn->slide_to * STEP + sn->off_cents;
+              if (sn->leg_frac > 0.0) c1 = sn->leg_to * STEP + sn->off_cents;
               const double lo = (c0 < c1 ? c0 : c1) - 100.0;
-              const double hi = (c0 < c1 ? c1 : c0) + 100.0;
+              const double hi = (c0 < c1 ? c1 : c0) + 100.0
+                              + (sn->bend_j > 0.0 ? sn->bend_j : 0.0);
               near = det[h] >= lo && det[h] <= hi;
           }
           if (! near) ++M.ghosts;
@@ -457,7 +513,8 @@ int main (void)
                 if (ndm < 64) dm[ndm++] = m.det_med;
                 if (m.det_max > dmax) dmax = m.det_max;
                 oct += m.oct; flips += m.flips; rest += m.rest_voiced;
-                want_strikes += S->n; strikes += m.strikes;
+                want_strikes += S->want_strikes ? S->want_strikes : S->n;
+                strikes += m.strikes;
                 if (strstr (S->name, "soft")) soft_st = m.strikes;
                 lv += m.lat_voice_ms * m.lat_n; ls += m.lat_strike_ms * m.lat_n;
                 ln += m.lat_n;
@@ -485,8 +542,9 @@ int main (void)
                 m.lat_voice_ms, m.lat_strike_ms,
                 S->report_only ? "  [report only]" : "");
         if (S->report_only) continue;
-        if (m.strikes != S->n)
-            { ++fails; printf ("    FAIL strikes %d != %d\n", m.strikes, S->n); }
+        { const int ws = S->want_strikes ? S->want_strikes : S->n;
+          if (m.strikes != ws)
+            { ++fails; printf ("    FAIL strikes %d != %d\n", m.strikes, ws); } }
         if (m.oct != 0)
             { ++fails; printf ("    FAIL octave misreads %d\n", m.oct); }
         if (m.det_med > BAR_MED_CENTS)
