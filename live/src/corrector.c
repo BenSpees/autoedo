@@ -804,6 +804,9 @@ void ae_corrector_reset (AeCorrector *p)
     atomic_store_explicit (&p->shift_st_min, 0.0f, memory_order_relaxed);
     atomic_store_explicit (&p->shift_st_max, 0.0f, memory_order_relaxed);
     p->atk_fast   = p->atk_slow = 0.0;
+    p->atk_base   = 0.0;
+    p->atk_base_valid = false;
+    p->fresh_pend_n = 0;
     p->atk_refract = 0;
     p->atk_active = 0;
     p->atk_smp    = NULL;
@@ -2044,6 +2047,16 @@ static void detect_onset (AeCorrector *p, int num_samples)
        a re-pick on one ringing string -- is a mono-lead problem. */
     const bool onset_base = ! p->poly && p->atk_base_valid && p->atk_base > 0.0
                          && p->atk_fast > 5.0 * p->atk_base;
+    /* Reviewed for SWELLS (a crescendo is not a pick) and measured clean:
+       the 700 ms creep is self-limiting -- a rise slow enough to be a
+       swell lets the floor keep up under 5x (probed at x5 over 1 s and
+       over 300 ms mid-note: zero pulses), and a rise fast enough to outrun
+       it is an attack, where firing is right. The pulses a from-silence
+       swell does produce come from the LEGACY 2.5x-slow route (4 on a
+       600 ms swell, 3 on a 1.5 s one, probed with this route disabled) and
+       predate it. A rise-time clock was tried here and reverted: it
+       defended nothing these probes could demonstrate and cost 2 of the
+       26 recovered re-picks. */
     p->onset_pulse = false;
     if (p->atk_armed && p->atk_refract <= 0
         && p->atk_fast > 2.0 * GATE (p)
