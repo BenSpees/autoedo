@@ -56,6 +56,9 @@ typedef struct
     bool   let_ring;
     int    slide_to;   /* != deg: resample-ramp there across the note */
     double vel;        /* 0 = default 1.0 */
+    double vib_cents;  /* != 0: +/- this much at 5.5 Hz, finger vibrato */
+    double swell_s;    /* > 0: gain ramps 0 -> vel over this long (volume
+                          swell from silence -- no pick transient at all) */
 } GtNote;
 
 typedef struct
@@ -96,6 +99,8 @@ typedef struct
 #define NRING(d,s,du)    { d, 0.0, s, du, true,  d, 0.0 }
 #define NSLIDE(d,to,s,du){ d, 0.0, s, du, false, to, 0.0 }
 #define NSOFT(d,s,du)    { d, 0.0, s, du, false, d, 0.12 }
+#define NVIB(d,s,du,v)   { d, 0.0, s, du, false, d, 0.0, v, 0.0 }
+#define NSWELL(d,s,du,sw){ d, 0.0, s, du, false, d, 0.0, 0.0, sw }
 
 static const GtNote k_low[]    = { N(-36,0.2,0.5), N(-34,0.95,0.5), N(-32,1.7,0.5), N(-30,2.45,0.5),
                                    N(-28,3.2,0.5), N(-26,3.95,0.5), N(-24,4.7,0.5), N(-22,5.45,0.5) };
@@ -115,6 +120,19 @@ static const GtNote k_soft[]   = { NSOFT(-14,0.2,0.5), NSOFT(-6,0.95,0.5), NSOFT
 static const GtNote k_slide[]  = { NSLIDE(-10,-4,0.2,0.8), NSLIDE(0,6,1.4,0.8),
                                    NSLIDE(8,2,2.6,0.8) };
 static const GtNote k_ring[]   = { NRING(-14,0.2,0.4), NRING(-6,0.9,0.4) };
+/* Finger vibrato at +/-30 c crosses the 22-EDO boundary midpoint (27.25 c):
+   the note identity must hold anyway -- the stickiness question, scored. */
+static const GtNote k_vib[]    = { NVIB(-14,0.2,0.8,30.0), NVIB(-6,1.2,0.8,30.0),
+                                   NVIB(2,2.2,0.8,30.0), NVIB(10,3.2,0.8,30.0) };
+/* Tremolo picking: the same degree at ~6/s, faster than the repick row --
+   every pick must strike (the field's "repeats not retriggering"). */
+static const GtNote k_trem[]   = { N(-6,0.2,0.14), N(-6,0.36,0.14), N(-6,0.52,0.14),
+                                   N(-6,0.68,0.14), N(-6,0.84,0.14), N(-6,1.00,0.14),
+                                   N(-6,1.16,0.14), N(-6,1.32,0.14) };
+/* Volume swells from silence: no pick transient at all. Report-only --
+   the legacy 2.5x onset route fires spurious pulses on these today
+   (measured); the floor route stays quiet. Tracks that behaviour. */
+static const GtNote k_swell[]  = { NSWELL(-10,0.2,1.2,0.6), NSWELL(-2,1.8,2.0,1.5) };
 
 static const GtScore k_scores[] = {
     { "low walk  E2..C#3", k_low,    8, 0.8, 0.0, false },
@@ -126,16 +144,26 @@ static const GtScore k_scores[] = {
     { "bends +20c off grid",k_bend,  5, 0.8, 0.0, false },
     { "mid walk + floor noise", k_mid, 8, 0.8, NOISE_DB, false },
     { "soft picks (vel .12)",   k_soft, 4, 0.8, 0.0, false },
+    { "vibrato +/-30c",    k_vib,    4, 0.8, 0.0, false },
+    { "tremolo 6/s",       k_trem,   8, 0.8, 0.0, false },
     { "slides (report)",   k_slide,  3, 0.8, 0.0, true  },
+    { "swells (report)",   k_swell,  2, 1.0, 0.0, true  },
     { "ring-down (report)",k_ring,   2, 3.0, 0.0, true  },
     { "ring-down + noise (report)", k_ring, 2, 3.0, NOISE_DB, true },
 };
 
-static double note_hz (const GtNote *n, double frac)
+static double note_cents (const GtNote *n, double frac)
 {
     const double c0 = n->deg * STEP + n->off_cents;
     const double c1 = n->slide_to * STEP + n->off_cents;
-    return C4_HZ * pow (2.0, (c0 + (c1 - c0) * frac) / 1200.0);
+    const double vib = n->vib_cents != 0.0
+        ? n->vib_cents * sin (2.0 * 3.14159265358979 * 5.5 * frac * n->dur) : 0.0;
+    return c0 + (c1 - c0) * frac + vib;
+}
+
+static double note_hz (const GtNote *n, double frac)
+{
+    return C4_HZ * pow (2.0, note_cents (n, frac) / 1200.0);
 }
 
 static const AeSampleRec *pick_rec (const AeSampleBank *b, double hz, int rr)
@@ -172,6 +200,11 @@ static void render_note (float *buf, int total, const AeSampleBank *b,
         if (ip + 1 >= r->len) break;
         const double fr = pos - ip;
         double x = g * ((1.0 - fr) * r->pcm[ip] + fr * r->pcm[ip + 1]);
+        if (n->swell_s > 0.0)
+        {
+            const double sw = ((double) i / SR) / n->swell_s;
+            x *= sw < 1.0 ? sw : 1.0;
+        }
         if (! n->let_ring && i > dur - fade)
             x *= (double)(dur - i) / fade;
         buf[s0 + i] += (float) x;
@@ -255,6 +288,9 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
                 ++M.strikes;
                 if (n_strike_t < 256)
                     strike_t[n_strike_t++] = (double)(h + 1) * CH / SR;
+                if (getenv ("AE_GT_STRIKES"))
+                    fprintf (stderr, "  [%s] strike %.3f s\n",
+                             S->name, (double)(h + 1) * CH / SR);
             }
             prevr[sl] = rc; prevp[sl] = ps;
         }
@@ -267,14 +303,23 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
         const GtNote *n = &S->notes[i];
         const bool sliding = n->slide_to != n->deg;
         const double want = n->deg * STEP + n->off_cents;
-        const int h0 = (int)((n->start + 0.12) * SR) / CH;
-        const int h1 = (int)((n->start + n->dur - 0.06) * SR) / CH;
+        /* settled body: skip the attack and the damp fade. Short notes
+           (tremolo) shrink both margins so the window never collapses --
+           an empty window would count as an octave misread below. */
+        const double m0 = n->dur > 0.3 ? 0.12 : n->dur * 0.45;
+        const double m1 = n->dur > 0.3 ? 0.06 : n->dur * 0.25;
+        const int h0 = (int)((n->start + m0) * SR) / CH;
+        const int h1 = (int)((n->start + n->dur - m1) * SR) / CH;
         double errs[512]; int ne = 0; double terrs[512]; int nt = 0;
         int last_tdeg = INT_MIN;
         for (int h = h0; h < h1 && h < hops && ! sliding; ++h)
         {
             if (isnan (det[h])) continue;
-            const double e = det[h] - want;
+            /* vibrato: the finger IS moving -- score against where it is
+               this hop, not the note's centre */
+            const double frac = ((double)(h + 1) * CH / SR - n->start) / n->dur;
+            const double e = det[h] - (n->vib_cents != 0.0
+                                           ? note_cents (n, frac) : want);
             if (fabs (e) > OCTAVE_CENTS) { ++M.oct; continue; }
             if (ne < 512) errs[ne++] = fabs (e);
             if (! isnan (tgt[h]))
@@ -282,7 +327,7 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
                 const int td = (int) lround (tgt[h] / STEP);
                 if (last_tdeg != INT_MIN && td != last_tdeg) ++M.flips;
                 last_tdeg = td;
-                if (n->off_cents == 0.0)
+                if (n->off_cents == 0.0 && n->vib_cents == 0.0)
                 {
                     const double te = tgt[h] - n->deg * STEP;
                     if (fabs (te) < OCTAVE_CENTS && nt < 512)

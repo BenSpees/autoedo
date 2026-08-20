@@ -5028,7 +5028,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->smp_pending[L] = false;
             else if (p->smp_strike_deg_valid
                      && (long long) ldeg == p->smp_strike_deg
-                     && p->smp_strike_ago < (int) (0.250 * p->fs)
+                     && p->smp_strike_ago < (int) (0.120 * p->fs)
                      && p->onset_steep < 1.8)
             {
                 /* The BLOOM of the pick already served, not a new one. A
@@ -5037,11 +5037,17 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                    onset detector after every re-arm gate that would not
                    also eat real tremolo (guitartest low walk: every note
                    below ~170 Hz struck twice at the SAME degree, mid and
-                   up exact). What a bloom cannot fake is the rise shape
-                   the pulse recorded: a pick leaps over its own 12 ms
-                   past -- re-picks on a still-ringing string included --
-                   where a bloom creeps. Same degree, within 250 ms of the
-                   strike, bloom-slow rise: served. */
+                   up exact). The window is 120 ms because every measured
+                   bloom lands within ~100 ms of its strike while tremolo
+                   picking at 6/s re-fires from ~155 ms (guitartest
+                   tremolo: a 250 ms window ate every second pick -- the
+                   steepness escape cannot save them, because a pulse
+                   fired at the very start of a rise reads bloom-slow:
+                   atk_fast is still under the atk_lag the previous tail
+                   left behind). Inside the window the rise shape still
+                   discriminates: a pick that fires late leaps over its
+                   own 12 ms past where a bloom creeps. Same degree,
+                   within 120 ms, bloom-slow rise: served. */
                 p->smp_pending[L] = false;
             }
             else if (hz > 0.0 && p->voiced && p->smp_guard <= 0
@@ -5196,7 +5202,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                     && p->atk_fast > 1.3 * p->atk_slow
                     && ! (p->smp_strike_deg_valid
                           && (long long) ldeg == p->smp_strike_deg
-                          && p->smp_strike_ago < (int) (0.250 * p->fs)
+                          && p->smp_strike_ago < (int) (0.120 * p->fs)
                           && p->onset_steep < 1.8))
                     want = true;
                 p->smp_lead_deg       = ldeg;
