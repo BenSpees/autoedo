@@ -2318,14 +2318,20 @@ static void run_detection (AeCorrector *p)
            at its drooped pitch, and under glide continuity that "note"
            dragged the output down at the glide rate on every release
            (field: "STILL getting the pitch shifts on note releases").
-           A hop more than ~22 dB under the note's own peak is the
+           A hop more than ~14 dB under the note's own peak is the
            ring-down of the note that just ended, whatever YIN thinks.
            The yardstick DECAYS through silence (~2 s) rather than
            expiring on a clock -- tails ring for seconds, and the first
            cut of this gate timed out mid-tail and let the engine
            quantize a -60 c drooped whisper onto the next degree down.
-           A deliberate pianissimo after a rest clears the faded bar. */
-        if (p->note_peak_rms > 0.0 && rms < 0.08 * p->note_peak_rms)
+           A deliberate pianissimo after a rest clears the faded bar.
+           0.20 is the field's chosen point on the measured curve (all
+           six captures, strikes / >90 c in-note glitches): 0.08 ->
+           96/52, 0.15 -> 94/48, 0.20 -> 91/40, 0.28 -> 79/34. What the
+           higher gates eat is specifically soft re-picks INTO a still-
+           ringing string -- clean picks pass the whole scored suite at
+           every value -- so 0.20 buys -23% glitches for -5% of those. */
+        if (p->note_peak_rms > 0.0 && rms < 0.20 * p->note_peak_rms)
         {
             now_voiced = false;
             p->fresh_pend_valid = false;
