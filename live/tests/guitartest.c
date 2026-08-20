@@ -23,18 +23,29 @@
 
    The library is the FAST INNER LOOP; field captures remain the final
    exam. Needs the Xentar wav tree (AE_XENTAR_WAV, or a sibling
-   treeductor checkout); prints SKIPPED and exits 0 without it. Runs at
-   the library's native 48 k. */
+   treeductor checkout); prints SKIPPED and exits 0 without it. Runs
+   every score twice: at the library's native 48 k, then at the stage
+   rig's 96 k against an upsampled bank cached under build/gt96bank
+   (AE_GT_48K_ONLY=1 skips the second pass). */
 
 #include "corrector.h"
 #include "sampler.h"
+#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <limits.h>
 
-#define SR    48000.0
+/* The library is native 48 k; the STAGE RIG runs 96 k with the same
+   256-sample buffer. Both are exercised: pass 1 at 48 k against the wav
+   tree as-is, pass 2 at 96 k against a linearly-upsampled copy cached
+   under build/ -- every ms-based constant in the engine must scale
+   through p->fs, and only a second rate can prove none is a hardcoded
+   sample count. */
+static double g_sr = 48000.0;
+#define SR    g_sr
 #define CH    256
 #define STEP  (1200.0 / 22.0)
 #define C4_HZ 261.6255653006
@@ -46,6 +57,8 @@
 #define BAR_MAX_CENTS   60.0
 #define BAR_TGT_CENTS    3.0
 #define BAR_FLIPS        1     /* per note, settled body */
+#define BAR_LAT_V_MS    80.0   /* mean onset -> first correct voicing */
+#define BAR_LAT_S_MS    90.0   /* mean onset -> first strike */
 #define OCTAVE_CENTS   550.0
 
 typedef struct
@@ -76,6 +89,7 @@ typedef struct
     double        noise_db;    /* 0 = clean */
     bool          report_only;
     int           want_strikes; /* 0 = one per note; else this exactly */
+    double        glide_ms;     /* transition time; 0 = hard corrections */
 } GtScore;
 
 typedef struct
@@ -99,6 +113,9 @@ typedef struct
                           is #69's ring-down ghost, measured directly */
     double lat_voice_ms, lat_strike_ms;  /* means over scored notes */
     int    lat_n;
+    double rec_ms;     /* legato: mean step -> target lands on the new
+                          degree. The #68 axis, measured. */
+    int    rec_n;
 } GtMetrics;
 
 #define N(d,s,du)        { d, 0.0, s, du, false, d, 0.0, 0.0, 0.0, 0.0, 0, 0.0 }
@@ -110,6 +127,7 @@ typedef struct
 #define NSWELL(d,s,du,sw){ d, 0.0, s, du, false, d, 0.0, 0.0, sw, 0.0, 0, 0.0 }
 #define NBENDJ(d,s,du,b) { d, 0.0, s, du, false, d, 0.0, 0.0, 0.0, b, 0, 0.0 }
 #define NLEG(d,to,s,du)  { d, 0.0, s, du, false, d, 0.0, 0.0, 0.0, 0.0, to, 0.5 }
+#define NBENDV(d,s,du,b,v){ d, 0.0, s, du, false, d, 0.0, v, 0.0, b, 0, 0.0 }
 
 static const GtNote k_low[]    = { N(-36,0.2,0.5), N(-34,0.95,0.5), N(-32,1.7,0.5), N(-30,2.45,0.5),
                                    N(-28,3.2,0.5), N(-26,3.95,0.5), N(-24,4.7,0.5), N(-22,5.45,0.5) };
@@ -158,28 +176,142 @@ static const GtNote k_bendj[]  = { NBENDJ(-10,0.2,1.2,4*STEP), NBENDJ(4,1.8,1.2,
    pitch; what the sampler does with it is reported first. */
 static const GtNote k_leg[]    = { NLEG(-14,-10,0.2,0.9), NLEG(-6,-2,1.4,0.9),
                                    NLEG(0,-4,2.6,0.9), NLEG(10,6,3.8,0.9) };
+/* Bend WITH vibrato riding it -- the compound gesture: up a whole step
+   with the finger waving +/-20 c the whole way. */
+static const GtNote k_bendv[]  = { NBENDV(-10,0.2,1.2,4*STEP,20.0),
+                                   NBENDV(4,1.8,1.2,4*STEP,20.0) };
 
 static const GtScore k_scores[] = {
-    { "low walk  E2..C#3", k_low,    8, 0.8, 0.0, false, 0 },
-    { "mid walk  F#3..A#3",k_mid,    8, 0.8, 0.0, false, 0 },
-    { "high walk E4..C5",  k_high,   8, 0.8, 0.0, false, 0 },
-    { "top walk  D5..E5",  k_top,    4, 0.8, 0.0, false, 0 },
-    { "repick x8 same deg",k_repick, 8, 0.8, 0.0, false, 0 },
-    { "octave leaps",      k_leaps,  5, 0.8, 0.0, false, 0 },
-    { "bends +20c off grid",k_bend,  5, 0.8, 0.0, false, 0 },
-    { "mid walk + floor noise", k_mid, 8, 0.8, NOISE_DB, false, 0 },
-    { "soft picks (vel .12)",   k_soft, 4, 0.8, 0.0, false, 0 },
-    { "vibrato +/-30c",    k_vib,    4, 0.8, 0.0, false, 0 },
-    { "tremolo 6/s",       k_trem,   8, 0.8, 0.0, false, 0 },
+    { "low walk  E2..C#3", k_low,    8, 0.8, 0.0, false, 0, 0.0 },
+    { "mid walk  F#3..A#3",k_mid,    8, 0.8, 0.0, false, 0, 0.0 },
+    { "high walk E4..C5",  k_high,   8, 0.8, 0.0, false, 0, 0.0 },
+    { "top walk  D5..E5",  k_top,    4, 0.8, 0.0, false, 0, 0.0 },
+    { "repick x8 same deg",k_repick, 8, 0.8, 0.0, false, 0, 0.0 },
+    { "octave leaps",      k_leaps,  5, 0.8, 0.0, false, 0, 0.0 },
+    { "bends +20c off grid",k_bend,  5, 0.8, 0.0, false, 0, 0.0 },
+    { "mid walk + floor noise", k_mid, 8, 0.8, NOISE_DB, false, 0, 0.0 },
+    { "soft picks (vel .12)",   k_soft, 4, 0.8, 0.0, false, 0, 0.0 },
+    { "vibrato +/-30c",    k_vib,    4, 0.8, 0.0, false, 0, 0.0 },
+    { "tremolo 6/s",       k_trem,   8, 0.8, 0.0, false, 0, 0.0 },
     /* legato: a hammer-on / pull-off strikes the NEW note, measured
        deterministic -- one pick strike plus one transition strike each */
-    { "bend journey +218c",k_bendj,  3, 0.8, 0.0, false, 0 },
-    { "hammer/pull legato",k_leg,    4, 0.8, 0.0, false, 8 },
-    { "slides (report)",   k_slide,  3, 0.8, 0.0, true, 0  },
-    { "swells (report)",   k_swell,  2, 1.0, 0.0, true, 0  },
-    { "ring-down (report)",k_ring,   2, 3.0, 0.0, true, 0  },
-    { "ring-down + noise (report)", k_ring, 2, 3.0, NOISE_DB, true, 0 },
+    { "bend journey +218c",k_bendj,  3, 0.8, 0.0, false, 0, 0.0 },
+    { "hammer/pull legato",k_leg,    4, 0.8, 0.0, false, 8, 0.0 },
+    /* Report-only: at 48 k one of the two notes re-strikes near the bend
+       top (vibrato riding a bend can re-arm the onset Schmitt); at 96 k
+       it does not. Tracked, not barred, until it has a field complaint. */
+    { "bend+vib +218c/20c",k_bendv,  2, 0.8, 0.0, true, 0, 0.0 },
+    /* GLIDE mode (transition 440 ms): the walks' 250 ms damped gaps are
+       the "clear silence" of the design law, so every pick still strikes
+       -- and a hammer-on CONNECTS instead of striking (4, not the hard
+       mode's 8), with the target landing on the new degree in ~37 ms:
+       the design law's two halves, both scored. The recovery number is
+       the #68 axis, measured. */
+    { "mid walk GLIDE 440",k_mid,    8, 0.8, 0.0, false, 0, 440.0 },
+    { "hammer/pull GLIDE", k_leg,    4, 0.8, 0.0, false, 4, 440.0 },
+    { "slides (report)",   k_slide,  3, 0.8, 0.0, true, 0, 0.0 },
+    { "swells (report)",   k_swell,  2, 1.0, 0.0, true, 0, 0.0 },
+    { "ring-down (report)",k_ring,   2, 3.0, 0.0, true, 0, 0.0 },
+    { "ring-down + noise (report)", k_ring, 2, 3.0, NOISE_DB, true, 0, 0.0 },
 };
+
+/* --- The 96 k bank: the wav tree linearly upsampled x2, cached under
+   build/gt96bank so `make test` pays the cost once. 16-bit mono PCM in,
+   the same out at 96000 -- filenames survive, so the loader's pitch
+   parse and zoning land identically. --- */
+
+static short *gt96_read16 (const char *path, int *out_n)
+{
+    FILE *f = fopen (path, "rb");
+    if (f == NULL) return NULL;
+    unsigned char h[12];
+    if (fread (h, 1, 12, f) != 12 || memcmp (h, "RIFF", 4) != 0
+        || memcmp (h + 8, "WAVE", 4) != 0) { fclose (f); return NULL; }
+    long pos = 12; long dsz = 0; int fmt = 0, chans = 0, bits = 0;
+    for (;;)
+    {
+        unsigned char c[8];
+        if (fseek (f, pos, SEEK_SET) != 0 || fread (c, 1, 8, f) != 8) break;
+        const unsigned sz = c[4] | c[5] << 8 | c[6] << 16 | (unsigned) c[7] << 24;
+        if (memcmp (c, "fmt ", 4) == 0)
+        {
+            unsigned char b[16];
+            if (fread (b, 1, 16, f) != 16) { fclose (f); return NULL; }
+            fmt = b[0] | b[1] << 8; chans = b[2] | b[3] << 8;
+            bits = b[14] | b[15] << 8;
+        }
+        else if (memcmp (c, "data", 4) == 0) { dsz = (long) sz; pos += 8; break; }
+        pos += 8 + sz + (sz & 1);
+    }
+    if (fmt != 1 || chans != 1 || bits != 16 || dsz <= 0)
+        { fclose (f); return NULL; }
+    const int n = (int) (dsz / 2);
+    short *s = malloc ((size_t) n * sizeof (short));
+    if (fseek (f, pos, SEEK_SET) != 0
+        || fread (s, 2, (size_t) n, f) != (size_t) n)
+        { free (s); fclose (f); return NULL; }
+    fclose (f);
+    *out_n = n;
+    return s;
+}
+
+static bool gt96_write16 (const char *path, const short *s, int n, int rate)
+{
+    FILE *f = fopen (path, "wb");
+    if (f == NULL) return false;
+    const unsigned dsz = (unsigned) n * 2;
+    unsigned char h[44] = "RIFF____WAVEfmt \x10\0\0\0\x01\0\x01\0";
+    const unsigned riff = 36 + dsz, brate = (unsigned) rate * 2;
+    h[4] = riff & 255; h[5] = riff >> 8 & 255; h[6] = riff >> 16 & 255; h[7] = riff >> 24;
+    h[24] = rate & 255; h[25] = rate >> 8 & 255; h[26] = rate >> 16 & 255; h[27] = 0;
+    h[28] = brate & 255; h[29] = brate >> 8 & 255; h[30] = brate >> 16 & 255; h[31] = 0;
+    h[32] = 2; h[34] = 16;
+    memcpy (h + 36, "data", 4);
+    h[40] = dsz & 255; h[41] = dsz >> 8 & 255; h[42] = dsz >> 16 & 255; h[43] = dsz >> 24;
+    bool ok = fwrite (h, 1, 44, f) == 44
+           && fwrite (s, 2, (size_t) n, f) == (size_t) n;
+    fclose (f);
+    return ok;
+}
+
+static bool gt96_bank (const char *root, char *out, size_t outsz)
+{
+    snprintf (out, outsz, "build/gt96bank");
+    char edir[560];
+    snprintf (edir, sizeof (edir), "%s/electric", out);
+    mkdir ("build", 0755); mkdir (out, 0755); mkdir (edir, 0755);
+    char sdir[560];
+    snprintf (sdir, sizeof (sdir), "%s/electric", root);
+    DIR *d = opendir (sdir);
+    if (d == NULL) return false;
+    struct dirent *e;
+    int ok = 0;
+    while ((e = readdir (d)) != NULL)
+    {
+        const size_t l = strlen (e->d_name);
+        if (l < 5 || strcmp (e->d_name + l - 4, ".wav") != 0) continue;
+        char dst[1120];
+        snprintf (dst, sizeof (dst), "%s/%s", edir, e->d_name);
+        FILE *t = fopen (dst, "rb");
+        if (t != NULL) { fclose (t); ++ok; continue; }
+        char src[1120];
+        snprintf (src, sizeof (src), "%s/%s", sdir, e->d_name);
+        int n = 0;
+        short *s = gt96_read16 (src, &n);
+        if (s == NULL || n < 2) { free (s); continue; }
+        short *u = malloc ((size_t) n * 2 * sizeof (short));
+        for (int i = 0; i < n; ++i)
+        {
+            u[2 * i] = s[i];
+            u[2 * i + 1] = i + 1 < n
+                ? (short) (((int) s[i] + s[i + 1]) / 2) : s[i];
+        }
+        if (gt96_write16 (dst, u, n * 2, 96000)) ++ok;
+        free (s); free (u);
+    }
+    closedir (d);
+    return ok > 0;
+}
 
 static double note_cents (const GtNote *n, double frac)
 {
@@ -288,7 +420,7 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
     ae_corrector_set_edo (p, 22);
     { bool m[22]; for (int d = 0; d < 22; ++d) m[d] = true;
       ae_corrector_set_enabled_degrees (p, m, 22); }
-    ae_corrector_set_transition_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, S->glide_ms);
     ae_corrector_set_retune_ms (p, 0.0);
     ae_corrector_set_stickiness (p, cfg->stickiness);
     if (cfg->gate_db != 0.0)
@@ -413,6 +545,18 @@ static GtMetrics run_score (const GtScore *S, const AeSampleBank *bank,
                 if (strike_t[k] >= n->start - 0.01)
                     { lats += (strike_t[k] - n->start) * 1000.0; break; }
         }
+        /* legato recovery: step -> the target lands on the NEW degree and
+           stays. The #68 axis: how long a mid-note pitch change takes to
+           win the vote, with no pick to help it. */
+        if (n->leg_frac > 0.0)
+        {
+            const double ts = n->start + n->leg_frac * n->dur;
+            for (int h = (int)(ts * SR) / CH; h < hops; ++h)
+                if (! isnan (tgt[h])
+                    && (int) lround (tgt[h] / STEP) == n->leg_to)
+                    { M.rec_ms += ((double)(h + 1) * CH / SR - ts) * 1000.0;
+                      ++M.rec_n; break; }
+        }
         if (! n->let_ring && ! sliding)
         {
             const double rest_end = (i + 1 < S->n)
@@ -528,35 +672,71 @@ int main (void)
         return 0;
     }
 
-    printf ("guitartest: electric bank from %s (%d recs), 22-EDO, "
-            "guitar range\n", root, bank.n_recs);
     int fails = 0;
-    for (int sc = 0; sc < nsc; ++sc)
+    char root96[512];
+    for (int pass = 0; pass < 2; ++pass)
     {
-        const GtScore *S = &k_scores[sc];
-        GtMetrics m = run_score (S, &bank, root, &baseline);
-        printf ("  %-26s notes %2d strikes %2d | det med %5.1fc max %5.1fc "
-                "| tgt %4.1fc | oct %d flip %d | rest %d | lat %4.0f/%4.0f ms%s\n",
-                S->name, S->n, m.strikes, m.det_med, m.det_max, m.tgt_med,
-                m.oct, m.flips, m.rest_voiced + m.ghosts,
-                m.lat_voice_ms, m.lat_strike_ms,
-                S->report_only ? "  [report only]" : "");
-        if (S->report_only) continue;
-        { const int ws = S->want_strikes ? S->want_strikes : S->n;
-          if (m.strikes != ws)
-            { ++fails; printf ("    FAIL strikes %d != %d\n", m.strikes, ws); } }
-        if (m.oct != 0)
-            { ++fails; printf ("    FAIL octave misreads %d\n", m.oct); }
-        if (m.det_med > BAR_MED_CENTS)
-            { ++fails; printf ("    FAIL det median %.1f\n", m.det_med); }
-        if (m.det_max > BAR_MAX_CENTS)
-            { ++fails; printf ("    FAIL det max %.1f\n", m.det_max); }
-        if (m.tgt_med > BAR_TGT_CENTS)
-            { ++fails; printf ("    FAIL target median %.1f\n", m.tgt_med); }
-        if (m.flips > BAR_FLIPS * S->n)
-            { ++fails; printf ("    FAIL target flips %d\n", m.flips); }
-        if (m.rest_voiced > 0)
-            { ++fails; printf ("    FAIL voiced in damped rests %d\n", m.rest_voiced); }
+        const char *proot = root;
+        if (pass == 1)
+        {
+            /* The stage rig's rate. Same scores, same bars: the engine's
+               ms constants must land in the same place through a
+               different p->fs. */
+            if (getenv ("AE_GT_48K_ONLY") != NULL)
+                break;
+            if (! gt96_bank (root, root96, sizeof (root96)))
+            {
+                printf ("guitartest: 96k pass SKIPPED (bank build failed)\n");
+                break;
+            }
+            g_sr = 96000.0;
+            ae_sampler_free (&bank);
+            memset (&bank, 0, sizeof (bank));
+            if (! ae_sampler_load (&bank, root96, "electric", NULL, SR,
+                                   AE_SMP_OCTAVE_AUTO, err, sizeof (err)))
+            {
+                printf ("guitartest: 96k pass SKIPPED (%s)\n", err);
+                break;
+            }
+            proot = root96;
+        }
+        printf ("guitartest: electric bank from %s (%d recs), 22-EDO, "
+                "guitar range, %.0f k\n", proot, bank.n_recs, SR / 1000.0);
+        for (int sc = 0; sc < nsc; ++sc)
+        {
+            const GtScore *S = &k_scores[sc];
+            GtMetrics m = run_score (S, &bank, proot, &baseline);
+            char extra[48] = "";
+            if (m.rec_n > 0)
+                snprintf (extra, sizeof (extra), " | rec %3.0f ms",
+                          m.rec_ms / m.rec_n);
+            printf ("  %-26s notes %2d strikes %2d | det med %5.1fc max %5.1fc "
+                    "| tgt %4.1fc | oct %d flip %d | rest %d | lat %4.0f/%4.0f ms%s%s\n",
+                    S->name, S->n, m.strikes, m.det_med, m.det_max, m.tgt_med,
+                    m.oct, m.flips, m.rest_voiced + m.ghosts,
+                    m.lat_voice_ms, m.lat_strike_ms, extra,
+                    S->report_only ? "  [report only]" : "");
+            if (S->report_only) continue;
+            { const int ws = S->want_strikes ? S->want_strikes : S->n;
+              if (m.strikes != ws)
+                { ++fails; printf ("    FAIL strikes %d != %d\n", m.strikes, ws); } }
+            if (m.oct != 0)
+                { ++fails; printf ("    FAIL octave misreads %d\n", m.oct); }
+            if (m.det_med > BAR_MED_CENTS)
+                { ++fails; printf ("    FAIL det median %.1f\n", m.det_med); }
+            if (m.det_max > BAR_MAX_CENTS)
+                { ++fails; printf ("    FAIL det max %.1f\n", m.det_max); }
+            if (m.tgt_med > BAR_TGT_CENTS)
+                { ++fails; printf ("    FAIL target median %.1f\n", m.tgt_med); }
+            if (m.flips > BAR_FLIPS * S->n)
+                { ++fails; printf ("    FAIL target flips %d\n", m.flips); }
+            if (m.rest_voiced > 0)
+                { ++fails; printf ("    FAIL voiced in damped rests %d\n", m.rest_voiced); }
+            if (m.lat_n > 0 && m.lat_voice_ms > BAR_LAT_V_MS)
+                { ++fails; printf ("    FAIL voicing latency %.0f ms\n", m.lat_voice_ms); }
+            if (m.lat_n > 0 && m.lat_strike_ms > BAR_LAT_S_MS)
+                { ++fails; printf ("    FAIL strike latency %.0f ms\n", m.lat_strike_ms); }
+        }
     }
     ae_sampler_free (&bank);
     printf (fails ? "guitartest: %d FAILURE(S)\n" : "guitartest: ALL OK\n", fails);
