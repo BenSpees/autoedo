@@ -2280,12 +2280,34 @@ static void run_detection (AeCorrector *p)
                                && fabs (dc0 - p->last_note_cents) < 150.0;
         const bool matches_pend = p->fresh_pend_valid
                                && fabs (dc0 - p->fresh_pend_cents) < 150.0;
+        /* An EQUAVE from the note that was just sounding, across a short
+           gap, with nothing picked, is the detector flipping harmonic --
+           not a player leaping an octave in silence. One hop of patience
+           is not enough to tell them apart: YIN holds a sub-octave for two
+           hops readily, which is exactly long enough to satisfy the
+           ordinary confirm, and then that reading BECOMES the note. The
+           true pitch returning a hop later is measured from the wrong
+           anchor and heard as the leap (field captures: +1092.6 c at
+           6.435 s and +1155.6 c at 9.243 s, audible, on notes where no
+           octave was played). So a candidate in that relationship has to
+           hold on longer than a plain one. A real octave re-pick carries
+           its pick and fails the energy test. */
+        const double dlast = p->last_note_valid ? fabs (dc0 - p->last_note_cents)
+                                                : 0.0;
+        const bool equave_flip = p->last_note_valid && p->silence_s < 0.25
+            && p->atk_fast <= 1.3 * p->atk_slow
+            && (fabs (dlast - 1200.0) < 260.0 || fabs (dlast - 1902.0) < 260.0
+                || fabs (dlast - 2400.0) < 260.0);
+        const int need = equave_flip ? 4 : 1;
         if (! matches_last && ! matches_pend)
         {
             p->fresh_pend_cents = dc0;
             p->fresh_pend_valid = true;
+            p->fresh_pend_n     = 0;
             now_voiced = false; /* one hop of patience; junk never confirms */
         }
+        else if (matches_pend && ++p->fresh_pend_n < need)
+            now_voiced = false; /* still on probation */
         else
             p->fresh_pend_valid = false;
     }

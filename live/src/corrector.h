@@ -764,6 +764,11 @@ typedef struct
     double note_peak_rms;        /* the current note's peak frame RMS: a
                                     re-voice ~22 dB under it is the ring-down
                                     of the note that just ended, not a note */
+    int    fresh_pend_n;         /* consecutive hops agreeing with the
+                                    pending fresh-voice candidate: an
+                                    EQUAVE-away candidate has to survive
+                                    longer than an ordinary one before it
+                                    is allowed to BE the note */
     double fresh_pend_cents;     /* fresh-voice confirm: the first voiced hop
                                     after a gap must agree with the pitch it
                                     re-finds or with itself one hop later --
