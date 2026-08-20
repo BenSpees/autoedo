@@ -780,6 +780,8 @@ void ae_corrector_reset (AeCorrector *p)
     p->attack_hold     = 0;
     p->att_hold_recent = 0;
     p->att_hold_j      = 0;
+    p->att_edge_ago    = INT_MAX / 4;
+    p->att_seq_hop     = p->att_seq;
     p->smp_guard          = 0;
     p->smp_lead_deg_valid = false;
     p->smp_gap_smps       = 0;
@@ -899,6 +901,9 @@ void ae_corrector_reset (AeCorrector *p)
     p->slide_was       = false;
     p->revote_hold     = 0;
     p->revote_hop      = false;
+    p->stick_past_s    = 0.0;
+    p->stick_cand      = 0;
+    p->rel_leg_s       = 0.0;
     p->steel_att       = 0;
     p->atk_armed = true;
     p->hold_latched    = false;
@@ -2108,6 +2113,16 @@ static void detect_onset (AeCorrector *p, int num_samples)
         p->attack_hold -= num_samples;
     if (p->att_hold_recent > 0)
         p->att_hold_recent -= num_samples;
+    /* Age of the last attack EDGE of any kind -- the legato admissions ask
+       "did a transient just happen", and a hammer-on's or pull-off's small
+       edge counts exactly like a pick's. */
+    if (p->att_seq != p->att_seq_hop)
+    {
+        p->att_seq_hop  = p->att_seq;
+        p->att_edge_ago = 0;
+    }
+    else if (p->att_edge_ago < INT_MAX / 2)
+        p->att_edge_ago += num_samples;
 
     if (p->vel_win > 0)
     {
@@ -2333,8 +2348,37 @@ static void run_detection (AeCorrector *p)
            every value -- so 0.20 buys -23% glitches for -5% of those. */
         if (p->note_peak_rms > 0.0 && rms < 0.20 * p->note_peak_rms)
         {
-            now_voiced = false;
-            p->fresh_pend_valid = false;
+            /* ...unless this is a LEGATO note. A pull-off leaves the new
+               note sounding well under the PICKED note's yardstick (field
+               capture: 0.19x -- flickering on this very gate), but it is
+               not a tail: a hammer/pull transient just armed an attack
+               edge, the pitch is a real fraction of a step away from the
+               note that was sounding, and there is genuine level under
+               it. A ring-down blink has no fresh edge and re-locks near
+               the old note's own (drooped) pitch; #69's deep ghosts sit
+               under the level floor and their damp's edge is long gone. */
+            const double ref0 = p->ref_hz > 0.0 ? p->ref_hz
+                                                : AE_REFERENCE_C0_HZ;
+            const double lc = 1200.0 * log2 (res.frequency_hz / ref0);
+            const bool legato = p->att_edge_ago < (int) (0.120 * p->fs)
+                && p->last_note_valid
+                && fabs (lc - p->last_note_cents) >= 40.0
+                && rms >= 0.10 * p->note_peak_rms;
+            if (! legato)
+            {
+                now_voiced = false;
+                p->fresh_pend_valid = false;
+            }
+            else
+                /* The legato note takes its OWN yardstick immediately.
+                   The blink-continuation below will read it as the same
+                   note (a pull-off lands well inside the 150 c match),
+                   which keeps the PICKED note's peak as the bar -- and a
+                   pull-off's whole body sits under 0.20x of that, so
+                   every following hop re-tripped this gate and the note
+                   flickered in and out for its whole length (capture:
+                   0.19x for three seconds). */
+                p->note_peak_rms = rms;
         }
     }
     if (now_voiced && ! p->voiced)
@@ -2807,6 +2851,74 @@ static void run_detection (AeCorrector *p)
             }
             else
                 p->rel_fall_pend = false;
+            /* LEGATO breaks it too. A hammer-on or pull-off during a
+               latched "release" is a NOTE the freeze is sitting on: the
+               pitch PARKS a real fraction of a step from the latch point
+               -- where a dying string's droop keeps travelling -- and
+               there is genuine level under it -- where a tail decays
+               away (field: a pull-off's lower note held at 0.19x the
+               picked peak for three seconds while the frozen aim kept
+               sounding the old degree; det sat rock-stable the whole
+               time). The energy-ratio rise test above cannot see it:
+               legato drops energy by nature. Same resume-from-the-
+               frozen-audible idiom as the fall break, so nothing
+               jumps. */
+            if (p->rel_latch)
+            {
+                /* (This whole block runs on voiced hops only; a blink's
+                   unvoiced hops neither advance nor reset the timer, so
+                   the verdict accumulates across the flicker a legato
+                   transition rides in on.) */
+                /* "Parked" cannot be read hop-to-hop: the transition
+                   seam detects BOTH strings and the instantaneous pitch
+                   bounces between them by 30-80 c (capture trace). The
+                   level axis is clean instead -- the pull-off body held
+                   0.67x of the yardstick where a genuinely drooping
+                   tail reads 0.21-0.31x (its yardstick decays WITH it)
+                   -- so: away from the latch point AND loud, with a
+                   distance hysteresis band (30..40 c holds, below 30
+                   resets) so the seam's bounces do not zero the
+                   verdict. */
+                const double leg_dl =
+                    fabs (detected_cents - p->rel_latch_cents);
+                const bool leg_loud = p->note_peak_rms > 0.0
+                    && rms >= 0.45 * p->note_peak_rms;
+                if (leg_dl >= 40.0 && leg_loud)
+                    p->rel_leg_s += elapsed;
+                else if (leg_dl < 30.0 || ! leg_loud)
+                    p->rel_leg_s = 0.0;
+                if (p->rel_leg_s >= 0.12)
+                {
+                    /* The break is a NEW NOTE declaration, not just an
+                       unlatch: with the centre still parked at the OLD
+                       note, expr read -90 c -- "flat of centre while
+                       decaying" -- and the lift face re-latched within
+                       a hop of the first cut of this break, with the
+                       new latch point ON the legato note (trace: dl
+                       collapsed to 0 and the freeze resumed before the
+                       seeker moved at all). The same bookkeeping a
+                       fresh admission does: centre ON the note, fresh
+                       release evidence, its own yardstick. */
+                    p->rel_latch = false;
+                    p->rel_leg_s = 0.0;
+                    const double ride_now =
+                        p->expr_cents * p->expression * p->ride_gain;
+                    p->out_cents = p->rel_out_expr - ride_now;
+                    if (p->glide_pos_valid)
+                        p->glide_pos = p->out_cents;
+                    p->centre_cents = detected_cents;
+                    memset (p->rel_det, 0, sizeof (p->rel_det));
+                    memset (p->rel_rms, 0, sizeof (p->rel_rms));
+                    p->rel_pos        = 0;
+                    p->droop_run      = 0;
+                    p->det_slope_hold = 0.0;
+                    p->rel_note_age   = 0;
+                    p->note_peak_rms  = rms;
+                    p->expr_med_n     = 0;
+                }
+            }
+            else
+                p->rel_leg_s = 0.0;
             p->rel_collapse = inst || p->rel_latch;
             /* ...and it closes a slide that is already open. Gating only
                the REFRESH left a standing slide riding straight through a
@@ -2944,12 +3056,38 @@ static void run_detection (AeCorrector *p)
         /* Stickiness (hysteresis): stay on the previous target until the
            detected pitch has travelled past the midpoint toward the new
            candidate by an extra `stickiness` fraction of the half-gap.
-           Kills degree flicker when the step is smaller than vibrato. */
+           Kills degree flicker when the step is smaller than vibrato.
+
+           ...but hysteresis defends against EXCURSIONS, not against a
+           finger that has ARRIVED. Vibrato crosses the midpoint for
+           ~15 ms at a time and swings back; a legato landing PARKS past
+           it. At stickiness 0.8 the escape zone is the last tenth of
+           the gap -- 5.5 c in 22-EDO -- and a finger that settled 8 c
+           sharp of the destination degree sat outside it for over a
+           second (field: "slide down 2 edo steps, glide gets caught 1
+           edostep down for awhile"). Past the midpoint toward the SAME
+           candidate for ~240 ms -- longer than any vibrato half-cycle
+           -- the note has moved: commit. */
         if (p->target_valid && cand != p->target_j && p->stickiness > 0.0
             && last_ok
             && fabs (steps - (double) p->target_j)
                  < (0.5 + 0.5 * p->stickiness) * fabs ((double) (cand - p->target_j)))
-            cand = p->target_j;
+        {
+            const bool past_mid =
+                fabs (steps - (double) p->target_j)
+                    >= 0.5 * fabs ((double) (cand - p->target_j));
+            if (past_mid && cand == p->stick_cand)
+                p->stick_past_s += elapsed;
+            else
+            {
+                p->stick_cand   = cand;
+                p->stick_past_s = past_mid ? elapsed : 0.0;
+            }
+            if (p->stick_past_s < 0.24)
+                cand = p->target_j;
+        }
+        else
+            p->stick_past_s = 0.0;
 
         /* ATTACK HOLD: a plucked string STARTS SHARP -- tension modulation
            reads +20..+40 cents on the first hops of every pluck, settling

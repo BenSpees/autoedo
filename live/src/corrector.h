@@ -530,6 +530,10 @@ typedef struct
                                laid a second, wrong-register copy over the
                                ringing one (field: "certain sample notes
                                will unexpectedly be much louder") */
+    double rel_leg_s;       /* how long the pitch has been PARKED >= 40 c
+                               from the latch point with real level under
+                               it -- a legato note the release freeze must
+                               hand the seeker back to (see the latch) */
     int    rel_latch_att;   /* att_seq at the latch: a fresh ARMING edge
                                with the envelope genuinely rising is a new
                                attack and reopens tracking */
@@ -693,6 +697,10 @@ typedef struct
                                     target_valid exactly when the hold needs
                                     it, so the hold keeps its own memory */
     int    att_hold_recent;      /* ...valid for this many more samples */
+    int    att_edge_ago;         /* samples since att_seq last advanced --
+                                    "did a hammer/pull/pick transient just
+                                    happen", read by the legato admissions */
+    int    att_seq_hop;          /* att_seq as of the last hop, for ^ */
     int    att_seq;              /* counts attack-hold ARMING EDGES (energy
                                     onset, pitch jump, re-voice): the sample
                                     lead strikes on these too, because the
@@ -1006,6 +1014,12 @@ typedef struct
     double amount;          /* 0..1 partial correction */
     double tolerance_cents; /* dead zone around each lit degree */
     double stickiness;      /* 0..1 hysteresis before re-snapping */
+    double stick_past_s;    /* how long the centre has sat past the MIDPOINT
+                               toward stick_cand while stickiness held the
+                               old degree -- hysteresis defends against
+                               excursions, not against a finger that has
+                               arrived (see the quantize block) */
+    long   stick_cand;      /* the candidate that timer is accumulating for */
     double humanize;        /* 0..1 relaxes retune on sustained notes */
     double ref_hz;          /* frequency of degree 0 (the root anchor) */
     double period_cents;    /* octave size (1200 = true octave) */
