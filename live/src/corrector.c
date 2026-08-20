@@ -2330,6 +2330,20 @@ static void run_detection (AeCorrector *p)
            rather than sliding in from the last one. */
         if (! p->voiced || ! p->primed)
         {
+            /* Is this the same note CONTINUING, or a new one? A voicing
+               blink is not a note end: the gap is milliseconds, the string
+               is still ringing at most of its own peak, and nothing was
+               picked. Ben's law -- "assume heavily the note is continuing;
+               wait for a clear silence before ending the note or
+               retriggering" -- decides the ambiguous case, and the field
+               audio shows what treating a blink as a note end costs: one
+               down-slide was chopped into ten "notes" in half a second,
+               each re-seeking and retriggering, which is the noise that
+               came in with the slide. */
+            const bool continues =
+                p->primed && p->last_note_valid && p->silence_s < 0.12
+                && p->note_peak_rms > 0.0 && rms > 0.25 * p->note_peak_rms
+                && p->atk_fast <= 1.3 * p->atk_slow;
             /* BLINK-RELABEL: a re-lock an EQUAVE away from the note that
                was just sounding, across a short gap, with no attack
                energy behind it, is the same string under a new name --
@@ -2387,8 +2401,19 @@ static void run_detection (AeCorrector *p)
             p->rel_pos        = 0;
             p->droop_run      = 0;
             p->det_slope_hold = 0.0;
-            p->rel_note_age   = 0;
-            p->note_peak_rms  = rms; /* this note's own loudness yardstick */
+            /* A CONTINUATION keeps the note's identity. Resetting the
+               yardstick to the blink's own level is what disarmed the
+               tail gate in the field capture: after a flicker storm
+               note_peak_rms had fallen to 0.003, so 0.08x of it passed
+               anything, and a -56 dB whisper was promoted to a note two
+               octaves up. Keeping the peak (it still decays through real
+               silence) keeps the gate armed, and keeping the age keeps
+               the free-re-seek window shut on a note that never ended. */
+            if (! continues)
+            {
+                p->rel_note_age  = 0;
+                p->note_peak_rms = rms; /* this note's loudness yardstick */
+            }
             p->expr_med_n     = 0;   /* the ride restarts exact */
         }
         else
