@@ -4754,7 +4754,19 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
         f_g    += (f_tgt - f_g) * f_a;
         m_env  += (target - m_env) * (gate ? m_atk : m_rel);
         const long long t_out = block_start + i - p->latency;
+        /* `dry` is the LATENCY-MATCHED history. It exists for the MEL
+           layer, which sums raw dry with its own shifted footages and so
+           must stay phase-honest with them. The passthrough dry below is
+           a different signal and must NOT wear this delay. */
         const float dry = t_out < 0 ? 0.0f : p->in_buf[t_out & p->buf_mask];
+        /* The UNVOICED FALLBACK dry, latency-free: the current input block,
+           straight through. Dry is never summed with the corrected voice --
+           the rig mixes dry with samples, or corrected with samples, never
+           dry with corrected (field) -- so there is no blend to keep in
+           phase here, only a handover, and delaying the player's own signal
+           by the detector's window just to align a handover put 28 ms
+           (96 kHz, balanced) under their hands for nothing. */
+        const float dry_now = p->in_block[i];
         const double wet_only = v_gain * l_env * f_g * p->wet_buf[i];
         if (wet_out != NULL)
             wet_out[i] = (float) wet_only;
@@ -4767,7 +4779,7 @@ static void process_poly (AeCorrector *p, float *mono, float *harm_l,
                                * (wet_only
                                   + (p->lead_source == AE_HARM_SRC_SAMPLE
                                          ? 0.0
-                                         : (1.0 - v_gain) * dry))
+                                         : (1.0 - v_gain) * dry_now))
                            + p->smp_dry_g * p->in_block[i]
                            /* the MEL layer: the preset's share of raw dry
                               (footage only) plus the remodelled sum --
@@ -5268,11 +5280,10 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                                                 memory_order_relaxed),
                    lead_sample, num_samples);
 
-    /* 3. Deliver the corrected voice against the latency-matched dry path.
+    /* 3. Deliver the corrected voice against the LATENCY-FREE dry path.
        A synth lead has no dry component: its "unvoiced" is silence, not the
        raw microphone, which is what makes it a synth lead rather than a
        passthrough with occasional synth. */
-    const long long block_start = p->in_write - num_samples;
     const double gain_alpha = 1.0 - exp (-1.0 / (0.005 * p->fs)); /* ~5 ms crossfade */
     double v_gain = p->v_gain;
 
@@ -5327,9 +5338,13 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
         v_gain += (target - v_gain) * gain_alpha;
         l_env  += (target - l_env) * (p->voiced ? l_atk : l_rel);
 
-        const long long t_out = block_start + i - p->latency;
-        const float dry = (no_dry || t_out < 0)
-                              ? 0.0f : p->in_buf[t_out & p->buf_mask];
+        /* Latency-free passthrough: the player's own signal reaches the
+           output with nothing but the hardware buffer under it. Dry and
+           corrected are never mixed -- only handed over -- so the dry has
+           no partner to stay in phase with (field: "I previously tried to
+           ensure the dry audio would NOT be delayed by pitch detection
+           latency"). */
+        const float dry = no_dry ? 0.0f : p->in_block[i];
         f_g += (f_tgt - f_g) * f_a;
         const double wet_g = (no_dry ? l_env : v_gain * l_env) * f_g;
         const double wet_only = wet_g * p->wet_buf[i];
