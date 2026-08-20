@@ -118,9 +118,20 @@ $(BUILD)/embedtest: tests/embedtest.c src/embed.h $(BUILD)/libautoedo.a
 	$(CXX) $(CXXFLAGS) $(BUILD)/embedtest-main.o $(BUILD)/libautoedo.a \
 	    $(LDLIBS) -lm -lpthread -o $@
 
-test: $(BUILD)/selftest $(BUILD)/embedtest
+# Scored guitar input from the Xentar library through the real detector in
+# 22-EDO (tests/guitartest.c). Skips itself cleanly when the wav tree is
+# absent, so a bare clone still passes `make test`.
+$(BUILD)/guitartest: tests/guitartest.c $(BUILD)/selftest
+	$(CC) $(CFLAGS) -c tests/guitartest.c -o $(BUILD)/guitartest-main.o
+	$(CXX) $(CXXFLAGS) $(BUILD)/guitartest-main.o $(BUILD)/t-yin.o \
+	    $(BUILD)/t-corrector.o $(BUILD)/t-json.o $(BUILD)/t-stub.o $(BUILD)/t-irload.o \
+	    $(BUILD)/t-sampler.o $(BUILD)/t-polyf0.o \
+	    $(BUILD)/shifter.opp $(BUILD)/irconv.opp -lm -lpthread -o $@
+
+test: $(BUILD)/selftest $(BUILD)/embedtest $(BUILD)/guitartest
 	$(BUILD)/selftest
 	$(BUILD)/embedtest
+	$(BUILD)/guitartest
 
 clean:
 	rm -rf $(BUILD)

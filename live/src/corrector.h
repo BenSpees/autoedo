@@ -831,6 +831,15 @@ typedef struct
                                     this, so a served pick's echo dies and a
                                     genuinely swallowed note does not */
     bool   smp_strike_deg_valid;
+    int    smp_strike_ago;       /* samples since that strike (saturating) */
+    double atk_lag;              /* atk_fast through a ~12 ms one-pole: the
+                                    "a moment ago" reference for onset
+                                    steepness */
+    double onset_steep;          /* atk_fast / atk_lag at the last onset
+                                    pulse: a PICK jumps over its own recent
+                                    past (>=2 in milliseconds, re-picks on a
+                                    ringing string included); a low string's
+                                    fundamental BLOOM creeps (~1.3) */
     int    att_seq_seen;         /* lead sampler's read cursor on att_seq */
     bool   atk_armed;            /* Schmitt: a hit fires once per onset EDGE;
                                     re-arms only when the fast/slow ratio

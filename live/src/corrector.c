@@ -806,6 +806,9 @@ void ae_corrector_reset (AeCorrector *p)
     p->atk_fast   = p->atk_slow = 0.0;
     p->atk_base   = 0.0;
     p->atk_base_valid = false;
+    p->atk_lag    = 0.0;
+    p->onset_steep = 99.0;
+    p->smp_strike_ago = INT_MAX / 4;
     p->fresh_pend_n = 0;
     p->atk_refract = 0;
     p->atk_active = 0;
@@ -1998,9 +2001,11 @@ static void detect_onset (AeCorrector *p, int num_samples)
        stands proud of it a third of a second later, short enough that a
        genuinely quieter passage is not measured against an old loud one. */
     const double a_base = 1.0 - exp (-(double) num_samples / (0.700 * p->fs));
+    const double a_lag  = 1.0 - exp (-(double) num_samples / (0.012 * p->fs));
     const double slow_prev = p->atk_slow;
     p->atk_fast += (rms - p->atk_fast) * a_fast;
     p->atk_slow += (rms - p->atk_slow) * a_slow;
+    p->atk_lag  += (p->atk_fast - p->atk_lag) * a_lag;
     if (p->atk_refract > 0)
         p->atk_refract -= num_samples;
 
@@ -2063,6 +2068,8 @@ static void detect_onset (AeCorrector *p, int num_samples)
         && (onset_slow || onset_base))
     {
         p->onset_pulse = true;
+        p->onset_steep = p->atk_lag > GATE (p) * 0.5
+                             ? p->atk_fast / p->atk_lag : 99.0;
         /* The floor rises to meet the pick it just reported. Without this
            it stays down at the pre-pick level while the fast follower sits
            on top of the new note, the ratio never falls, and the detector
@@ -5004,6 +5011,8 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->smp_guard -= num_samples;
         if (p->revote_hold > 0)
             p->revote_hold -= num_samples;
+        if (p->smp_strike_ago < INT_MAX / 2)
+            p->smp_strike_ago += num_samples;
         if (p->onset_pulse)
         {
             p->smp_pending[L] = true;
@@ -5017,6 +5026,24 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
             p->smp_wait[L] -= num_samples;
             if (p->smp_wait[L] <= 0)
                 p->smp_pending[L] = false;
+            else if (p->smp_strike_deg_valid
+                     && (long long) ldeg == p->smp_strike_deg
+                     && p->smp_strike_ago < (int) (0.250 * p->fs)
+                     && p->onset_steep < 1.8)
+            {
+                /* The BLOOM of the pick already served, not a new one. A
+                   low string double-blooms -- scrape first, fundamental
+                   swelling in over ~100 ms -- and the swell re-fires the
+                   onset detector after every re-arm gate that would not
+                   also eat real tremolo (guitartest low walk: every note
+                   below ~170 Hz struck twice at the SAME degree, mid and
+                   up exact). What a bloom cannot fake is the rise shape
+                   the pulse recorded: a pick leaps over its own 12 ms
+                   past -- re-picks on a still-ringing string included --
+                   where a bloom creeps. Same degree, within 250 ms of the
+                   strike, bloom-slow rise: served. */
+                p->smp_pending[L] = false;
+            }
             else if (hz > 0.0 && p->voiced && p->smp_guard <= 0
                      /* ...and once the vote has SETTLED: attacks read
                         SHARP (field), and a strike at the transient's
@@ -5041,6 +5068,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->smp_guard = (int) (0.040 * p->fs);
                 p->smp_strike_deg       = (long long) ldeg;
                 p->smp_strike_deg_valid = ldeg != AE_HARM_DEG_OFF;
+                p->smp_strike_ago       = 0;
             }
         }
 
@@ -5160,11 +5188,16 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                            that would re-attack at glide-off connects
                            instead when the player has asked for glides */
                         && (p->det_slope_hold > 15.0 + 25.0 * glide_bias (p)
-                            || llabs (dstep) >= half_oct))
+                            || llabs (dstep) >= half_oct)
+                       )
                         want_deg = true;
                 }
                 if (p->att_seq != p->att_seq_seen
-                    && p->atk_fast > 1.3 * p->atk_slow)
+                    && p->atk_fast > 1.3 * p->atk_slow
+                    && ! (p->smp_strike_deg_valid
+                          && (long long) ldeg == p->smp_strike_deg
+                          && p->smp_strike_ago < (int) (0.250 * p->fs)
+                          && p->onset_steep < 1.8))
                     want = true;
                 p->smp_lead_deg       = ldeg;
                 p->smp_lead_deg_valid = true;
@@ -5200,6 +5233,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                 p->smp_guard = (int) (0.040 * p->fs);
                 p->smp_strike_deg       = (long long) ldeg;
                 p->smp_strike_deg_valid = true;
+                p->smp_strike_ago       = 0;
                 p->smp_deg_pend         = false; /* nothing owed */
             }
             else if (want_deg && p->smp_guard > 0)
@@ -5243,6 +5277,7 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
                     p->smp_guard = (int) (0.040 * p->fs);
                     p->smp_strike_deg       = (long long) ldeg;
                     p->smp_strike_deg_valid = true;
+                    p->smp_strike_ago       = 0;
                 }
                 p->smp_deg_pend = false;
             }
