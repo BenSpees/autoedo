@@ -1991,6 +1991,10 @@ static void detect_onset (AeCorrector *p, int num_samples)
 
     const double a_fast = 1.0 - exp (-(double) num_samples / (0.003 * p->fs));
     const double a_slow = 1.0 - exp (-(double) num_samples / (0.150 * p->fs));
+    /* The floor creeps back up over ~700 ms: long enough that a pick still
+       stands proud of it a third of a second later, short enough that a
+       genuinely quieter passage is not measured against an old loud one. */
+    const double a_base = 1.0 - exp (-(double) num_samples / (0.700 * p->fs));
     const double slow_prev = p->atk_slow;
     p->atk_fast += (rms - p->atk_fast) * a_fast;
     p->atk_slow += (rms - p->atk_slow) * a_slow;
@@ -2011,15 +2015,50 @@ static void detect_onset (AeCorrector *p, int num_samples)
     /* One pulse per onset EDGE (Schmitt: re-arms only when the fast/slow
        ratio collapses, so a refractory expiring mid-note cannot double). */
     if (! p->atk_armed
-        && (p->atk_fast < 1.2 * p->atk_slow || p->atk_fast < GATE (p)))
+        && (p->atk_fast < 1.2 * p->atk_slow || p->atk_fast < GATE (p)
+            /* ...or the note has decayed back toward its own floor, which
+               is how a ringing string re-arms between picks. */
+            || (! p->poly && p->atk_base_valid && p->atk_base > 0.0
+                && p->atk_fast < 1.5 * p->atk_base)))
         p->atk_armed = true;
 
+    /* The mid-note floor, stepped with the followers above. */
+    if (! p->atk_base_valid) { p->atk_base = p->atk_fast; p->atk_base_valid = true; }
+    else if (p->atk_fast < p->atk_base) p->atk_base = p->atk_fast; /* snap down */
+    else p->atk_base += (p->atk_fast - p->atk_base) * a_base;      /* creep up */
+
+    /* A RE-PICK on a string that is still ringing never clears
+       2.5 x slow_prev -- the ringing note holds slow_prev up, so the
+       detector goes quiet exactly when the player is playing fastest.
+       Field capture of repeated picks at one position: 31 attack edges,
+       4 onset pulses, 9 lead strikes ("repicked, mostly not triggering new
+       notes"). Measured against its own recent FLOOR instead, the same
+       pick is unmistakable -- that capture's rise-over-floor runs 1.56 at
+       the median and over 10 at the 99th percentile. Either route fires;
+       the refractory and the gate still bound both. */
+    const bool onset_slow = p->atk_fast > 2.5 * slow_prev;
+    /* MONO only. In poly the chord sampler owns note starts, and a struck
+       chord's tones beat against each other hard enough to ripple the
+       envelope into something this route reads as re-picks (selftest: one
+       strum held six slots per tone). The problem it exists to solve --
+       a re-pick on one ringing string -- is a mono-lead problem. */
+    const bool onset_base = ! p->poly && p->atk_base_valid && p->atk_base > 0.0
+                         && p->atk_fast > 5.0 * p->atk_base;
     p->onset_pulse = false;
     if (p->atk_armed && p->atk_refract <= 0
         && p->atk_fast > 2.0 * GATE (p)
-        && p->atk_fast > 2.5 * slow_prev)
+        && (onset_slow || onset_base))
     {
         p->onset_pulse = true;
+        /* The floor rises to meet the pick it just reported. Without this
+           it stays down at the pre-pick level while the fast follower sits
+           on top of the new note, the ratio never falls, and the detector
+           re-fires every refractory period -- a machine gun on one strum
+           (selftest: "a struck chord holds exactly one slot per tone" saw
+           six). Raised here, the NEXT pick is measured against this note's
+           own level, and the snap-down during decay keeps following the
+           ring so a pick into a dying string is still heard. */
+        p->atk_base = p->atk_fast;
         ++p->vel_epoch; /* strikes from here belong to THIS onset; the
                            verdict below refines only these */
         /* A new energy edge is a new event: the detector's octave-

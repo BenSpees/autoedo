@@ -668,6 +668,14 @@ typedef struct
     int    atk_len;              /* AE_ATK_LEN_*: noise-burst length */
     double atk_gain;             /* linear; its own volume, no envelope */
     double atk_fast, atk_slow;   /* onset follower (block RMS) */
+    /* The fast follower's own recent FLOOR: it snaps down with the signal
+       and creeps back up slowly, so it tracks "how quiet has this note got
+       lately" rather than "how loud is it on average". A re-pick shows as
+       a jump over THIS, which is what makes it visible while the string is
+       still ringing -- a ratio against atk_slow cannot see it, because the
+       ringing note holds atk_slow up. */
+    double atk_base;
+    bool   atk_base_valid;
     int    atk_refract;          /* samples until the next hit may fire */
     int    attack_hold;          /* post-onset window (samples) in which the
                                     quantizer refuses to move to an ADJACENT
