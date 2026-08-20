@@ -2427,9 +2427,20 @@ static void run_detection (AeCorrector *p)
                an octave and slew back at the glide rate (field: "octaves
                jumping on sustained notes, just in normal playing"). The
                voiced-path re-vote's treatment, extended across a blink;
-               a really picked octave carries its pick and stays a note. */
+               a really picked octave carries its pick and stays a note.
+               "Carries its pick" is tested with the PICK DETECTOR -- an
+               onset pulse within its own 60 ms refractory -- not a raw
+               energy ratio: the harmonic shift that CAUSES the flip
+               also bends the envelope, and a held G3 whose sub-octave
+               artifact faded read fast/slow = 1.95 at the re-lock seam
+               (refineprobe) -- no pick anywhere, yet the old 1.3 bar
+               refused the rebase and the output walked the 1200 c home
+               at the glide rate for 3.7 seconds (#68: "a bad guess
+               initially, and it never corrects"). A pulse-less blink
+               re-lock an equave away is a relabel however the envelope
+               wobbles; a pulse that fired makes it a note. */
             if (p->primed && p->last_note_valid && p->silence_s < 0.25
-                && p->atk_fast <= 1.3 * p->atk_slow)
+                && (p->atk_fast <= 1.3 * p->atk_slow || p->atk_refract <= 0))
             {
                 const double dj  = detected_cents - p->last_note_cents;
                 const double adj = fabs (dj);
