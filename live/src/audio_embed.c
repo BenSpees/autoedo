@@ -70,6 +70,13 @@ struct AeAudioEngine
 int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
                              float *out_r, float *chain, int n)
 {
+    return ae_embed_engine_process_det (e, in, NULL, out_l, out_r, chain, n);
+}
+
+int ae_embed_engine_process_det (AeAudioEngine *e, const float *in,
+                                 const float *det, float *out_l,
+                                 float *out_r, float *chain, int n)
+{
     if (e == NULL || in == NULL || n <= 0)
         return 0;
 
@@ -87,6 +94,8 @@ int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
         const bool  lead   = mix.lead_on;
         const float lead_g = mix.lead_gain;
         const float gain   = mix.master_gain;
+        if (det != NULL)
+            ae_corrector_feed_detect (&e->corrector, det + done, m);
         ae_corrector_process (&e->corrector, e->proc, e->harm_l, e->harm_r, m);
 
         const float *src   = bypass ? e->dry : e->proc;
@@ -298,6 +307,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     }
     out->out_peak = atomic_load_explicit (&e->out_peak, memory_order_relaxed);
     out->voiced   = ae_corrector_voiced (&e->corrector);
+    out->det_di   = ae_corrector_detect_di (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);
     out->trace_len = ae_corrector_trace (&e->corrector, &out->trace_seq,

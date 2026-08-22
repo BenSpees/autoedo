@@ -67,6 +67,15 @@ void ae_embed_destroy (AeEmbed *inst);
 int ae_embed_process (AeEmbed *inst, const float *in, float *out_l,
                       float *out_r, float *chain, int n);
 
+/* As ae_embed_process, plus an optional detect-only DI block (same n;
+   NULL = none). The DI feeds ONLY the pitch detector -- the audible path
+   still renders from `in` -- and detection falls back to `in` by itself
+   when the DI sits silent while `in` is speaking (an unplugged cable
+   must never mute detection). The status echo's `detDi` says which
+   source is naming right now. */
+int ae_embed_process_det (AeEmbed *inst, const float *in, const float *det,
+                          float *out_l, float *out_r, float *chain, int n);
+
 /* CONTROL THREAD. Apply a config body -- the same JSON grammar, clamping
    and restart rules as POST /api/config. */
 void ae_embed_config (AeEmbed *inst, const char *json);

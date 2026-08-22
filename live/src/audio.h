@@ -348,6 +348,7 @@ typedef struct
                                soft clip, linear: > ~0.79 means the clip is
                                shaping the sound */
     bool   voiced;
+    bool   det_di;          /* detector naming from the detect-only DI */
     /* Pitch trace, oldest first: detected (0 = unvoiced) and target per
        detection hop, ending at absolute detection count trace_seq. */
     int      trace_len;
@@ -447,5 +448,13 @@ bool ae_audio_backend_embedded (void);
    Returns frames written. */
 int ae_embed_engine_process (AeAudioEngine *e, const float *in, float *out_l,
                              float *out_r, float *chain, int n);
+
+/* As above, plus an optional detect-only DI block (same n; NULL = none).
+   The DI feeds ONLY the corrector's detector; the audible path renders
+   from `in` exactly as before, and the corrector falls back to `in` by
+   itself when the DI goes silent while `in` is speaking. */
+int ae_embed_engine_process_det (AeAudioEngine *e, const float *in,
+                                 const float *det, float *out_l,
+                                 float *out_r, float *chain, int n);
 
 #endif /* AUTOEDO_AUDIO_H */

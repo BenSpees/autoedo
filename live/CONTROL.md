@@ -855,6 +855,19 @@ Shared-device fine print:
   give each its own `outputChannel` when they should stay on separate
   jacks instead.
 
+## The detect-only DI (embed hosts)
+
+An embed host may feed a SECOND input that drives only the pitch
+detector: `ae_embed_process_det (inst, in, det, ...)`, with `det` the DI
+block (same frame count) or NULL. The audible path always renders from
+`in`; the detector names from the DI whenever it carries the instrument
+-- a clean DI names notes a modeler-processed signal smears -- and falls
+back to `in` by itself when the DI sits silent for ~0.3 s while `in` is
+speaking (an unplugged cable must never mute detection). The status echo
+carries `detDi`: true while the DI is the naming source. Feature-detect
+by the `detDi` key's presence. Mono detection only; POLY keeps reading
+the main input.
+
 ## The local audio tap (`tapUrl`, `tapContent`)
 
 The engine's processed output, published over **loopback UDP** — no cable,

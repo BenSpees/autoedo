@@ -5911,6 +5911,84 @@ static void test_lead_envelope (void)
 
 /* bypassOutput decides what bypass PUTS on the output, and the decision is
    shared by the backends so it can be checked without a device. */
+
+/* Detect-only DI: a second input names the note while the main input
+   renders the sound -- and detection falls back to the main by itself
+   when the DI sits silent while the main is speaking. */
+static void test_detect_di_names_and_falls_back (void)
+{
+    AeCorrector *p = calloc (1, sizeof (AeCorrector));
+    ae_corrector_prepare (p, 48000.0, 512, 78.0, 1400.0, AE_SHIFT_QUALITY_BALANCED);
+    ae_corrector_set_edo (p, 12);
+    ae_corrector_set_retune_ms (p, 0.0);
+    ae_corrector_set_transition_ms (p, 0.0);
+
+    /* Two different notes so which source is NAMING is unambiguous:
+       main carries A3 (220), the DI carries E4 (~330). */
+    const double main_hz = 220.0, di_hz = 329.63;
+    const int total = 48000;
+    float *mn = calloc ((size_t) total, sizeof (float));
+    float *di = calloc ((size_t) total, sizeof (float));
+    double p1 = 0.0, p2 = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        p1 += main_hz / 48000.0;
+        p2 += di_hz / 48000.0;
+        double s1 = 0.0, s2 = 0.0;
+        for (int h = 1; h <= 6; ++h)
+        {
+            s1 += sin (2.0 * M_PI * p1 * h) / h;
+            s2 += sin (2.0 * M_PI * p2 * h) / h;
+        }
+        mn[i] = (float) (0.12 * s1);
+        di[i] = (float) (0.12 * s2);
+    }
+    float blk[512];
+
+    /* 1. DI fed and speaking: the DI names. */
+    for (int off = 0; off < total; off += 512)
+    {
+        ae_corrector_feed_detect (p, di + off, 512);
+        memcpy (blk, mn + off, sizeof (blk));
+        ae_corrector_process (p, blk, NULL, NULL, 512);
+    }
+    double d = (double) atomic_load_explicit (&p->detected_hz_out,
+                                              memory_order_relaxed);
+    CHECK (ae_corrector_detect_di (p),
+           "DI carrying signal is the detection source");
+    CHECK (d > 0.0 && fabs (1200.0 * log2 (d / di_hz)) < 60.0,
+           "the DI's note is the one named (det %.1f Hz vs DI %.1f)", d, di_hz);
+
+    /* 2. DI goes silent while the main keeps speaking: an unplugged cable.
+       Detection returns to the main input within ~0.3 s on its own. */
+    memset (di, 0, (size_t) total * sizeof (float));
+    for (int off = 0; off < total; off += 512)
+    {
+        ae_corrector_feed_detect (p, di + off, 512);
+        memcpy (blk, mn + off, sizeof (blk));
+        ae_corrector_process (p, blk, NULL, NULL, 512);
+    }
+    d = (double) atomic_load_explicit (&p->detected_hz_out,
+                                       memory_order_relaxed);
+    CHECK (! ae_corrector_detect_di (p),
+           "a silent DI under a speaking main falls back to the main");
+    CHECK (d > 0.0 && fabs (1200.0 * log2 (d / main_hz)) < 60.0,
+           "after the fallback the MAIN's note is named (det %.1f Hz)", d);
+
+    /* 3. A host that never feeds the DI costs nothing and never claims it. */
+    ae_corrector_reset (p);
+    for (int off = 0; off < total; off += 512)
+    {
+        memcpy (blk, mn + off, sizeof (blk));
+        ae_corrector_process (p, blk, NULL, NULL, 512);
+    }
+    CHECK (! ae_corrector_detect_di (p),
+           "no DI fed: detection is the main input, flag off");
+
+    ae_corrector_free (p);
+    free (p); free (mn); free (di);
+}
+
 static void test_bypass_output (void)
 {
     AeLiveParams lp;
@@ -6059,6 +6137,7 @@ int main (void)
     test_drone_persists_through_glide();
     test_follow_link();
     test_detection_lock_time();
+    test_detect_di_names_and_falls_back();
     test_onset_clears_continuity();
     test_attack_hold();
     test_release_pitch_stability();

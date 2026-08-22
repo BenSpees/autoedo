@@ -1568,7 +1568,7 @@ static void status_refresh (App *app)
         "\"latencySamples\":%d,\"latencyMs\":%.1f,\"processLatencyMs\":%.1f,"
         "\"deviceLatencyMs\":%.1f,\"totalLatencyMs\":%.1f,"
         "\"detectedHz\":%.4f,\"targetHz\":%.4f,\"shiftSt\":%.2f,\"shiftStMin\":%.2f,\"shiftStMax\":%.2f,"
-        "\"leadMakeupDb\":%.2f,\"outPeakDb\":%.1f,\"voiced\":%s,"
+        "\"leadMakeupDb\":%.2f,\"outPeakDb\":%.1f,\"voiced\":%s,\"detDi\":%s,"
         "\"traceSeq\":%u,\"trace\":%s,"
         "\"harmDeg\":%s,\"midiNotes\":%s,"
         "\"inputName\":\"%s\",\"outputName\":\"%s\","
@@ -1590,6 +1590,7 @@ static void status_refresh (App *app)
         st.lead_makeup > 1e-6f ? 20.0 * log10 ((double) st.lead_makeup) : -120.0,
         st.out_peak    > 1e-6f ? 20.0 * log10 ((double) st.out_peak)    : -120.0,
         st.voiced ? "true" : "false",
+        st.det_di ? "true" : "false",
         st.trace_seq, trace,
         hdeg, midi,
         in_name, out_name,

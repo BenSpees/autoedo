@@ -811,6 +811,7 @@ void ae_audio_engine_get_status (AeAudioEngine *e, AeEngineStatus *out)
     }
     out->out_peak        = atomic_load_explicit (&e->out_peak, memory_order_relaxed);
     out->voiced          = ae_corrector_voiced (&e->corrector);
+    out->det_di          = ae_corrector_detect_di (&e->corrector);
     for (int v = 0; v < AE_HARM_VOICES; ++v)
         out->harm_deg[v] = ae_corrector_harm_degree (&e->corrector, v);
     out->trace_len = ae_corrector_trace (&e->corrector, &out->trace_seq,

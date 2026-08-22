@@ -669,6 +669,8 @@ void ae_corrector_prepare (AeCorrector *p, double sample_rate, int max_block_siz
     free (p->wet_buf);
     free (p->voice_buf);
     p->in_buf    = calloc ((size_t) p->buf_size, sizeof (float));
+    free (p->det_buf);
+    p->det_buf   = calloc ((size_t) p->buf_size, sizeof (float));
     /* The audio log's rolling input ring (~20 s). */
     free (p->dbg_ring);
     p->dbg_len  = (int) (20.0 * p->fs);
@@ -751,6 +753,11 @@ void ae_corrector_reset (AeCorrector *p)
 
     p->in_write        = 0;
     p->last_detect_at  = 0;
+    if (p->det_buf != NULL)
+        memset (p->det_buf, 0, (size_t) p->buf_size * sizeof (float));
+    p->det_write       = 0;
+    p->det_live        = false;
+    p->det_sil_s       = 0.0;
     p->shift_semitones = 0.0;
 
     p->voiced         = false;
@@ -1026,6 +1033,8 @@ void ae_corrector_free (AeCorrector *p)
     free (p->voice_buf);
     free (p->lead_wet);
     p->lead_wet = NULL;
+    free (p->det_buf);
+    p->det_buf = NULL;
     p->in_buf = p->frame = p->in_block = p->wet_buf = p->voice_buf = NULL;
     free (p->mel_sum);
     p->mel_sum = NULL;
@@ -2302,18 +2311,61 @@ void ae_corrector_set_lead_on (AeCorrector *p, bool on)
 static void run_detection (AeCorrector *p)
 {
     const long long start = p->in_write - p->frame_size;
-    double sum = 0.0;
+    const double elapsed = (double) (p->in_write - p->last_detect_at) / p->fs;
+    p->last_detect_at = p->in_write;
+
+    /* Detect-only DI (field ask): when the host fed a DI block for this
+       stretch of input, the detector may name from it instead of the
+       modeler-processed main -- but only while the DI actually carries
+       the instrument. The fallback is the whole point of the law: a DI
+       that sits silent while the MAIN is speaking is an unplugged cable
+       or a dead channel, and after ~0.3 s of that evidence detection
+       returns to the main input by itself. Silence on both says nothing
+       (nobody is playing); the first DI hop with real signal under the
+       main's own level window flips it back on immediately. */
+    const bool have_di = p->det_buf != NULL && p->det_write >= p->in_write
+                      && p->det_write > 0;
+    double main_sum = 0.0, di_sum = 0.0;
     for (int k = 0; k < p->frame_size; ++k)
     {
         const long long idx = start + k;
         const float s = (idx >= 0) ? p->in_buf[idx & p->buf_mask] : 0.0f;
+        main_sum += (double) s * s;
+        if (have_di)
+        {
+            const float d = (idx >= 0) ? p->det_buf[idx & p->buf_mask] : 0.0f;
+            di_sum += (double) d * d;
+        }
+    }
+    const double main_rms = sqrt (main_sum / p->frame_size);
+    const double di_rms   = have_di ? sqrt (di_sum / p->frame_size) : 0.0;
+    if (! have_di)
+    {
+        p->det_live  = false;
+        p->det_sil_s = 0.0;
+    }
+    else if (di_rms > 3.2e-4 && di_rms > 0.02 * main_rms)
+    {
+        p->det_live  = true;  /* the DI is speaking: name from it */
+        p->det_sil_s = 0.0;
+    }
+    else if (main_rms > GATE (p))
+    {
+        p->det_sil_s += elapsed;
+        if (p->det_sil_s > 0.3)
+            p->det_live = false; /* main speaks, DI does not: cable out */
+    }
+    const float *src = p->det_live ? p->det_buf : p->in_buf;
+    double sum = 0.0;
+    for (int k = 0; k < p->frame_size; ++k)
+    {
+        const long long idx = start + k;
+        const float s = (idx >= 0) ? src[idx & p->buf_mask] : 0.0f;
         p->frame[k] = s;
         sum += (double) s * s;
     }
 
-    const double rms     = sqrt (sum / p->frame_size);
-    const double elapsed = (double) (p->in_write - p->last_detect_at) / p->fs;
-    p->last_detect_at = p->in_write;
+    const double rms = sqrt (sum / p->frame_size);
 
     const AeYinResult res = ae_yin_process (&p->detector, p->frame, p->frame_size);
     bool now_voiced = res.voiced && res.frequency_hz > 0.0 && rms > GATE (p);
@@ -5782,6 +5834,17 @@ static void process_chunk (AeCorrector *p, float *mono, float *harm_l,
     if (p->harm_tilt_db != 0.0)
         render_tilt (p, harm_l, harm_r, num_samples);
     apply_harm_master (p, harm_l, harm_r, num_samples);
+}
+
+void ae_corrector_feed_detect (AeCorrector *p, const float *det, int num_samples)
+{
+    if (p->det_buf == NULL || det == NULL || num_samples <= 0)
+        return;
+    for (int i = 0; i < num_samples; ++i)
+    {
+        p->det_buf[p->det_write & p->buf_mask] = det[i];
+        ++p->det_write;
+    }
 }
 
 void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *harm_r,

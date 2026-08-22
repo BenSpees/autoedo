@@ -52,11 +52,17 @@ void ae_embed_destroy (AeEmbed *inst)
 int ae_embed_process (AeEmbed *inst, const float *in, float *out_l,
                       float *out_r, float *chain, int n)
 {
+    return ae_embed_process_det (inst, in, NULL, out_l, out_r, chain, n);
+}
+
+int ae_embed_process_det (AeEmbed *inst, const float *in, const float *det,
+                          float *out_l, float *out_r, float *chain, int n)
+{
     if (inst == NULL || in == NULL || n <= 0)
         return 0;
     AeAudioEngine *e = ae_app_engine_live (inst->app);
     if (e != NULL)
-        return ae_embed_engine_process (e, in, out_l, out_r, chain, n);
+        return ae_embed_engine_process_det (e, in, det, out_l, out_r, chain, n);
     /* No engine (failed start, mid-restart): the PA feed goes silent, the
        chain keeps its instrument. */
     if (out_l != NULL) memset (out_l, 0, (size_t) n * sizeof (float));

@@ -201,6 +201,17 @@ typedef struct
 
     /* Buffers -------------------------------------------------------------- */
     float *in_buf;   /* mono input history: detection source + dry path */
+    /* Detect-only DI (field ask): a second input that feeds ONLY the
+       detector -- a clean DI names notes the modeler-processed main input
+       smears. The output always renders from `in_buf`; this ring exists
+       so run_detection can build its frame from the cleaner signal. The
+       host feeds it with ae_corrector_feed_detect() BEFORE each process
+       call; a host that never feeds it costs nothing. */
+    float     *det_buf;
+    long long  det_write;  /* total DI samples written; trails in_write
+                              when the host stops feeding */
+    bool       det_live;   /* naming from the DI right now (status echo) */
+    double     det_sil_s;  /* DI silent while the main is speaking */
     float *frame;    /* scratch frame for detection */
     float *in_block; /* scratch: this block's input (mono is written in place) */
     float *wet_buf;  /* scratch: corrected block from the shifter */
@@ -1074,6 +1085,13 @@ void ae_corrector_free (AeCorrector *p);
 void ae_corrector_process (AeCorrector *p, float *mono, float *harm_l, float *harm_r,
                        int num_samples);
 
+/* Detect-only DI: feed `num_samples` of the DI channel BEFORE the matching
+   ae_corrector_process() call (same count). The detector names from this
+   signal whenever it carries the instrument, and falls back to the main
+   input by itself when the DI goes silent while the main is speaking --
+   an unplugged cable must never mute detection. Audio-thread safe. */
+void ae_corrector_feed_detect (AeCorrector *p, const float *det, int num_samples);
+
 /* Configure the harmony voices (audio thread, between blocks). */
 void ae_corrector_set_harmony (AeCorrector *p, bool on, int lock,
                            const AeHarmVoice voices[AE_HARM_VOICES]);
@@ -1516,6 +1534,13 @@ static inline float ae_corrector_target_hz (const AeCorrector *p)
 static inline bool ae_corrector_voiced (const AeCorrector *p)
 {
     return atomic_load_explicit (&((AeCorrector *) p)->voiced_out, memory_order_relaxed);
+}
+
+/* Detect-only DI: whether the detector is naming from the DI right now.
+   False when no DI is fed, or the fallback has returned to the main. */
+static inline bool ae_corrector_detect_di (const AeCorrector *p)
+{
+    return p->det_live;
 }
 
 /* Copy the most recent trace points, oldest first: det[i] is the detected
